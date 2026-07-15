@@ -31,14 +31,20 @@ psql_cmd -q -c '
 '
 
 is_applied() {
-  psql_cmd -Atq -v migration="$1" \
-    -c "SELECT 1 FROM monitube_schema_migrations WHERE filename = :'migration' LIMIT 1" \
-    | grep -qx '1'
+  psql_cmd -Atq -c 'SELECT filename FROM monitube_schema_migrations' | grep -Fqx "$1"
+}
+
+sql_literal() {
+  # Migration filenames are committed, predictable inputs, but quote them before
+  # placing them in SQL so the runner stays correct if a future name contains an
+  # apostrophe. Avoid psql variable interpolation here: it is not available for
+  # all command-input paths used by the Alpine image.
+  printf '%s' "$1" | sed "s/'/''/g"
 }
 
 mark_applied() {
-  psql_cmd -q -v migration="$1" \
-    -c "INSERT INTO monitube_schema_migrations (filename) VALUES (:'migration') ON CONFLICT (filename) DO NOTHING"
+  migration_literal=$(sql_literal "$1")
+  psql_cmd -q -c "INSERT INTO monitube_schema_migrations (filename) VALUES ('$migration_literal') ON CONFLICT (filename) DO NOTHING"
 }
 
 has_initial_schema() {
@@ -48,14 +54,15 @@ has_initial_schema() {
 apply_migration() {
   migration_path="$1"
   migration_name="$2"
+  migration_literal=$(sql_literal "$migration_name")
 
   # The migration and its ledger entry commit atomically. Keep committed SQL
   # migrations transaction-safe; a future non-transactional migration needs a
   # dedicated runner change rather than silently weakening this guarantee.
   {
     cat "$migration_path"
-    printf "\nINSERT INTO monitube_schema_migrations (filename) VALUES (:'migration') ON CONFLICT (filename) DO NOTHING;\n"
-  } | psql_cmd --single-transaction -v migration="$migration_name"
+    printf "\nINSERT INTO monitube_schema_migrations (filename) VALUES ('%s') ON CONFLICT (filename) DO NOTHING;\n" "$migration_literal"
+  } | psql_cmd --single-transaction
 }
 
 if [ ! -f /migrations/001_initial_schema.sql ]; then
