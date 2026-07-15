@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@heroicons/react": "^2.2.0",
     "@monitube/contracts": "file:../../packages/contracts",
     "next": "15.5.20",
     "react": "19.1.1",

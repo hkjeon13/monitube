@@ -25,6 +25,10 @@ export interface CollectedVideo {
   viewCount?: number;
   likeCount?: number;
   commentCount?: number;
+  durationSeconds?: number;
+  privacyStatus?: string;
+  madeForKids?: boolean;
+  fetchedAt?: string;
 }
 
 export interface TopWord {
@@ -38,11 +42,21 @@ export interface CommentSummary {
   topWords: TopWord[];
 }
 
+export interface SourceAnalysis {
+  videoCount?: number;
+  commentCount?: number;
+  latestVideoPublishedAt?: string;
+  latestCommentPublishedAt?: string;
+  topWords: TopWord[];
+  generatedAt?: string;
+}
+
 export interface SourceResults {
   source: SourceSummary;
   latestJob?: JobStatus;
   videos: CollectedVideo[];
   commentSummary?: CommentSummary;
+  analysis?: SourceAnalysis;
 }
 
 export interface CollectedComment {
@@ -108,6 +122,10 @@ function asNumber(value: unknown): number | undefined {
     return Number.isFinite(parsed) ? parsed : undefined;
   }
   return undefined;
+}
+
+function asBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
 }
 
 function firstArray(record: Record<string, unknown>, keys: string[]) {
@@ -190,6 +208,18 @@ function normalizeVideo(value: unknown): CollectedVideo | null {
     ...(viewCount === undefined ? {} : { viewCount }),
     ...(likeCount === undefined ? {} : { likeCount }),
     ...(commentCount === undefined ? {} : { commentCount }),
+    ...(asNumber(record.durationSeconds ?? record.duration_seconds) === undefined
+      ? {}
+      : { durationSeconds: asNumber(record.durationSeconds ?? record.duration_seconds) }),
+    ...(asText(record.privacyStatus ?? record.privacy_status)
+      ? { privacyStatus: asText(record.privacyStatus ?? record.privacy_status) }
+      : {}),
+    ...(asBoolean(record.madeForKids ?? record.made_for_kids) === undefined
+      ? {}
+      : { madeForKids: asBoolean(record.madeForKids ?? record.made_for_kids) }),
+    ...(asText(record.fetchedAt ?? record.fetched_at)
+      ? { fetchedAt: asText(record.fetchedAt ?? record.fetched_at) }
+      : {}),
   };
 }
 
@@ -329,6 +359,26 @@ export async function getSourceResults(sourceId: string): Promise<SourceResults>
   const directSummary = normalizeCommentSummary(record.commentSummary ?? record.comment_summary);
   const analysis = asRecord(record.analysis);
   const analysisTopWords = normalizeTopWords(analysis?.topWords ?? analysis?.top_words);
+  const analysisSummary = analysis
+    ? {
+        ...(asNumber(analysis.videoCount ?? analysis.video_count) === undefined
+          ? {}
+          : { videoCount: asNumber(analysis.videoCount ?? analysis.video_count) }),
+        ...(asNumber(analysis.commentCount ?? analysis.comment_count) === undefined
+          ? {}
+          : { commentCount: asNumber(analysis.commentCount ?? analysis.comment_count) }),
+        ...(asText(analysis.latestVideoPublishedAt ?? analysis.latest_video_published_at)
+          ? { latestVideoPublishedAt: asText(analysis.latestVideoPublishedAt ?? analysis.latest_video_published_at) }
+          : {}),
+        ...(asText(analysis.latestCommentPublishedAt ?? analysis.latest_comment_published_at)
+          ? { latestCommentPublishedAt: asText(analysis.latestCommentPublishedAt ?? analysis.latest_comment_published_at) }
+          : {}),
+        topWords: analysisTopWords,
+        ...(asText(analysis.generatedAt ?? analysis.generated_at)
+          ? { generatedAt: asText(analysis.generatedAt ?? analysis.generated_at) }
+          : {}),
+      }
+    : undefined;
   const commentSummary = directSummary
     ? {
         ...directSummary,
@@ -354,6 +404,7 @@ export async function getSourceResults(sourceId: string): Promise<SourceResults>
       return normalized ? [normalized] : [];
     }),
     ...(commentSummary ? { commentSummary } : {}),
+    ...(analysisSummary ? { analysis: analysisSummary } : {}),
   };
 }
 
