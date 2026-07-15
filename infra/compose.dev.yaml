@@ -1,0 +1,27 @@
+# Local-development overlay. Make targets apply this file on top of the
+# production-shaped root compose file so source edits reload without changing
+# the remote deployment contract.
+services:
+  api:
+    command: ["uv", "run", "--no-sync", "--directory", "apps/api", "uvicorn", "monitube_api.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    volumes:
+      - ./apps/api:/workspace/apps/api
+
+  worker:
+    volumes:
+      - ./apps/api:/workspace/apps/api
+      - ./apps/worker:/workspace/apps/worker
+
+  web:
+    environment:
+      NODE_ENV: development
+      WATCHPACK_POLLING: "true"
+    command: ["npm", "run", "dev", "--", "--hostname", "0.0.0.0", "--port", "3000"]
+    volumes:
+      - ./apps/web:/workspace/apps/web
+      # An empty named volume is seeded from the image's node_modules on its
+      # first use, so the source bind mount can still support hot reload.
+      - web_node_modules:/workspace/apps/web/node_modules
+
+volumes:
+  web_node_modules:

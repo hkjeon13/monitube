@@ -1,0 +1,262 @@
+"""Pydantic request/response contracts exposed by the FastAPI application."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Annotated, Any, Literal, TypeAlias
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from .domain import JobState, QuotaBucket, SourceType
+
+
+class ApiModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+
+class HealthResponse(ApiModel):
+    status: Literal["ok"] = "ok"
+    service: Literal["monitube-api"] = "monitube-api"
+
+
+class ChannelResolutionRequest(ApiModel):
+    input: str = Field(min_length=1, max_length=2_048)
+
+
+class ChannelLookup(ApiModel):
+    parameter: Literal["id", "forHandle", "forUsername", "search"]
+    value: str
+
+
+class ChannelResolutionResponse(ApiModel):
+    kind: Literal["channel_id", "handle", "legacy_username", "ambiguous_name"]
+    normalized: str
+    lookup: ChannelLookup
+    requires_search: bool
+
+
+class VideoResolutionRequest(ApiModel):
+    input: str = Field(min_length=1, max_length=2_048)
+
+
+class VideoResolutionResponse(ApiModel):
+    kind: Literal["video_id", "watch_url", "short_url"]
+    normalized: str
+
+
+class ChannelSourceConfig(ApiModel):
+    input: str = Field(min_length=1, max_length=2_048)
+    includeComments: bool = False
+    maxVideos: int = Field(default=50, ge=1, le=5_000)
+    maxCommentPagesPerVideo: int = Field(default=1, ge=1, le=100)
+
+
+class KeywordSourceConfig(ApiModel):
+    query: str = Field(min_length=1, max_length=500)
+    publishedAfter: datetime | None = None
+    publishedBefore: datetime | None = None
+    regionCode: str | None = Field(default=None, min_length=2, max_length=2)
+    relevanceLanguage: str | None = Field(default=None, min_length=2, max_length=16)
+    order: Literal["date", "relevance", "viewCount"] = "date"
+    maxPagesPerRun: int = Field(default=1, ge=1, le=100)
+    includeComments: bool = False
+    maxCommentPagesPerVideo: int = Field(default=1, ge=1, le=100)
+
+    @model_validator(mode="after")
+    def validate_window(self) -> "KeywordSourceConfig":
+        if self.publishedAfter and self.publishedBefore and self.publishedAfter > self.publishedBefore:
+            raise ValueError("publishedAfter must be earlier than publishedBefore")
+        return self
+
+
+class VideoSourceConfig(ApiModel):
+    """One public YouTube video, identified without making a network request."""
+
+    input: str = Field(min_length=1, max_length=2_048)
+    includeComments: bool = False
+    maxCommentPagesPerVideo: int = Field(default=1, ge=1, le=100)
+
+
+SourceConfig = ChannelSourceConfig | KeywordSourceConfig | VideoSourceConfig
+
+
+def parse_source_config(source_type: SourceType, raw_config: dict[str, Any] | BaseModel) -> SourceConfig:
+    """Validate a config using its source type instead of guessing from overlapping fields."""
+
+    payload = raw_config.model_dump(mode="python") if isinstance(raw_config, BaseModel) else raw_config
+    config_model = {
+        SourceType.CHANNEL: ChannelSourceConfig,
+        SourceType.KEYWORD: KeywordSourceConfig,
+        SourceType.VIDEO: VideoSourceConfig,
+    }[source_type]
+    return config_model.model_validate(payload)
+
+
+class ChannelCollectionSourceCreate(ApiModel):
+    type: Literal[SourceType.CHANNEL] = SourceType.CHANNEL
+    config: ChannelSourceConfig
+
+
+class KeywordCollectionSourceCreate(ApiModel):
+    type: Literal[SourceType.KEYWORD] = SourceType.KEYWORD
+    config: KeywordSourceConfig
+
+
+class VideoCollectionSourceCreate(ApiModel):
+    type: Literal[SourceType.VIDEO] = SourceType.VIDEO
+    config: VideoSourceConfig
+
+
+CollectionSourceCreate: TypeAlias = Annotated[
+    ChannelCollectionSourceCreate | KeywordCollectionSourceCreate | VideoCollectionSourceCreate,
+    Field(discriminator="type"),
+]
+
+
+class CollectionSourceUpdate(ApiModel):
+    enabled: bool | None = None
+    config: dict[str, Any] | None = None
+    nextRunAt: datetime | None = None
+
+
+class ChannelCollectionSource(ApiModel):
+    id: str
+    type: Literal[SourceType.CHANNEL] = SourceType.CHANNEL
+    enabled: bool
+    config: ChannelSourceConfig
+    nextRunAt: datetime | None = None
+
+
+class KeywordCollectionSource(ApiModel):
+    id: str
+    type: Literal[SourceType.KEYWORD] = SourceType.KEYWORD
+    enabled: bool
+    config: KeywordSourceConfig
+    nextRunAt: datetime | None = None
+
+
+class VideoCollectionSource(ApiModel):
+    id: str
+    type: Literal[SourceType.VIDEO] = SourceType.VIDEO
+    enabled: bool
+    config: VideoSourceConfig
+    nextRunAt: datetime | None = None
+
+
+CollectionSource: TypeAlias = Annotated[
+    ChannelCollectionSource | KeywordCollectionSource | VideoCollectionSource,
+    Field(discriminator="type"),
+]
+
+
+class JobCreate(ApiModel):
+    include_comments: bool = False
+    max_videos: int | None = Field(default=None, ge=1, le=5_000)
+    max_comments_per_video: int | None = Field(default=None, ge=1, le=100)
+
+
+class JobProgress(ApiModel):
+    completed: int = Field(ge=0)
+    total: int | None = Field(default=None, ge=0)
+    unit: Literal["sources", "pages", "videos", "comments"] = "sources"
+
+
+class PartialError(ApiModel):
+    scope: Literal["channel", "video", "comment", "source"]
+    sourceId: str
+    code: str
+    retryable: bool
+    message: str | None = None
+
+
+class JobStatus(ApiModel):
+    id: str
+    state: JobState
+    currentStage: str
+    progress: JobProgress
+    pauseReason: str | None = None
+    quotaBucket: QuotaBucket | None = None
+    resumeAt: datetime | None = None
+    resumeIsAutomatic: bool = False
+    partialErrors: list[PartialError] = Field(default_factory=list)
+
+
+class VideoStatistics(ApiModel):
+    viewCount: int = Field(default=0, ge=0)
+    likeCount: int = Field(default=0, ge=0)
+    commentCount: int = Field(default=0, ge=0)
+
+
+class CollectedVideo(ApiModel):
+    """Public YouTube data persisted for a collection source."""
+
+    id: str
+    channelId: str | None = None
+    title: str | None = None
+    description: str | None = None
+    publishedAt: datetime | None = None
+    durationSeconds: int | None = Field(default=None, ge=0)
+    privacyStatus: str | None = None
+    madeForKids: bool | None = None
+    statistics: VideoStatistics = Field(default_factory=VideoStatistics)
+    fetchedAt: datetime
+
+
+class CollectedComment(ApiModel):
+    id: str
+    videoId: str
+    parentCommentId: str | None = None
+    threadId: str | None = None
+    text: str | None = None
+    likeCount: int = Field(default=0, ge=0)
+    publishedAt: datetime | None = None
+    updatedAt: datetime | None = None
+    fetchedAt: datetime
+
+
+class TopWord(ApiModel):
+    word: str
+    count: int = Field(ge=1)
+
+
+class CommentSummary(ApiModel):
+    total: int = Field(default=0, ge=0)
+    latestPublishedAt: datetime | None = None
+    topWords: list[TopWord] = Field(default_factory=list)
+
+
+class AnalysisSummary(ApiModel):
+    videoCount: int = Field(default=0, ge=0)
+    commentCount: int = Field(default=0, ge=0)
+    latestVideoPublishedAt: datetime | None = None
+    latestCommentPublishedAt: datetime | None = None
+    topWords: list[TopWord] = Field(default_factory=list)
+    generatedAt: datetime
+
+
+class SourceResultsResponse(ApiModel):
+    source: CollectionSource
+    latestJob: JobStatus | None = None
+    videos: list[CollectedVideo] = Field(default_factory=list)
+    commentSummary: CommentSummary = Field(default_factory=CommentSummary)
+    analysis: AnalysisSummary
+
+
+class VideoCommentsResponse(ApiModel):
+    video: CollectedVideo
+    comments: list[CollectedComment] = Field(default_factory=list)
+    summary: CommentSummary = Field(default_factory=CommentSummary)
+
+
+class JobStateChange(ApiModel):
+    state: JobState
+    current_stage: str | None = Field(default=None, min_length=1, max_length=100)
+    progress_completed: int | None = Field(default=None, ge=0)
+    progress_total: int | None = Field(default=None, ge=0)
+    progress_unit: Literal["sources", "pages", "videos", "comments"] | None = None
+    pause_reason: str | None = Field(default=None, max_length=500)
+    quota_bucket: QuotaBucket | None = None
+    resume_at: datetime | None = None
+    resume_is_automatic: bool | None = None
+    checkpoint: dict[str, Any] | None = None
+    partial_errors: list[PartialError] | None = None
