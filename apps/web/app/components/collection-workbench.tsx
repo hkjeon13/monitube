@@ -27,7 +27,7 @@ import type {
   QuotaEstimate,
   VideoSourceConfig,
 } from "@monitube/contracts";
-import type { ReactNode } from "react";
+import type { MouseEvent, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
@@ -373,6 +373,10 @@ export function CollectionWorkbench() {
   const [activeNav, setActiveNav] = useState<NavItem>("overview");
   const resultsRequest = useRef(0);
   const commentsRequest = useRef(0);
+  const collectionTriggerRef = useRef<HTMLElement | null>(null);
+  const videoTriggerRef = useRef<HTMLElement | null>(null);
+  const collectionDrawerRef = useRef<HTMLElement | null>(null);
+  const videoDrawerRef = useRef<HTMLElement | null>(null);
 
   const requestBody = useMemo(() => sourceRequest(form), [form]);
   const validationError = useMemo(() => validate(requestBody), [requestBody]);
@@ -459,6 +463,30 @@ export function CollectionWorkbench() {
     }
   }, []);
 
+  const restoreFocus = useCallback((trigger: HTMLElement | null) => {
+    window.requestAnimationFrame(() => trigger?.focus());
+  }, []);
+
+  const closeCollectionDrawer = useCallback(() => {
+    setIsCollectionOpen(false);
+    restoreFocus(collectionTriggerRef.current);
+  }, [restoreFocus]);
+
+  const closeVideoDrawer = useCallback(() => {
+    setSelectedVideo(null);
+    restoreFocus(videoTriggerRef.current);
+  }, [restoreFocus]);
+
+  const openCollectionDrawer = (event: MouseEvent<HTMLButtonElement>) => {
+    collectionTriggerRef.current = event.currentTarget;
+    setIsCollectionOpen(true);
+  };
+
+  const openVideoDrawer = useCallback((video: CollectedVideo, trigger: HTMLElement) => {
+    videoTriggerRef.current = trigger;
+    void loadComments(video);
+  }, [loadComments]);
+
   useEffect(() => {
     void refreshSources();
   }, [refreshSources]);
@@ -497,15 +525,56 @@ export function CollectionWorkbench() {
   }, [job, jobSourceId, refreshResults]);
 
   useEffect(() => {
-    if (!isCollectionOpen && !selectedVideo) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      setIsCollectionOpen(false);
-      setSelectedVideo(null);
+    const drawer = isCollectionOpen ? collectionDrawerRef.current : selectedVideo ? videoDrawerRef.current : null;
+    if (!drawer) return;
+
+    const previousOverflow = document.body.style.overflow;
+    const previousOverscrollBehavior = document.body.style.overscrollBehavior;
+    document.body.style.overflow = "hidden";
+    document.body.style.overscrollBehavior = "contain";
+
+    const focusInitialControl = window.requestAnimationFrame(() => {
+      const initialFocusTarget = drawer.querySelector<HTMLElement>("[data-drawer-initial-focus]") ?? drawer;
+      initialFocusTarget.focus();
+    });
+
+    const keepFocusInDrawer = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        if (isCollectionOpen) closeCollectionDrawer();
+        else closeVideoDrawer();
+        return;
+      }
+      if (event.key !== "Tab") return;
+
+      const focusable = Array.from(drawer.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      )).filter((element) => element.getAttribute("aria-hidden") !== "true");
+      if (focusable.length === 0) {
+        event.preventDefault();
+        drawer.focus();
+        return;
+      }
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     };
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [isCollectionOpen, selectedVideo]);
+
+    document.addEventListener("keydown", keepFocusInDrawer);
+    return () => {
+      window.cancelAnimationFrame(focusInitialControl);
+      document.removeEventListener("keydown", keepFocusInDrawer);
+      document.body.style.overflow = previousOverflow;
+      document.body.style.overscrollBehavior = previousOverscrollBehavior;
+    };
+  }, [closeCollectionDrawer, closeVideoDrawer, isCollectionOpen, selectedVideo]);
 
   const loadEstimate = useCallback(async () => {
     if (validationError) {
@@ -549,18 +618,20 @@ export function CollectionWorkbench() {
       setActiveSourceId(source.id);
       setJobSourceId(source.id);
       setJob(response);
-      setIsCollectionOpen(false);
+      closeCollectionDrawer();
       setNotice("수집 작업을 시작했습니다. Overview에서 상태를 자동으로 갱신합니다.");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "수집 작업을 시작하지 못했습니다.");
     } finally {
       setIsStarting(false);
     }
-  }, [estimateMode, requestBody, validationError]);
+  }, [closeCollectionDrawer, estimateMode, requestBody, validationError]);
 
   const navigateTo = (item: NavItem, target: string) => {
     setActiveNav(item);
-    document.getElementById(target)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    const targetElement = document.getElementById(target);
+    targetElement?.scrollIntoView({ behavior: "smooth", block: "start" });
+    targetElement?.focus({ preventScroll: true });
   };
 
   const navigation = [
@@ -584,6 +655,7 @@ export function CollectionWorkbench() {
               key={id}
               className={activeNav === id ? "nav-item nav-item-active" : "nav-item"}
               type="button"
+              aria-label={label}
               aria-current={activeNav === id ? "page" : undefined}
               onClick={() => navigateTo(id, target)}
             >
@@ -603,7 +675,7 @@ export function CollectionWorkbench() {
       </aside>
 
       <main className="dashboard-main">
-        <header className="dashboard-topbar" id="source-selector">
+        <header className="dashboard-topbar" id="source-selector" tabIndex={-1}>
           <label className="source-select">
             <span className="visually-hidden">수집 source 선택</span>
             <FolderIcon aria-hidden="true" />
@@ -632,14 +704,14 @@ export function CollectionWorkbench() {
             >
               <ArrowPathIcon aria-hidden="true" />
             </button>
-            <button className="primary-action" type="button" onClick={() => setIsCollectionOpen(true)}>
+            <button className="primary-action" type="button" onClick={openCollectionDrawer}>
               <PlusIcon aria-hidden="true" />
               새 수집
             </button>
           </div>
         </header>
 
-        <section className="overview-intro" id="overview" aria-labelledby="overview-title">
+        <section className="overview-intro" id="overview" aria-labelledby="overview-title" tabIndex={-1}>
           <div>
             <p className="section-kicker">MONITUBE / ANALYSIS WORKSPACE</p>
             <h1 id="overview-title">Overview</h1>
@@ -663,7 +735,7 @@ export function CollectionWorkbench() {
               <h2 id="empty-overview-title">첫 source를 수집해 보세요.</h2>
               <p>채널, 키워드 또는 단일 동영상을 선택하면 이곳에 동영상·공개 댓글·수집 상태를 정리해 드립니다.</p>
             </div>
-            <button className="primary-action" type="button" onClick={() => setIsCollectionOpen(true)}>
+            <button className="primary-action" type="button" onClick={openCollectionDrawer}>
               <PlusIcon aria-hidden="true" />
               첫 수집 시작
             </button>
@@ -720,6 +792,7 @@ export function CollectionWorkbench() {
                         key={metric}
                         className={viewMetric === metric ? "metric-switch-active" : undefined}
                         type="button"
+                        aria-pressed={viewMetric === metric}
                         onClick={() => setViewMetric(metric)}
                       >
                         {metricLabel(metric)}
@@ -737,7 +810,7 @@ export function CollectionWorkbench() {
                       const percent = Math.max(3, Math.round((amount / rankedMax) * 100));
                       return (
                         <li key={video.id}>
-                          <button type="button" onClick={() => void loadComments(video)}>
+                          <button type="button" onClick={(event) => openVideoDrawer(video, event.currentTarget)}>
                             <span className="ranking-index">{String(index + 1).padStart(2, "0")}</span>
                             <span className="ranking-copy"><strong>{video.title}</strong><small>{formatShortDate(video.publishedAt)}</small></span>
                             <span className="ranking-bar" aria-hidden="true"><span className={index === 0 ? "ranking-bar-highlight" : undefined} style={{ width: `${percent}%` }} /></span>
@@ -752,7 +825,12 @@ export function CollectionWorkbench() {
                 <p className="panel-note">최신 수집 snapshot 기준 · 그래프는 현재 저장된 영상 통계만 사용합니다.</p>
               </section>
 
-              <section className="panel collection-health-panel" id="collection-jobs" aria-labelledby="collection-health-title" aria-live="polite">
+              <section className="panel collection-health-panel" id="collection-jobs" aria-labelledby="collection-health-title" tabIndex={-1}>
+                <p className="visually-hidden" role="status" aria-live="polite">
+                  {activeJob
+                    ? `${statusCopy(activeJob)}. ${stageLabels[activeJob.currentStage] ?? activeJob.currentStage}`
+                    : "수집 기록 없음"}
+                </p>
                 <div className="panel-heading">
                   <div>
                     <p className="section-kicker">COLLECTION HEALTH</p>
@@ -798,7 +876,7 @@ export function CollectionWorkbench() {
                 )}
               </section>
 
-              <section className="panel word-panel" id="insights" aria-labelledby="word-panel-title">
+              <section className="panel word-panel" id="insights" aria-labelledby="word-panel-title" tabIndex={-1}>
                 <div className="panel-heading">
                   <div>
                     <p className="section-kicker">PUBLIC COMMENTS</p>
@@ -839,7 +917,25 @@ export function CollectionWorkbench() {
                 {videos.length === 0 ? (
                   <div className="panel-empty"><p>아직 표시할 저장 동영상이 없습니다. 작업 완료 뒤 결과를 새로고침하세요.</p></div>
                 ) : (
-                  <div className="video-table-wrap">
+                  <>
+                    <ul className="mobile-video-list" aria-label="최근 동영상 목록">
+                      {videos.map((video) => (
+                        <li key={video.id}>
+                          <button type="button" onClick={(event) => openVideoDrawer(video, event.currentTarget)}>
+                            <span className="mobile-video-copy">
+                              <strong>{video.title}</strong>
+                              <small>{formatShortDate(video.publishedAt)}</small>
+                            </span>
+                            <span className="mobile-video-metrics">
+                              <span>조회 <strong>{formatCount(video.viewCount)}</strong></span>
+                              <span>댓글 <strong>{formatCount(video.commentCount)}</strong></span>
+                            </span>
+                            <ChevronRightIcon aria-hidden="true" />
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                    <div className="video-table-wrap">
                     <table className="video-table">
                       <thead>
                         <tr><th scope="col">동영상</th><th scope="col">게시일</th><th scope="col">조회</th><th scope="col">좋아요</th><th scope="col">YouTube 댓글</th><th scope="col"><span className="visually-hidden">상세</span></th></tr>
@@ -852,12 +948,13 @@ export function CollectionWorkbench() {
                             <td>{formatCount(video.viewCount)}</td>
                             <td>{formatCount(video.likeCount)}</td>
                             <td>{formatCount(video.commentCount)}</td>
-                            <td><button className="table-open" type="button" aria-label={`${video.title} 댓글과 상세 보기`} onClick={() => void loadComments(video)}><ChevronRightIcon aria-hidden="true" /></button></td>
+                            <td><button className="table-open" type="button" aria-label={`${video.title} 댓글과 상세 보기`} onClick={(event) => openVideoDrawer(video, event.currentTarget)}><ChevronRightIcon aria-hidden="true" /></button></td>
                           </tr>
                         ))}
                       </tbody>
                     </table>
                   </div>
+                  </>
                 )}
               </section>
             </div>
@@ -872,11 +969,11 @@ export function CollectionWorkbench() {
 
       {isCollectionOpen && (
         <div className="drawer-layer">
-          <button className="drawer-backdrop" type="button" aria-label="새 수집 창 닫기" onClick={() => setIsCollectionOpen(false)} />
-          <aside className="collection-drawer" role="dialog" aria-modal="true" aria-labelledby="collection-drawer-title">
+          <div className="drawer-backdrop" aria-hidden="true" onClick={closeCollectionDrawer} />
+          <aside ref={collectionDrawerRef} className="collection-drawer" role="dialog" aria-modal="true" aria-labelledby="collection-drawer-title" tabIndex={-1}>
             <div className="drawer-heading">
               <div><p className="section-kicker">NEW COLLECTION</p><h2 id="collection-drawer-title">새 수집</h2><p>수집할 대상을 고르고 필요한 범위를 정하세요.</p></div>
-              <button className="icon-button" type="button" aria-label="새 수집 창 닫기" onClick={() => setIsCollectionOpen(false)}><XMarkIcon aria-hidden="true" /></button>
+              <button className="icon-button" type="button" aria-label="새 수집 창 닫기" data-drawer-initial-focus onClick={closeCollectionDrawer}><XMarkIcon aria-hidden="true" /></button>
             </div>
 
             <form className="collection-form" onSubmit={(event) => { event.preventDefault(); void loadEstimate(); }}>
@@ -938,11 +1035,17 @@ export function CollectionWorkbench() {
                     {estimates.map((estimate) => <div key={estimate.bucket}><div><strong>{bucketLabels[estimate.bucket]}</strong><span>{estimate.bucket === "search_queries" ? `${estimate.estimatedCalls} calls 예상` : `${estimate.estimatedUnits} units 예상`}</span></div><strong>{formatCount(estimate.limit)}<small>일일 한도</small></strong></div>)}
                   </div>
                   {estimateWarnings.map((warning) => <p className="estimate-note" key={warning}>{warning}</p>)}
-                  <button className="drawer-start-action" type="button" disabled={isStarting || !estimateMode} onClick={() => void launchJob()}>{isStarting ? "작업을 등록하는 중…" : "수집 작업 시작"}<ChevronRightIcon aria-hidden="true" /></button>
                 </section>
               )}
 
-              <div className="drawer-footer-action"><button className="secondary-action" type="button" onClick={() => setIsCollectionOpen(false)}>취소</button><button className="primary-action" type="submit" disabled={isEstimating}>{isEstimating ? "예상치 계산 중…" : `${sourceName} 예상치 확인`}<ChevronRightIcon aria-hidden="true" /></button></div>
+              <div className="drawer-footer-action">
+                <button className="secondary-action" type="button" onClick={closeCollectionDrawer}>취소</button>
+                {estimateMode ? (
+                  <button className="primary-action drawer-start-action" type="button" disabled={isStarting} onClick={() => void launchJob()}>{isStarting ? "작업을 등록하는 중…" : "수집 작업 시작"}<ChevronRightIcon aria-hidden="true" /></button>
+                ) : (
+                  <button className="primary-action" type="submit" disabled={isEstimating}>{isEstimating ? "예상치 계산 중…" : `${sourceName} 예상치 확인`}<ChevronRightIcon aria-hidden="true" /></button>
+                )}
+              </div>
             </form>
           </aside>
         </div>
@@ -950,9 +1053,9 @@ export function CollectionWorkbench() {
 
       {selectedVideo && (
         <div className="drawer-layer video-drawer-layer">
-          <button className="drawer-backdrop" type="button" aria-label="동영상 상세 창 닫기" onClick={() => setSelectedVideo(null)} />
-          <aside className="video-drawer" role="dialog" aria-modal="true" aria-labelledby="video-drawer-title">
-            <div className="drawer-heading"><div><p className="section-kicker">VIDEO DETAIL</p><h2 id="video-drawer-title">{selectedVideo.title}</h2><p>{selectedVideo.youtubeVideoId}</p></div><button className="icon-button" type="button" aria-label="동영상 상세 창 닫기" onClick={() => setSelectedVideo(null)}><XMarkIcon aria-hidden="true" /></button></div>
+          <div className="drawer-backdrop" aria-hidden="true" onClick={closeVideoDrawer} />
+          <aside ref={videoDrawerRef} className="video-drawer" role="dialog" aria-modal="true" aria-labelledby="video-drawer-title" tabIndex={-1}>
+            <div className="drawer-heading"><div><p className="section-kicker">VIDEO DETAIL</p><h2 id="video-drawer-title">{selectedVideo.title}</h2><p>{selectedVideo.youtubeVideoId}</p></div><button className="icon-button" type="button" aria-label="동영상 상세 창 닫기" data-drawer-initial-focus onClick={closeVideoDrawer}><XMarkIcon aria-hidden="true" /></button></div>
             <dl className="video-meta-grid"><div><dt>게시일</dt><dd>{formatDate(selectedVideo.publishedAt)}</dd></div><div><dt>길이</dt><dd>{formatDuration(selectedVideo.durationSeconds)}</dd></div><div><dt>조회</dt><dd>{formatCount(selectedVideo.viewCount)}</dd></div><div><dt>좋아요</dt><dd>{formatCount(selectedVideo.likeCount)}</dd></div><div><dt>YouTube 댓글</dt><dd>{formatCount(selectedVideo.commentCount)}</dd></div><div><dt>공개 상태</dt><dd>{selectedVideo.privacyStatus ?? "—"}</dd></div></dl>
             <section className="drawer-comments" aria-labelledby="comments-title"><div className="drawer-comments-heading"><div><p className="section-kicker">PUBLIC COMMENTS</p><h3 id="comments-title">수집된 공개 댓글</h3></div><button className="icon-button" type="button" aria-label="댓글 새로고침" disabled={isCommentsLoading} onClick={() => void loadComments(selectedVideo)}><ArrowPathIcon aria-hidden="true" /></button></div>
               {commentsError && <p className="inline-error" role="status">{commentsError}</p>}
