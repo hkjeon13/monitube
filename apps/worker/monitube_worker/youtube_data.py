@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from typing import Any, Callable, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -93,3 +94,42 @@ class YouTubeDataClient:
 
     def comment_threads(self, **params: Any) -> Mapping[str, Any]:
         return self.request("commentThreads", params)
+
+
+class RotatingYouTubeDataClient:
+    """Fail over server-managed keys without ever exposing their values."""
+
+    def __init__(self, api_keys: tuple[str, ...], **kwargs: Any) -> None:
+        if not api_keys:
+            raise ValueError("At least one YouTube API key is required")
+        self._clients = [YouTubeDataClient(key, **kwargs) for key in api_keys]
+        self._fingerprints = [hashlib.sha256(key.encode("utf-8")).hexdigest()[:24] for key in api_keys]
+        self._index = 0
+
+    @property
+    def key_fingerprint(self) -> str:
+        return self._fingerprints[self._index]
+
+    @property
+    def key_count(self) -> int:
+        return len(self._clients)
+
+    @staticmethod
+    def bucket_for(endpoint: str) -> QuotaBucket:
+        return YouTubeDataClient.bucket_for(endpoint)
+
+    @staticmethod
+    def should_failover(error: YouTubeApiError) -> bool:
+        # Resource-level errors (e.g. comments disabled) are not credential
+        # failures. Other quota/auth/rate/transient responses may be mislabeled
+        # upstream, so move to the next server-managed same-project key.
+        return not any(reason in {"commentsDisabled", "videoNotFound"} for reason in error.reasons)
+
+    def rotate(self) -> bool:
+        if self.key_count < 2:
+            return False
+        self._index = (self._index + 1) % self.key_count
+        return True
+
+    def request(self, endpoint: str, params: Mapping[str, Any]) -> Mapping[str, Any]:
+        return self._clients[self._index].request(endpoint, params)

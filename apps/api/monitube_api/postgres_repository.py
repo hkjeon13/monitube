@@ -211,6 +211,34 @@ class PostgresRepository(CollectionRepository):
             )
             return str(cursor.fetchone()["id"])
 
+    def sync_runtime_keys(self, *, runtime_config_id: str, api_keys: tuple[str, ...], encryption_key: str) -> None:
+        with self._connection() as connection, connection.cursor() as cursor:
+            for key in api_keys:
+                fingerprint = hashlib.sha256(key.encode("utf-8")).hexdigest()[:24]
+                cursor.execute(
+                    """
+                    INSERT INTO youtube_runtime_keys (runtime_config_id, key_fingerprint, encrypted_key, status, unavailable_until)
+                    VALUES (%s, %s, pgp_sym_encrypt(%s, %s, 'cipher-algo=aes256,compress-algo=0'), 'active', NULL)
+                    ON CONFLICT (runtime_config_id, key_fingerprint) DO UPDATE
+                    SET encrypted_key = EXCLUDED.encrypted_key, status = 'active', unavailable_until = NULL, updated_at = now()
+                    """,
+                    (runtime_config_id, fingerprint, key, encryption_key),
+                )
+
+    def record_runtime_key_state(self, *, runtime_config_id: str | None, key_fingerprint: str, error_reason: str | None = None) -> None:
+        if not runtime_config_id:
+            return
+        with self._connection() as connection, connection.cursor() as cursor:
+            if error_reason:
+                cursor.execute(
+                    """UPDATE youtube_runtime_keys SET status = 'cooling_down', failure_count = failure_count + 1,
+                       last_error_reason = %s, unavailable_until = now() + (LEAST(3, failure_count + 1) * interval '1 hour'), updated_at = now()
+                       WHERE runtime_config_id = %s AND key_fingerprint = %s""",
+                    (error_reason[:200], runtime_config_id, key_fingerprint),
+                )
+            else:
+                cursor.execute("UPDATE youtube_runtime_keys SET status = 'active', failure_count = 0, last_error_reason = NULL, unavailable_until = NULL, last_used_at = now(), updated_at = now() WHERE runtime_config_id = %s AND key_fingerprint = %s", (runtime_config_id, key_fingerprint))
+
     @staticmethod
     def _select_source(cursor: Any, source_id: str) -> dict[str, Any] | None:
         cursor.execute(

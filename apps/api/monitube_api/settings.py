@@ -12,6 +12,8 @@ from typing import Mapping
 class Settings:
     database_url: str | None
     youtube_api_key: str | None
+    youtube_api_keys: tuple[str, ...]
+    youtube_api_key_encryption_key: str | None
     youtube_api_base_url: str
     youtube_api_timeout_seconds: float
     youtube_api_secret_ref: str
@@ -33,6 +35,12 @@ class Settings:
         def optional(name: str) -> str | None:
             value = values.get(name, "").strip()
             return value or None
+
+        raw_keys = values.get("YOUTUBE_API_KEYS", "")
+        keys = tuple(dict.fromkeys(key.strip() for key in raw_keys.replace("\n", ",").split(",") if key.strip()))
+        legacy_key = optional("YOUTUBE_API_KEY")
+        if legacy_key and legacy_key not in keys:
+            keys = (*keys, legacy_key)
 
         database_url = optional("DATABASE_URL")
         # SQLAlchemy-style URLs are common in existing compose files; psycopg itself
@@ -56,7 +64,9 @@ class Settings:
 
         return cls(
             database_url=database_url,
-            youtube_api_key=optional("YOUTUBE_API_KEY"),
+            youtube_api_key=keys[0] if keys else None,
+            youtube_api_keys=keys,
+            youtube_api_key_encryption_key=optional("YOUTUBE_API_KEY_ENCRYPTION_KEY"),
             youtube_api_base_url=(values.get("YOUTUBE_API_BASE_URL", "").strip() or "https://www.googleapis.com/youtube/v3").rstrip("/"),
             youtube_api_timeout_seconds=positive_float("YOUTUBE_API_TIMEOUT_SECONDS", 20.0),
             youtube_api_secret_ref=values.get("YOUTUBE_API_KEY_SECRET_REF", "env:YOUTUBE_API_KEY").strip() or "env:YOUTUBE_API_KEY",
@@ -80,4 +90,10 @@ def create_repository(settings: Settings):
         secret_ref=settings.youtube_api_secret_ref,
         key_fingerprint=settings.key_fingerprint,
     )
+    if settings.youtube_api_keys and settings.youtube_api_key_encryption_key and hasattr(repository, "sync_runtime_keys"):
+        repository.sync_runtime_keys(
+            runtime_config_id=runtime_config_id,
+            api_keys=settings.youtube_api_keys,
+            encryption_key=settings.youtube_api_key_encryption_key,
+        )
     return repository, runtime_config_id

@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta
+import hashlib
 from threading import RLock
 from typing import Any, Iterable, Protocol
 
@@ -257,6 +258,14 @@ class InMemoryRepository(CollectionRepository):
                 "status": "active",
             }
             return identifier
+
+    def sync_runtime_keys(self, *, runtime_config_id: str, api_keys: tuple[str, ...], encryption_key: str) -> None:
+        # Test repository intentionally retains fingerprints only.
+        for key in api_keys:
+            self._runtime_configs.setdefault(runtime_config_id, {}).setdefault("key_fingerprints", []).append(hashlib.sha256(key.encode()).hexdigest()[:24])
+
+    def record_runtime_key_state(self, *, runtime_config_id: str | None, key_fingerprint: str, error_reason: str | None = None) -> None:
+        return None
 
     def create_source(self, *, source_type: SourceType, config: dict[str, Any]) -> SourceRecord:
         with self._lock:

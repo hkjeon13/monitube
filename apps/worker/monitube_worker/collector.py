@@ -123,17 +123,27 @@ class YouTubeCollector:
             # renewal means another worker reclaimed the job, so do not continue it.
             if not self.repository.renew_job_lease(job_id=job.id, worker_id=job.lease_owner, lease_seconds=self.lease_seconds):
                 raise LeaseLostError("Collection job lease is no longer owned by this worker")
-        try:
-            payload = self.client.request(endpoint, params)
-        except YouTubeApiError as exc:
-            self.repository.record_api_request(
-                job_id=job.id,
-                bucket=exc.bucket,
-                endpoint=endpoint,
-                status_code=exc.status_code,
-                error_reason=exc.reasons[0] if exc.reasons else None,
-            )
-            raise
+        attempts = max(1, int(getattr(self.client, "key_count", 1)))
+        for attempt in range(attempts):
+            fingerprint = getattr(self.client, "key_fingerprint", None)
+            try:
+                payload = self.client.request(endpoint, params)
+                if fingerprint and hasattr(self.repository, "record_runtime_key_state"):
+                    self.repository.record_runtime_key_state(runtime_config_id=job.runtime_config_id, key_fingerprint=fingerprint)
+                break
+            except YouTubeApiError as exc:
+                if fingerprint and hasattr(self.repository, "record_runtime_key_state"):
+                    self.repository.record_runtime_key_state(runtime_config_id=job.runtime_config_id, key_fingerprint=fingerprint, error_reason=exc.reasons[0] if exc.reasons else "upstream_error")
+                if attempt + 1 < attempts and getattr(self.client, "should_failover", lambda _error: False)(exc):
+                    self.client.rotate()
+                    continue
+                self.repository.record_api_request(
+                    job_id=job.id, bucket=exc.bucket, endpoint=endpoint, status_code=exc.status_code,
+                    error_reason=exc.reasons[0] if exc.reasons else None,
+                )
+                raise
+        else:  # pragma: no cover - loop always breaks or raises
+            raise RuntimeError("YouTube key pool exhausted")
         self.repository.record_api_request(
             job_id=job.id,
             bucket=self.client.bucket_for(endpoint),

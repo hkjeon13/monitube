@@ -11,7 +11,7 @@ from monitube_api.settings import Settings, create_repository
 
 from .collector import YouTubeCollector
 from .runner import JobRunner
-from .youtube_data import YouTubeDataClient
+from .youtube_data import RotatingYouTubeDataClient
 
 
 shutdown_requested = Event()
@@ -38,8 +38,8 @@ def main() -> None:
     worker_id = os.getenv("WORKER_ID", f"worker-{os.getpid()}")
     collector = YouTubeCollector(
         repository,
-        YouTubeDataClient(
-            settings.youtube_api_key,
+        RotatingYouTubeDataClient(
+            settings.youtube_api_keys,
             base_url=settings.youtube_api_base_url,
             timeout_seconds=settings.youtube_api_timeout_seconds,
         ),
