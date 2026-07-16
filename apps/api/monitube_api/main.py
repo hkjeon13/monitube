@@ -158,8 +158,11 @@ def create_app(repository: CollectionRepository | None = None, settings: Setting
         return service.list_sources()
 
     @router.get("/explore", response_model=ExploreResponse, tags=["explore"])
-    def explore(service: Service) -> ExploreResponse:
-        return service.explore()
+    def explore(
+        service: Service,
+        channel_id: str | None = Query(default=None, alias="channelId", min_length=1, max_length=64),
+    ) -> ExploreResponse:
+        return service.explore(channel_id=channel_id)
 
     @router.get("/search", response_model=UnifiedSearchResponse, tags=["search"])
     def search_collected(

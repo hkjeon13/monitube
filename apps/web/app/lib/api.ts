@@ -604,8 +604,9 @@ export async function getVideoComments(videoId: string, cursor?: string): Promis
   };
 }
 
-export async function getExplore(): Promise<ExploreData> {
-  const response = await request<unknown>("/v1/explore", { method: "GET" });
+export async function getExplore(channelId?: string): Promise<ExploreData> {
+  const query = channelId ? `?channelId=${encodeURIComponent(channelId)}` : "";
+  const response = await request<unknown>(`/v1/explore${query}`, { method: "GET" });
   const record = asRecord(response);
   return {
     channels: firstArray(record ?? {}, ["channels"]).flatMap((item) => {

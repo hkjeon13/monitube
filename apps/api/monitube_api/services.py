@@ -326,8 +326,8 @@ class CollectionService:
         pin = self.repository.get_target_pin(target_id=target_id)
         return self._pin_contract(pin) if pin else None
 
-    def explore(self) -> ExploreResponse:
-        result = self.repository.list_explore()
+    def explore(self, *, channel_id: str | None = None) -> ExploreResponse:
+        result = self.repository.list_explore(channel_id=channel_id)
         channels = []
         for channel in result["channels"]:
             pin = channel.pop("pin", None)

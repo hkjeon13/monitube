@@ -88,7 +88,7 @@ class CollectionRequestRepository(Protocol):
 
     def dispatch_due_pins(self, *, runtime_config_id: str | None = None, limit: int = 10) -> int: ...
 
-    def list_explore(self, *, limit: int = 60) -> dict[str, Any]: ...
+    def list_explore(self, *, limit: int = 60, channel_id: str | None = None) -> dict[str, Any]: ...
 
     def search_collected(self, *, query: str, limit: int = 20) -> dict[str, Any]: ...
 
@@ -900,7 +900,7 @@ class InMemoryRepository(CollectionRepository):
                 pin["next_run_at"] = now + timedelta(minutes=int(pin["interval_minutes"]))
             return dispatched
 
-    def list_explore(self, *, limit: int = 60) -> dict[str, Any]:
+    def list_explore(self, *, limit: int = 60, channel_id: str | None = None) -> dict[str, Any]:
         with self._lock:
             channels: list[dict[str, Any]] = []
             for channel_id, channel in self._channels.items():
@@ -921,7 +921,8 @@ class InMemoryRepository(CollectionRepository):
                     "targetId": target.id if target else None, "pin": deepcopy(pin) if pin else None,
                 })
             channels.sort(key=lambda item: item["lastFetchedAt"] or utcnow(), reverse=True)
-            videos = sorted(self._videos.values(), key=lambda item: item.source_fetched_at, reverse=True)[:limit]
+            videos = [video for video in self._videos.values() if channel_id is None or video.youtube_channel_id == channel_id]
+            videos = sorted(videos, key=lambda item: item.source_fetched_at, reverse=True)[:limit]
             return {"channels": channels, "videos": videos}
 
     def search_collected(self, *, query: str, limit: int = 20) -> dict[str, Any]:

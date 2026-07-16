@@ -1038,22 +1038,23 @@ class PostgresRepository(CollectionRepository):
                 payload,
             )
             stored = dict(cursor.fetchone())
-            cursor.execute(
-                """
-                INSERT INTO channel_snapshots (channel_id, fetched_at, subscriber_count, view_count, video_count, hidden_subscriber_count)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                ON CONFLICT (channel_id, fetched_at) DO UPDATE SET
-                  subscriber_count = EXCLUDED.subscriber_count, view_count = EXCLUDED.view_count,
-                  video_count = EXCLUDED.video_count, hidden_subscriber_count = EXCLUDED.hidden_subscriber_count
-                """,
-                (
-                    stored["id"], channel["source_fetched_at"],
-                    _optional_nonnegative_int(statistics.get("subscriberCount")),
-                    _optional_nonnegative_int(statistics.get("viewCount")),
-                    _optional_nonnegative_int(statistics.get("videoCount")),
-                    bool(statistics.get("hiddenSubscriberCount")) if statistics.get("hiddenSubscriberCount") is not None else None,
-                ),
-            )
+            if statistics:
+                cursor.execute(
+                    """
+                    INSERT INTO channel_snapshots (channel_id, fetched_at, subscriber_count, view_count, video_count, hidden_subscriber_count)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (channel_id, fetched_at) DO UPDATE SET
+                      subscriber_count = EXCLUDED.subscriber_count, view_count = EXCLUDED.view_count,
+                      video_count = EXCLUDED.video_count, hidden_subscriber_count = EXCLUDED.hidden_subscriber_count
+                    """,
+                    (
+                        stored["id"], channel["source_fetched_at"],
+                        _optional_nonnegative_int(statistics.get("subscriberCount")),
+                        _optional_nonnegative_int(statistics.get("viewCount")),
+                        _optional_nonnegative_int(statistics.get("videoCount")),
+                        bool(statistics.get("hiddenSubscriberCount")) if statistics.get("hiddenSubscriberCount") is not None else None,
+                    ),
+                )
             return stored
 
     def upsert_video(self, video: VideoRecord) -> VideoRecord:
@@ -1431,7 +1432,7 @@ class PostgresRepository(CollectionRepository):
                 )
             return dispatched
 
-    def list_explore(self, *, limit: int = 60) -> dict[str, Any]:
+    def list_explore(self, *, limit: int = 60, channel_id: str | None = None) -> dict[str, Any]:
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -1446,7 +1447,7 @@ class PostgresRepository(CollectionRepository):
                 FROM channels c
                 LEFT JOIN LATERAL (SELECT count(*) AS video_count, max(source_fetched_at) AS last_fetched_at FROM videos WHERE channel_id = c.id) video_counts ON TRUE
                 LEFT JOIN LATERAL (SELECT count(*) AS comment_count FROM comments cm JOIN videos v ON v.id = cm.video_id WHERE v.channel_id = c.id) comment_counts ON TRUE
-                LEFT JOIN LATERAL (SELECT subscriber_count, view_count, video_count, hidden_subscriber_count FROM channel_snapshots WHERE channel_id = c.id ORDER BY fetched_at DESC LIMIT 1) channel_stats ON TRUE
+                LEFT JOIN LATERAL (SELECT subscriber_count, view_count, video_count, hidden_subscriber_count FROM channel_snapshots WHERE channel_id = c.id AND (subscriber_count IS NOT NULL OR view_count IS NOT NULL OR video_count IS NOT NULL OR hidden_subscriber_count IS NOT NULL) ORDER BY fetched_at DESC LIMIT 1) channel_stats ON TRUE
                 LEFT JOIN collection_targets target ON target.resolved_channel_id = c.id
                 LEFT JOIN collection_target_pins pin ON pin.target_id = target.id
                 ORDER BY GREATEST(c.source_fetched_at, video_counts.last_fetched_at) DESC NULLS LAST, c.title
@@ -1465,9 +1466,10 @@ class PostgresRepository(CollectionRepository):
                        jsonb_build_object('viewCount', COALESCE(stats.view_count, 0), 'likeCount', COALESCE(stats.like_count, 0), 'commentCount', COALESCE(stats.comment_count, 0)) AS statistics
                 FROM videos v LEFT JOIN channels c ON c.id = v.channel_id
                 LEFT JOIN LATERAL (SELECT view_count, like_count, comment_count FROM video_stat_snapshots WHERE video_id = v.id ORDER BY fetched_at DESC LIMIT 1) stats ON TRUE
+                WHERE (%s IS NULL OR c.youtube_channel_id = %s)
                 ORDER BY v.source_fetched_at DESC NULLS LAST, v.published_at DESC NULLS LAST LIMIT %s
                 """,
-                (limit,),
+                (channel_id, channel_id, 10_000 if channel_id else limit),
             )
             return {"channels": channels, "videos": [self._video(row) for row in cursor.fetchall()]}
 

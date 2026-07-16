@@ -565,11 +565,11 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     }
   }, []);
 
-  const refreshExplore = useCallback(async () => {
+  const refreshExplore = useCallback(async (channelId?: string | null) => {
     setIsExploreLoading(true);
     setExploreError(null);
     try {
-      setExplore(await getExplore());
+      setExplore(await getExplore(channelId ?? undefined));
     } catch (caught) {
       setExploreError(caught instanceof Error ? caught.message : "Explore 라이브러리를 불러오지 못했습니다.");
     } finally {
@@ -609,14 +609,14 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     setPinningTargetId(targetId);
     try {
       await updateTargetPin(targetId, { enabled: !pinned, intervalMinutes: 360 });
-      await refreshExplore();
+      await refreshExplore(exploreChannelId);
       setNotice(pinned ? "자동 갱신을 멈췄습니다. 저장된 데이터는 유지됩니다." : "핀을 설정했습니다. 6시간마다 신규 영상과 댓글을 확인합니다.");
     } catch (caught) {
       setExploreError(caught instanceof Error ? caught.message : "핀 상태를 변경하지 못했습니다.");
     } finally {
       setPinningTargetId(null);
     }
-  }, [refreshExplore]);
+  }, [exploreChannelId, refreshExplore]);
 
   const removeSource = useCallback(async (source: SourceSummary) => {
     const confirmed = window.confirm(`“${sourceLabel(source)}” 수집 대상을 삭제할까요? 자동 수집은 중지되지만 이미 저장된 채널·영상·댓글 데이터는 Explore에서 유지됩니다.`);
@@ -629,14 +629,14 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
         setActiveSourceId("");
         setSourceResults(null);
       }
-      await Promise.all([refreshSources(), refreshExplore()]);
+      await Promise.all([refreshSources(), refreshExplore(exploreChannelId)]);
       setNotice("수집 대상과 자동 갱신을 삭제했습니다. 저장된 공개 데이터는 유지됩니다.");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "수집 대상을 삭제하지 못했습니다.");
     } finally {
       setDeletingSourceId(null);
     }
-  }, [activeSourceId, refreshExplore, refreshSources]);
+  }, [activeSourceId, exploreChannelId, refreshExplore, refreshSources]);
 
   const loadComments = useCallback(async (video: CollectedVideo, cursor?: string) => {
     const requestId = ++commentsRequest.current;
@@ -707,8 +707,8 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   }, [requestedSourceId, sources]);
 
   useEffect(() => {
-    void refreshExplore();
-  }, [refreshExplore]);
+    void refreshExplore(exploreChannelId);
+  }, [exploreChannelId, refreshExplore]);
 
   useEffect(() => {
     const sentinel = exploreLoadMoreRef.current;
@@ -742,14 +742,14 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
         setJob(nextJob);
         setJobSourceId(sourceId);
         await refreshResults(sourceId);
-        if (isTerminalJob(nextJob)) void refreshExplore();
+        if (isTerminalJob(nextJob)) void refreshExplore(exploreChannelId);
       } catch {
         // Keep the last valid state visible through a transient polling failure.
       }
     };
     const timer = window.setInterval(() => { void poll(); }, 5_000);
     return () => window.clearInterval(timer);
-  }, [activeJob, activeSourceId, refreshExplore, refreshResults]);
+  }, [activeJob, activeSourceId, exploreChannelId, refreshExplore, refreshResults]);
 
   useEffect(() => {
     if (jobSourceId && isTerminalJob(job)) void refreshResults(jobSourceId);
