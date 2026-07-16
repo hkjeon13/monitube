@@ -219,6 +219,12 @@ class ExploreResponse(ApiModel):
     videos: list["CollectedVideo"] = Field(default_factory=list)
 
 
+class ChannelSubscriberSnapshot(ApiModel):
+    fetchedAt: datetime
+    subscriberCount: int | None = Field(default=None, ge=0)
+    hiddenSubscriberCount: bool | None = None
+
+
 class SearchVideoResult(ApiModel):
     video: "CollectedVideo"
     score: float = Field(ge=0, le=1)

@@ -9,6 +9,7 @@ from .contracts import (
     ChannelLookup,
     ChannelCollectionSource,
     ChannelResolutionResponse,
+    ChannelSubscriberSnapshot,
     AnalysisSummary,
     CollectedComment,
     CollectedVideo,
@@ -333,6 +334,9 @@ class CollectionService:
             pin = channel.pop("pin", None)
             channels.append({**channel, "pin": self._pin_contract(pin) if pin else None})
         return ExploreResponse(channels=channels, videos=[_video_contract(video) for video in result["videos"]])
+
+    def channel_subscriber_history(self, youtube_channel_id: str) -> list[ChannelSubscriberSnapshot]:
+        return [ChannelSubscriberSnapshot.model_validate(item) for item in self.repository.list_channel_subscriber_history(youtube_channel_id=youtube_channel_id)]
 
     def search_collected(self, query: str, *, limit: int = 20) -> UnifiedSearchResponse:
         result = self.repository.search_collected(query=query, limit=limit)

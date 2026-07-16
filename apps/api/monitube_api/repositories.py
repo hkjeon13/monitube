@@ -90,6 +90,8 @@ class CollectionRequestRepository(Protocol):
 
     def list_explore(self, *, limit: int = 60, channel_id: str | None = None) -> dict[str, Any]: ...
 
+    def list_channel_subscriber_history(self, *, youtube_channel_id: str, limit: int = 180) -> list[dict[str, Any]]: ...
+
     def search_collected(self, *, query: str, limit: int = 20) -> dict[str, Any]: ...
 
 
@@ -924,6 +926,17 @@ class InMemoryRepository(CollectionRepository):
             videos = [video for video in self._videos.values() if channel_id is None or video.youtube_channel_id == channel_id]
             videos = sorted(videos, key=lambda item: item.source_fetched_at, reverse=True)[:limit]
             return {"channels": channels, "videos": videos}
+
+    def list_channel_subscriber_history(self, *, youtube_channel_id: str, limit: int = 180) -> list[dict[str, Any]]:
+        with self._lock:
+            channel = self._channels.get(youtube_channel_id)
+            if not channel or not channel.get("statistics"):
+                return []
+            return [{
+                "fetchedAt": channel.get("source_fetched_at") or utcnow(),
+                "subscriberCount": channel["statistics"].get("subscriberCount"),
+                "hiddenSubscriberCount": channel["statistics"].get("hiddenSubscriberCount"),
+            }]
 
     def search_collected(self, *, query: str, limit: int = 20) -> dict[str, Any]:
         with self._lock:

@@ -1473,6 +1473,25 @@ class PostgresRepository(CollectionRepository):
             )
             return {"channels": channels, "videos": [self._video(row) for row in cursor.fetchall()]}
 
+    def list_channel_subscriber_history(self, *, youtube_channel_id: str, limit: int = 180) -> list[dict[str, Any]]:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT snapshot.fetched_at, snapshot.subscriber_count, snapshot.hidden_subscriber_count
+                FROM channel_snapshots snapshot
+                JOIN channels channel ON channel.id = snapshot.channel_id
+                WHERE channel.youtube_channel_id = %s
+                  AND (snapshot.subscriber_count IS NOT NULL OR snapshot.hidden_subscriber_count IS NOT NULL)
+                ORDER BY snapshot.fetched_at DESC
+                LIMIT %s
+                """,
+                (youtube_channel_id, limit),
+            )
+            return [
+                {"fetchedAt": row["fetched_at"], "subscriberCount": row["subscriber_count"], "hiddenSubscriberCount": row["hidden_subscriber_count"]}
+                for row in reversed(cursor.fetchall())
+            ]
+
     def search_collected(self, *, query: str, limit: int = 20) -> dict[str, Any]:
         """Search persisted public data with a Jaro-Winkler tolerance layer.
 

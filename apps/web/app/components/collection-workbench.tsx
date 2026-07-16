@@ -36,6 +36,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   createCollectionRequest,
   deleteSource,
+  getChannelSubscriberHistory,
   getJob,
   getExplore,
   searchCollected,
@@ -47,6 +48,7 @@ import {
   type CollectedVideo,
   type CollectionRequestDisposition,
   type CollectedSearchData,
+  type ChannelSubscriberSnapshot,
   type ExploreData,
   type SourceResults,
   type SourceSummary,
@@ -163,6 +165,24 @@ function formatDuration(value?: number) {
 
 function youtubeThumbnail(videoId: string) {
   return `https://i.ytimg.com/vi/${encodeURIComponent(videoId)}/hqdefault.jpg`;
+}
+
+function SubscriberTrend({ samples }: { samples: ChannelSubscriberSnapshot[] }) {
+  const visible = samples.filter((sample) => sample.subscriberCount !== undefined && !sample.hiddenSubscriberCount);
+  if (visible.length < 2) return <p className="subscriber-trend-empty">구독자 수집 이력이 쌓이면 변동 추이를 보여드립니다.</p>;
+  const values = visible.map((sample) => sample.subscriberCount ?? 0);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = Math.max(1, max - min);
+  const points = visible.map((sample, index) => `${(index / (visible.length - 1)) * 100},${40 - (((sample.subscriberCount ?? min) - min) / range) * 32}`).join(" ");
+  const delta = values.at(-1)! - values[0];
+  return (
+    <section className="subscriber-trend" aria-label="구독자 수 변동 추이">
+      <div><span>구독자 추이</span><strong className={delta > 0 ? "subscriber-trend-positive" : ""}>{delta > 0 ? "+" : ""}{formatCount(delta)}</strong></div>
+      <svg viewBox="0 0 100 48" role="img" aria-label={`${formatKpiDate(visible[0].fetchedAt)}부터 ${formatKpiDate(visible.at(-1)?.fetchedAt)}까지 구독자 ${formatCount(values[0])}명에서 ${formatCount(values.at(-1))}명`} preserveAspectRatio="none"><polyline points={points} /></svg>
+      <small>{formatKpiDate(visible[0].fetchedAt)} · {formatKpiDate(visible.at(-1)?.fetchedAt)}</small>
+    </section>
+  );
 }
 
 function sourceRequest(form: FormState): CreateCollectionSourceRequest {
@@ -472,6 +492,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   const [deletingSourceId, setDeletingSourceId] = useState<string | null>(null);
   const [openSourceMenuId, setOpenSourceMenuId] = useState<string | null>(null);
   const [exploreChannelId, setExploreChannelId] = useState<string | null>(null);
+  const [subscriberHistory, setSubscriberHistory] = useState<ChannelSubscriberSnapshot[]>([]);
   const [exploreVisibleCount, setExploreVisibleCount] = useState(12);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<CollectedSearchData | null>(null);
@@ -709,6 +730,20 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   useEffect(() => {
     void refreshExplore(exploreChannelId);
   }, [exploreChannelId, refreshExplore]);
+
+  useEffect(() => {
+    if (!exploreChannelId) {
+      setSubscriberHistory([]);
+      return;
+    }
+    let cancelled = false;
+    void getChannelSubscriberHistory(exploreChannelId).then((history) => {
+      if (!cancelled) setSubscriberHistory(history);
+    }).catch(() => {
+      if (!cancelled) setSubscriberHistory([]);
+    });
+    return () => { cancelled = true; };
+  }, [exploreChannelId]);
 
   useEffect(() => {
     const sentinel = exploreLoadMoreRef.current;
@@ -1030,6 +1065,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
                     <div><dt>저장 영상</dt><dd>{formatCount(selectedExploreChannel.videoCount)}</dd></div>
                     <div><dt>수집 댓글</dt><dd>{formatCount(selectedExploreChannel.commentCount)}</dd></div>
                   </dl>
+                  {!selectedExploreChannel.hiddenSubscriberCount && <SubscriberTrend samples={subscriberHistory} />}
                 </section>
               )}
               <div className="explore-video-grid" aria-label="수집된 동영상">

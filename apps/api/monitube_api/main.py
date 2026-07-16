@@ -15,6 +15,7 @@ from .channel_resolution import ChannelInputError
 from .contracts import (
     ChannelResolutionRequest,
     ChannelResolutionResponse,
+    ChannelSubscriberSnapshot,
     CollectionSource,
     CollectionSourceCreate,
     CollectionSourceUpdate,
@@ -163,6 +164,10 @@ def create_app(repository: CollectionRepository | None = None, settings: Setting
         channel_id: str | None = Query(default=None, alias="channelId", min_length=1, max_length=64),
     ) -> ExploreResponse:
         return service.explore(channel_id=channel_id)
+
+    @router.get("/channels/{youtube_channel_id}/subscriber-history", response_model=list[ChannelSubscriberSnapshot], tags=["explore"])
+    def channel_subscriber_history(youtube_channel_id: str, service: Service) -> list[ChannelSubscriberSnapshot]:
+        return service.channel_subscriber_history(youtube_channel_id)
 
     @router.get("/search", response_model=UnifiedSearchResponse, tags=["search"])
     def search_collected(

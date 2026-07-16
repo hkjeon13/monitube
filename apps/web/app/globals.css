@@ -228,6 +228,14 @@ svg { display: block; width: 1.125rem; height: 1.125rem; stroke-width: 1.7; }
 .channel-overview-stats div { padding-left: 0.75rem; border-left: 0.0625rem solid var(--line); }
 .channel-overview-stats dt { color: var(--muted); font-size: 0.5625rem; font-weight: 700; }
 .channel-overview-stats dd { margin: 0.2rem 0 0; color: var(--ink); font-size: 0.75rem; font-weight: 800; white-space: nowrap; }
+.subscriber-trend { display: grid; grid-template-columns: auto minmax(8rem, 1fr) auto; align-items: center; gap: 0.75rem; grid-column: 1 / -1; padding-top: 0.875rem; border-top: 0.0625rem solid var(--line); }
+.subscriber-trend > div { display: grid; gap: 0.1875rem; }
+.subscriber-trend > div > span, .subscriber-trend small { color: var(--muted); font-size: 0.5625rem; font-weight: 700; }
+.subscriber-trend > div > strong { color: #4f5a51; font-size: 0.75rem; font-weight: 850; }
+.subscriber-trend > div > .subscriber-trend-positive { color: #3c7a50; }
+.subscriber-trend svg { width: 100%; height: 3rem; overflow: visible; }
+.subscriber-trend polyline { fill: none; stroke: var(--orange); stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; vector-effect: non-scaling-stroke; }
+.subscriber-trend-empty { grid-column: 1 / -1; margin: 0; padding-top: 0.875rem; border-top: 0.0625rem solid var(--line); color: var(--muted); font-size: 0.625rem; }
 .explore-channel-card { position: relative; display: flex; width: 13.5rem; min-height: 3.375rem; align-items: center; border-radius: 0.875rem; overflow: hidden; transition: border-color 160ms ease, transform 160ms ease, box-shadow 160ms ease; }
 .explore-channel-card:hover { border-color: #cfcabf; transform: translateY(-0.0625rem); box-shadow: 0 0.625rem 1.25rem rgba(40, 45, 36, 0.07); }
 .explore-channel-card-pinned { border-color: #b9d0bb; }
@@ -551,6 +559,8 @@ svg { display: block; width: 1.125rem; height: 1.125rem; stroke-width: 1.7; }
   .explore-channel-overview { grid-template-columns: auto minmax(0, 1fr); }
   .channel-overview-stats { grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; }
   .channel-overview-stats div:nth-child(odd) { padding-left: 0; border-left: 0; }
+  .subscriber-trend { grid-template-columns: auto minmax(5rem, 1fr); }
+  .subscriber-trend small { display: none; }
   .explore-video-grid { grid-template-columns: 1fr 1fr; gap: 0.625rem; }
   .explore-video-card { min-height: 11rem; padding: 0.75rem; }
   .explore-video-card-featured { min-height: 22.625rem; }

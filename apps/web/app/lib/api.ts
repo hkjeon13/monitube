@@ -118,6 +118,12 @@ export interface ExploreData {
   videos: CollectedVideo[];
 }
 
+export interface ChannelSubscriberSnapshot {
+  fetchedAt: string;
+  subscriberCount?: number;
+  hiddenSubscriberCount?: boolean;
+}
+
 export interface CollectedSearchVideo {
   video: CollectedVideo;
   score: number;
@@ -618,6 +624,20 @@ export async function getExplore(channelId?: string): Promise<ExploreData> {
       return video ? [video] : [];
     }),
   };
+}
+
+export async function getChannelSubscriberHistory(channelId: string): Promise<ChannelSubscriberSnapshot[]> {
+  const response = await request<unknown>(`/v1/channels/${encodeURIComponent(channelId)}/subscriber-history`, { method: "GET" });
+  return (Array.isArray(response) ? response : []).flatMap((item) => {
+    const record = asRecord(item);
+    const fetchedAt = asText(record?.fetchedAt ?? record?.fetched_at);
+    if (!fetchedAt) return [];
+    return [{
+      fetchedAt,
+      ...(asNumber(record?.subscriberCount ?? record?.subscriber_count) !== undefined ? { subscriberCount: asNumber(record?.subscriberCount ?? record?.subscriber_count) } : {}),
+      ...(asBoolean(record?.hiddenSubscriberCount ?? record?.hidden_subscriber_count) !== undefined ? { hiddenSubscriberCount: asBoolean(record?.hiddenSubscriberCount ?? record?.hidden_subscriber_count) } : {}),
+    }];
+  });
 }
 
 export async function searchCollected(query: string): Promise<CollectedSearchData> {
