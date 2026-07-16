@@ -15,6 +15,20 @@ export interface SourceSummary {
   enabled: boolean;
   config: Record<string, unknown>;
   nextRunAt?: string;
+  targetId?: string;
+  canonicalKey?: string;
+  coverage?: Record<string, unknown>;
+  lastCompletedAt?: string;
+}
+
+export type CollectionRequestDisposition = "cached" | "joined" | "queued" | "successor_queued";
+
+export interface CollectionRequestResponse {
+  id: string;
+  disposition: CollectionRequestDisposition;
+  targetId: string;
+  source: SourceSummary;
+  job?: JobStatus;
 }
 
 export interface CollectedVideo {
@@ -147,6 +161,16 @@ function normalizeSource(value: unknown): SourceSummary | null {
     config: asRecord(record.config) ?? {},
     ...(asText(record.nextRunAt ?? record.next_run_at)
       ? { nextRunAt: asText(record.nextRunAt ?? record.next_run_at) }
+      : {}),
+    ...(asText(record.targetId ?? record.target_id)
+      ? { targetId: asText(record.targetId ?? record.target_id) }
+      : {}),
+    ...(asText(record.canonicalKey ?? record.canonical_key)
+      ? { canonicalKey: asText(record.canonicalKey ?? record.canonical_key) }
+      : {}),
+    ...(asRecord(record.coverage) ? { coverage: asRecord(record.coverage) ?? {} } : {}),
+    ...(asText(record.lastCompletedAt ?? record.last_completed_at)
+      ? { lastCompletedAt: asText(record.lastCompletedAt ?? record.last_completed_at) }
       : {}),
   };
 }
@@ -325,6 +349,40 @@ export async function startJob(sourceId: string, requestBody: StartJobRequest) {
       body: JSON.stringify(requestBody),
     },
   );
+}
+
+export async function createCollectionRequest(
+  requestBody: CreateCollectionSourceRequest,
+  options: { forceRefresh?: boolean; idempotencyKey?: string } = {},
+): Promise<CollectionRequestResponse> {
+  const response = await request<unknown>("/v1/collection-requests", {
+    method: "POST",
+    headers: options.idempotencyKey ? { "Idempotency-Key": options.idempotencyKey } : undefined,
+    body: JSON.stringify({
+      ...requestBody,
+      ...(options.forceRefresh ? { forceRefresh: true } : {}),
+    }),
+  });
+  const record = asRecord(response);
+  const source = normalizeSource(record?.source);
+  const id = asText(record?.id);
+  const targetId = asText(record?.targetId ?? record?.target_id);
+  const disposition = asText(record?.disposition);
+
+  if (!record || !id || !targetId || !source || !disposition) {
+    throw new ApiError("수집 요청 응답을 해석할 수 없습니다.", 502);
+  }
+  if (!["cached", "joined", "queued", "successor_queued"].includes(disposition)) {
+    throw new ApiError("알 수 없는 수집 요청 상태입니다.", 502);
+  }
+
+  return {
+    id,
+    targetId,
+    disposition: disposition as CollectionRequestDisposition,
+    source,
+    ...(normalizeJob(record.job) ? { job: normalizeJob(record.job) } : {}),
+  };
 }
 
 export async function getJob(jobId: string) {

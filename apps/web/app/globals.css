@@ -94,9 +94,11 @@ svg { display: block; width: 1.125rem; height: 1.125rem; stroke-width: 1.7; }
 
 .dashboard-main { width: min(90rem, 100%); margin: 0 auto; padding: 1.5rem 2.625rem 1.75rem; }
 .dashboard-topbar { display: flex; align-items: center; justify-content: space-between; gap: 1.125rem; min-height: 3.625rem; padding-bottom: 1.25rem; border-bottom: 0.0625rem solid var(--line); }
-.source-select { display: flex; align-items: center; min-width: 18.125rem; max-width: 35rem; gap: 0.5625rem; color: var(--moss); }
-.source-select select { width: 100%; min-height: 2.375rem; padding: 0 0.3125rem 0 0; border: 0; outline: 0; color: var(--ink); background: transparent; font-size: 0.8125rem; font-weight: 800; text-overflow: ellipsis; }
+.source-select { display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-rows: auto auto; align-items: center; min-width: 18.125rem; max-width: 35rem; column-gap: 0.5625rem; color: var(--moss); }
+.source-select > svg { grid-row: 1 / -1; }
+.source-select select { grid-column: 2; width: 100%; min-height: 2.375rem; padding: 0 0.3125rem 0 0; border: 0; outline: 0; color: var(--ink); background: transparent; font-size: 0.8125rem; font-weight: 800; text-overflow: ellipsis; }
 .source-select select:disabled { color: var(--muted); }
+.source-select-detail { grid-column: 2; display: block; overflow: hidden; color: var(--muted); font-size: 0.625rem; font-weight: 650; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
 .topbar-actions { display: flex; align-items: center; justify-content: flex-end; gap: 0.625rem; }
 .refresh-copy { max-width: 16.25rem; overflow: hidden; color: var(--muted); font-size: 0.6875rem; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -378,6 +380,7 @@ svg { display: block; width: 1.125rem; height: 1.125rem; stroke-width: 1.7; }
   .dashboard-topbar { align-items: stretch; flex-direction: column; gap: 0.75rem; min-height: 0; padding-bottom: 1rem; }
   .source-select { max-width: none; min-width: 0; }
   .source-select select { min-height: var(--touch-target); }
+  .source-select-detail { padding-bottom: 0.25rem; font-size: 0.6875rem; }
   .topbar-actions { justify-content: space-between; }
   .refresh-copy { display: none; }
   .icon-button { width: var(--touch-target); height: var(--touch-target); }

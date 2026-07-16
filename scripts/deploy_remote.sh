@@ -8,6 +8,7 @@ readonly TARGET_DIR="/data/psyche/Projects/monitube"
 readonly ENV_FILE="${TARGET_DIR}/.env"
 readonly ENV_TEMPLATE="${TARGET_DIR}/.env.example"
 readonly YOUTUBE_SECRET_ENV_FILE="${MONITUBE_YOUTUBE_SECRET_ENV_FILE:-/data/psyche/.config/monitube/youtube.env}"
+readonly BACKUP_DIR="${MONITUBE_BACKUP_DIR:-/data/psyche/backups/monitube}"
 readonly BRANCH="${MONITUBE_BRANCH:-main}"
 
 log() {
@@ -102,14 +103,52 @@ compose() {
   docker compose -f docker-compose.yml "$@"
 }
 
+database_counts() {
+  compose exec -T postgres sh -ceu '
+    psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -At -c "
+      SELECT concat_ws(
+        '"'"'|'"'"',
+        (SELECT count(*) FROM collection_sources),
+        (SELECT count(*) FROM sync_jobs),
+        (SELECT count(*) FROM channels),
+        (SELECT count(*) FROM videos),
+        (SELECT count(*) FROM comments)
+      );
+    "
+  '
+}
+
+backup_database() {
+  timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  install -d -m 0700 "$BACKUP_DIR"
+  backup_path="$BACKUP_DIR/monitube-pre-migrate-${timestamp}.dump"
+
+  # Stream a custom-format dump from the running PostgreSQL container without
+  # reading or printing credentials. A failed/empty dump aborts before migration.
+  compose exec -T postgres sh -ceu 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom --no-owner --no-privileges' > "$backup_path"
+  [[ -s "$backup_path" ]] || die "database backup is empty; refusing to migrate."
+  chmod 600 "$backup_path"
+  log "Created pre-migration database backup: $backup_path"
+}
+
 # This selects production process behavior without editing the key-free .env.
 export APP_ENV=production
 
 log "Building and starting infrastructure services."
 compose up --build --detach postgres redis minio minio-init
 
+# Freeze application writes while the target backfill and its unique constraints
+# are installed. Running jobs retain their leases/checkpoints and the recreated
+# worker will reclaim them after its normal lease window.
+log "Pausing API and collection worker for a consistent backup and migration."
+compose stop api worker
+
+log "Recording current database row counts: $(database_counts)"
+backup_database
+
 log "Applying committed database migrations."
 compose run --rm --no-deps migrate
+log "Database row counts after migrations: $(database_counts)"
 
 log "Building application images."
 compose build api worker web

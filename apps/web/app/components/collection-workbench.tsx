@@ -31,14 +31,14 @@ import type { MouseEvent, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
-  createSource,
+  createCollectionRequest,
   getJob,
   getSourceResults,
   getVideoComments,
   listSources,
-  startJob,
   type CollectedComment,
   type CollectedVideo,
+  type CollectionRequestDisposition,
   type SourceResults,
   type SourceSummary,
 } from "../lib/api";
@@ -258,7 +258,7 @@ function sourceTypeCopy(type: string) {
   if (type === "channel") return "채널";
   if (type === "keyword") return "키워드";
   if (type === "video") return "동영상";
-  return "수집 source";
+  return "수집 대상";
 }
 
 function sourceLabel(source: SourceSummary) {
@@ -268,8 +268,90 @@ function sourceLabel(source: SourceSummary) {
   return `${sourceTypeCopy(source.type)} · ${value}`;
 }
 
+function sourceCoverage(source?: SourceSummary) {
+  if (!source) return "아직 수집 대상이 선택되지 않았습니다.";
+  const config = source.config;
+  const coverage = source.coverage ?? {};
+  const comments = coverage.includeComments === true
+    || coverage.requestedIncludeComments === true
+    || config.includeComments === true;
+  const commentPages = clampPositive(
+    Number(coverage.maxCommentPagesPerVideo ?? coverage.requestedMaxCommentPagesPerVideo ?? config.maxCommentPagesPerVideo),
+    1,
+  );
+  if (source.type === "channel") {
+    const videos = clampPositive(Number(coverage.maxVideos ?? coverage.requestedMaxVideos ?? config.maxVideos), 50);
+    return `영상 최대 ${formatCount(videos)}개 · ${comments ? `댓글 ${formatCount(commentPages)}페이지` : "댓글 미수집"}`;
+  }
+  if (source.type === "keyword") {
+    const pages = clampPositive(Number(coverage.maxPagesPerRun ?? coverage.requestedMaxPagesPerRun ?? config.maxPagesPerRun), 1);
+    return `검색 ${formatCount(pages)}페이지 · ${comments ? `댓글 ${formatCount(commentPages)}페이지` : "댓글 미수집"}`;
+  }
+  return comments ? `공개 댓글 ${formatCount(commentPages)}페이지` : "동영상 메타데이터";
+}
+
+function normalizedSourceIdentity(source: SourceSummary) {
+  if (source.targetId) return `target:${source.targetId}`;
+  if (source.canonicalKey) return `key:${source.canonicalKey}`;
+
+  const raw = typeof source.config.query === "string"
+    ? source.config.query
+    : typeof source.config.input === "string"
+      ? source.config.input
+      : source.id;
+  const normalized = raw
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\/(?:www\.)?youtube\.com\/@/, "@")
+    .replace(/^https?:\/\/(?:www\.)?youtube\.com\/channel\//, "")
+    .replace(/\/+$/, "");
+  return `${source.type}:${normalized}`;
+}
+
+function sourceCoverageScore(source: SourceSummary) {
+  const config = source.config;
+  const maxVideos = clampPositive(Number(config.maxVideos), 1);
+  const maxPages = clampPositive(Number(config.maxPagesPerRun), 1);
+  const commentPages = config.includeComments === true
+    ? clampPositive(Number(config.maxCommentPagesPerVideo), 1)
+    : 0;
+  return maxVideos * 10_000 + maxPages * 1_000 + commentPages * 10;
+}
+
+function dedupeSources(sources: SourceSummary[]) {
+  const grouped = new Map<string, SourceSummary>();
+  for (const source of sources) {
+    const key = normalizedSourceIdentity(source);
+    const previous = grouped.get(key);
+    if (!previous) {
+      grouped.set(key, source);
+      continue;
+    }
+    const previousScore = sourceCoverageScore(previous);
+    const nextScore = sourceCoverageScore(source);
+    const previousUpdated = Date.parse(previous.lastCompletedAt ?? previous.nextRunAt ?? "");
+    const nextUpdated = Date.parse(source.lastCompletedAt ?? source.nextRunAt ?? "");
+    if (nextScore > previousScore || (nextScore === previousScore && nextUpdated > previousUpdated)) {
+      grouped.set(key, source);
+    }
+  }
+  return [...grouped.values()];
+}
+
+function collectionNotice(disposition: CollectionRequestDisposition) {
+  if (disposition === "cached") return "이미 충분히 수집된 데이터를 표시합니다. 새 YouTube API 호출은 만들지 않았습니다.";
+  if (disposition === "joined") return "같은 수집 대상의 진행 중 작업에 연결했습니다.";
+  if (disposition === "successor_queued") return "현재 수집이 끝난 뒤 범위를 확장하는 작업을 하나 예약했습니다.";
+  return "공유 수집 작업을 대기열에 추가했습니다.";
+}
+
+function idempotencyKey() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  return `collection-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 function sourceScope(source?: SourceSummary) {
-  if (!source) return "source를 선택하면 범위가 표시됩니다.";
+  if (!source) return "수집 대상을 선택하면 범위가 표시됩니다.";
   const config = source.config;
   if (source.type === "keyword") {
     const terms = [
@@ -277,10 +359,10 @@ function sourceScope(source?: SourceSummary) {
       typeof config.relevanceLanguage === "string" ? config.relevanceLanguage.toUpperCase() : undefined,
       typeof config.regionCode === "string" ? config.regionCode.toUpperCase() : undefined,
     ].filter(Boolean);
-    return terms.join(" · ");
+    return [...terms, sourceCoverage(source)].join(" · ");
   }
   const input = typeof config.input === "string" ? config.input : source.id;
-  return `${sourceTypeCopy(source.type)} · ${input}`;
+  return `${sourceTypeCopy(source.type)} · ${input} · ${sourceCoverage(source)}`;
 }
 
 function isTerminalJob(job: JobStatus | null | undefined) {
@@ -411,14 +493,14 @@ export function CollectionWorkbench() {
   const refreshSources = useCallback(async () => {
     setIsSourcesLoading(true);
     try {
-      const nextSources = await listSources();
+      const nextSources = dedupeSources(await listSources());
       setSources(nextSources);
       setActiveSourceId((current) => {
         if (current && nextSources.some((source) => source.id === current)) return current;
         return nextSources[0]?.id ?? "";
       });
     } catch {
-      setResultsError("수집 source 목록을 불러오지 못했습니다. API 연결 상태를 확인하세요.");
+      setResultsError("수집 대상 목록을 불러오지 못했습니다. API 연결 상태를 확인하세요.");
     } finally {
       setIsSourcesLoading(false);
     }
@@ -606,20 +688,20 @@ export function CollectionWorkbench() {
     setError(null);
     setNotice(null);
     try {
-      const source = await createSource(requestBody);
-      const response = await startJob(source.id, {
-        include_comments: requestBody.config.includeComments,
-        ...(requestBody.type === "channel"
-          ? { max_videos: (requestBody.config as ChannelSourceConfig).maxVideos }
-          : {}),
-        max_comments_per_video: requestBody.config.maxCommentPagesPerVideo,
+      const response = await createCollectionRequest(requestBody, {
+        idempotencyKey: idempotencyKey(),
       });
-      setSources((current) => [source, ...current.filter((item) => item.id !== source.id)]);
-      setActiveSourceId(source.id);
-      setJobSourceId(source.id);
-      setJob(response);
+      setSources((current) => dedupeSources([response.source, ...current.filter((item) => item.id !== response.source.id)]));
+      setActiveSourceId(response.source.id);
+      if (response.job) {
+        setJobSourceId(response.source.id);
+        setJob(response.job);
+      } else {
+        setJobSourceId(null);
+        setJob(null);
+      }
       closeCollectionDrawer();
-      setNotice("수집 작업을 시작했습니다. Overview에서 상태를 자동으로 갱신합니다.");
+      setNotice(collectionNotice(response.disposition));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "수집 작업을 시작하지 못했습니다.");
     } finally {
@@ -677,20 +759,30 @@ export function CollectionWorkbench() {
       <main className="dashboard-main">
         <header className="dashboard-topbar" id="source-selector" tabIndex={-1}>
           <label className="source-select">
-            <span className="visually-hidden">수집 source 선택</span>
+            <span className="visually-hidden">수집 대상 선택</span>
             <FolderIcon aria-hidden="true" />
             <select
               value={activeSourceId}
               disabled={isSourcesLoading || sources.length === 0}
               onChange={(event) => setActiveSourceId(event.target.value)}
+              aria-describedby="active-source-coverage"
             >
-              {sources.length === 0 && <option value="">등록된 source 없음</option>}
-              {sources.map((source) => <option key={source.id} value={source.id}>{sourceLabel(source)}</option>)}
+              {sources.length === 0 && <option value="">등록된 수집 대상 없음</option>}
+              {sources.map((source) => (
+                <option key={source.id} value={source.id}>
+                  {sourceLabel(source)} — {sourceCoverage(source)}
+                </option>
+              ))}
             </select>
+            <span className="source-select-detail" id="active-source-coverage">
+              {activeSource
+                ? `${sourceCoverage(activeSource)} · ${activeSource.lastCompletedAt ? `마지막 완료 ${formatShortDate(activeSource.lastCompletedAt)}` : "수집 이력 확인 중"}`
+                : "채널·키워드·동영상을 하나의 공유 수집 대상으로 관리합니다."}
+            </span>
           </label>
           <div className="topbar-actions">
             <span className="refresh-copy">
-              {sourceResults?.analysis?.generatedAt ? `분석 갱신 ${formatDate(sourceResults.analysis.generatedAt)}` : "수집 결과를 선택하세요"}
+              {sourceResults?.analysis?.generatedAt ? `분석 갱신 ${formatDate(sourceResults.analysis.generatedAt)}` : "수집 대상을 선택하세요"}
             </span>
             <button
               className="icon-button"
@@ -700,13 +792,13 @@ export function CollectionWorkbench() {
                 if (activeSourceId) void refreshResults(activeSourceId);
               }}
               disabled={isSourcesLoading || isResultsLoading}
-              aria-label="source와 결과 새로고침"
+              aria-label="수집 대상과 분석 결과 새로고침"
             >
               <ArrowPathIcon aria-hidden="true" />
             </button>
             <button className="primary-action" type="button" onClick={openCollectionDrawer}>
               <PlusIcon aria-hidden="true" />
-              새 수집
+              수집 대상 추가
             </button>
           </div>
         </header>
@@ -732,12 +824,12 @@ export function CollectionWorkbench() {
             <DocumentChartBarIcon aria-hidden="true" />
             <div>
               <p className="section-kicker">READY WHEN YOU ARE</p>
-              <h2 id="empty-overview-title">첫 source를 수집해 보세요.</h2>
-              <p>채널, 키워드 또는 단일 동영상을 선택하면 이곳에 동영상·공개 댓글·수집 상태를 정리해 드립니다.</p>
+              <h2 id="empty-overview-title">첫 수집 대상을 추가해 보세요.</h2>
+              <p>채널, 키워드 또는 단일 동영상을 선택하면 공유 데이터와 분석 상태를 이곳에 정리해 드립니다.</p>
             </div>
             <button className="primary-action" type="button" onClick={openCollectionDrawer}>
               <PlusIcon aria-hidden="true" />
-              첫 수집 시작
+              수집 대상 추가
             </button>
           </section>
         )}
@@ -745,17 +837,17 @@ export function CollectionWorkbench() {
         {activeSourceId && isResultsLoading && !sourceResults && (
           <section className="empty-overview loading-overview" aria-live="polite">
             <ArrowPathIcon aria-hidden="true" />
-            <div><h2>저장된 분석을 불러오는 중입니다.</h2><p>선택한 source의 최신 수집 결과를 준비하고 있습니다.</p></div>
+            <div><h2>저장된 분석을 불러오는 중입니다.</h2><p>선택한 수집 대상의 최신 결과를 준비하고 있습니다.</p></div>
           </section>
         )}
 
         {sourceResults && sourceResults.source.id === activeSourceId && (
           <div className="dashboard-content">
-            <section className="kpi-grid" aria-label="선택 source의 핵심 지표">
+            <section className="kpi-grid" aria-label="선택 수집 대상의 핵심 지표">
               <MetricCard
                 label="수집 동영상"
                 value={formatCount(analysisVideoCount)}
-                detail="현재 source에 저장된 영상"
+                detail="공유 수집 대상에 저장된 영상"
                 icon={<DocumentChartBarIcon />}
               />
               <MetricCard
@@ -842,7 +934,7 @@ export function CollectionWorkbench() {
                 {!activeJob ? (
                   <div className="health-empty">
                     <ClockIcon aria-hidden="true" />
-                    <p>아직 실행 기록이 없습니다. 새 수집을 시작하면 진행률과 재개 계획이 이곳에 표시됩니다.</p>
+                    <p>아직 실행 기록이 없습니다. 수집 요청을 보내면 진행률과 재개 계획이 이곳에 표시됩니다.</p>
                   </div>
                 ) : (
                   <div className="health-content">
@@ -962,7 +1054,7 @@ export function CollectionWorkbench() {
         )}
 
         <footer className="dashboard-footer">
-          <p>공개 YouTube 메타데이터와 공개 댓글을 source별로 수집·분석합니다.</p>
+          <p>공개 YouTube 메타데이터와 공개 댓글을 수집 대상별로 공유·분석합니다.</p>
           <p>운영 credential은 브라우저에 노출되지 않습니다.</p>
         </footer>
       </main>
@@ -972,8 +1064,8 @@ export function CollectionWorkbench() {
           <div className="drawer-backdrop" aria-hidden="true" onClick={closeCollectionDrawer} />
           <aside ref={collectionDrawerRef} className="collection-drawer" role="dialog" aria-modal="true" aria-labelledby="collection-drawer-title" tabIndex={-1}>
             <div className="drawer-heading">
-              <div><p className="section-kicker">NEW COLLECTION</p><h2 id="collection-drawer-title">새 수집</h2><p>수집할 대상을 고르고 필요한 범위를 정하세요.</p></div>
-              <button className="icon-button" type="button" aria-label="새 수집 창 닫기" data-drawer-initial-focus onClick={closeCollectionDrawer}><XMarkIcon aria-hidden="true" /></button>
+              <div><p className="section-kicker">COLLECTION TARGET</p><h2 id="collection-drawer-title">수집 대상 추가</h2><p>같은 대상은 하나로 관리하고, 필요한 범위만 확장합니다.</p></div>
+              <button className="icon-button" type="button" aria-label="수집 대상 추가 창 닫기" data-drawer-initial-focus onClick={closeCollectionDrawer}><XMarkIcon aria-hidden="true" /></button>
             </div>
 
             <form className="collection-form" onSubmit={(event) => { event.preventDefault(); void loadEstimate(); }}>
@@ -1041,7 +1133,7 @@ export function CollectionWorkbench() {
               <div className="drawer-footer-action">
                 <button className="secondary-action" type="button" onClick={closeCollectionDrawer}>취소</button>
                 {estimateMode ? (
-                  <button className="primary-action drawer-start-action" type="button" disabled={isStarting} onClick={() => void launchJob()}>{isStarting ? "작업을 등록하는 중…" : "수집 작업 시작"}<ChevronRightIcon aria-hidden="true" /></button>
+                  <button className="primary-action drawer-start-action" type="button" disabled={isStarting} onClick={() => void launchJob()}>{isStarting ? "요청을 연결하는 중…" : "수집 요청 보내기"}<ChevronRightIcon aria-hidden="true" /></button>
                 ) : (
                   <button className="primary-action" type="submit" disabled={isEstimating}>{isEstimating ? "예상치 계산 중…" : `${sourceName} 예상치 확인`}<ChevronRightIcon aria-hidden="true" /></button>
                 )}

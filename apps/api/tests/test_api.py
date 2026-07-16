@@ -1,6 +1,8 @@
 from fastapi.testclient import TestClient
 
+from monitube_api.domain import JobState
 from monitube_api.main import create_app
+from monitube_api.repositories import InMemoryRepository
 
 
 def test_health_and_channel_resolution_endpoints() -> None:
@@ -83,3 +85,119 @@ def test_keyword_and_direct_video_sources_use_the_same_project_free_contract() -
     assert video.status_code == 201
     assert video.json()["type"] == "video"
     assert video.json()["config"]["input"] == "dQw4w9WgXcQ"
+
+
+def test_collection_requests_share_one_target_job_and_honor_idempotency() -> None:
+    repository = InMemoryRepository()
+    client = TestClient(create_app(repository=repository))
+    first = client.post(
+        "/v1/collection-requests",
+        headers={"Idempotency-Key": "collect-google-developers-1"},
+        json={
+            "type": "channel",
+            "config": {"input": "https://www.youtube.com/@GoogleDevelopers", "maxVideos": 10, "includeComments": False},
+        },
+    )
+    assert first.status_code == 201
+    first_body = first.json()
+    assert first_body["disposition"] == "queued"
+    assert first_body["source"]["targetId"] == first_body["targetId"]
+    assert first_body["job"] is not None
+
+    retry = client.post(
+        "/v1/collection-requests",
+        headers={"Idempotency-Key": "collect-google-developers-1"},
+        json={
+            "type": "channel",
+            "config": {"input": "@GoogleDevelopers", "maxVideos": 10, "includeComments": False},
+        },
+    )
+    assert retry.status_code == 201
+    assert retry.json()["id"] == first_body["id"]
+    assert retry.json()["job"]["id"] == first_body["job"]["id"]
+
+    wider = client.post(
+        "/v1/collection-requests",
+        json={
+            "type": "channel",
+            "config": {"input": "@googledevelopers", "maxVideos": 50, "includeComments": True, "maxCommentPagesPerVideo": 3},
+        },
+    )
+    assert wider.status_code == 201
+    assert wider.json()["targetId"] == first_body["targetId"]
+    assert wider.json()["source"]["id"] == first_body["source"]["id"]
+    assert wider.json()["job"]["id"] == first_body["job"]["id"]
+    assert len(client.get("/v1/sources").json()) == 1
+
+
+def test_running_target_queues_one_successor_then_serves_cached_results() -> None:
+    repository = InMemoryRepository()
+    client = TestClient(create_app(repository=repository))
+    first = client.post(
+        "/v1/collection-requests",
+        json={"type": "channel", "config": {"input": "@GoogleDevelopers", "maxVideos": 10}},
+    ).json()
+    job_id = first["job"]["id"]
+    repository.claim_next_job(worker_id="test-worker")
+
+    successor = client.post(
+        "/v1/collection-requests",
+        json={
+            "type": "channel",
+            "config": {"input": "@GoogleDevelopers", "maxVideos": 50, "includeComments": True, "maxCommentPagesPerVideo": 2},
+        },
+    )
+    assert successor.status_code == 201
+    assert successor.json()["disposition"] == "successor_queued"
+    assert successor.json()["job"] is None
+
+    repository.transition_job(job_id, JobState.COMPLETED)
+    pending = next(request for request in repository._requests.values() if request.id == successor.json()["id"])
+    assert pending.job_id is not None
+    assert pending.job_id != job_id
+
+    # The completed job covered only the original 10 videos, so a 10-video request
+    # is cached even while a wider successor is queued.
+    cached = client.post(
+        "/v1/collection-requests",
+        json={"type": "channel", "config": {"input": "@GoogleDevelopers", "maxVideos": 10}},
+    )
+    assert cached.status_code == 201
+    assert cached.json()["disposition"] == "cached"
+
+
+def test_keyword_requests_share_a_target_when_only_collection_breadth_changes() -> None:
+    repository = InMemoryRepository()
+    client = TestClient(create_app(repository=repository))
+
+    first = client.post(
+        "/v1/collection-requests",
+        json={
+            "type": "keyword",
+            "config": {
+                "query": "  FastAPI   튜토리얼 ",
+                "order": "date",
+                "maxPagesPerRun": 1,
+                "includeComments": False,
+            },
+        },
+    )
+    wider = client.post(
+        "/v1/collection-requests",
+        json={
+            "type": "keyword",
+            "config": {
+                "query": "fastapi 튜토리얼",
+                "order": "date",
+                "maxPagesPerRun": 4,
+                "includeComments": True,
+                "maxCommentPagesPerVideo": 2,
+            },
+        },
+    )
+
+    assert first.status_code == 201
+    assert wider.status_code == 201
+    assert wider.json()["targetId"] == first.json()["targetId"]
+    assert wider.json()["source"]["id"] == first.json()["source"]["id"]
+    assert len(client.get("/v1/sources").json()) == 1

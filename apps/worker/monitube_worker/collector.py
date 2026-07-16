@@ -155,6 +155,14 @@ class YouTubeCollector:
                 "source_fetched_at": utcnow(),
             }
         )
+        # A handle or URL is only a mutable alias. Once YouTube resolves it to a
+        # UC identifier, atomically promote the worker source's provisional target
+        # so later handle/URL/ID requests share one collection target.
+        self.repository.promote_channel_target(
+            source_id=job.source_id,
+            youtube_channel_id=str(item["id"]),
+            handle=snippet.get("customUrl"),
+        )
         return item
 
     def _channel_video_ids(self, job: JobRecord, source_config: Mapping[str, Any]) -> list[str]:

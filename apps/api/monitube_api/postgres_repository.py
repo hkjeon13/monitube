@@ -21,7 +21,20 @@ except ImportError:  # pragma: no cover - exercised only in minimal local instal
             self.value = value
 
 from .analysis import build_summary
-from .domain import CommentRecord, JobRecord, JobState, QuotaBucket, SourceRecord, SourceType, VideoRecord, new_id, utcnow
+from .domain import (
+    CollectionRequestRecord,
+    CollectionSubmission,
+    CollectionTargetRecord,
+    CommentRecord,
+    JobRecord,
+    JobState,
+    QuotaBucket,
+    SourceRecord,
+    SourceType,
+    VideoRecord,
+    new_id,
+    utcnow,
+)
 from .repositories import CollectionRepository, InvalidStateTransitionError, NotFoundError, RepositoryError, _ALLOWED_TRANSITIONS
 
 
@@ -66,6 +79,38 @@ class PostgresRepository(CollectionRepository):
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             next_run_at=row.get("next_run_at"),
+            target_id=str(row["target_id"]) if row.get("target_id") else None,
+            canonical_key=row.get("canonical_key"),
+            coverage=dict(row.get("coverage") or {}),
+            last_completed_at=row.get("last_completed_at"),
+        )
+
+    @staticmethod
+    def _target(row: dict[str, Any]) -> CollectionTargetRecord:
+        return CollectionTargetRecord(
+            id=str(row["id"]),
+            type=SourceType(row["type"]),
+            canonical_key=str(row["canonical_key"]),
+            config=dict(row.get("config") or {}),
+            coverage=dict(row.get("coverage") or {}),
+            resolved_channel_id=str(row["resolved_channel_id"]) if row.get("resolved_channel_id") else None,
+            last_completed_at=row.get("last_completed_at"),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _request(row: dict[str, Any]) -> CollectionRequestRecord:
+        return CollectionRequestRecord(
+            id=str(row["id"]),
+            target_id=str(row["target_id"]),
+            source_id=str(row["source_id"]) if row.get("source_id") else None,
+            request_config=dict(row.get("request_config") or {}),
+            idempotency_key=row.get("idempotency_key"),
+            job_id=str(row["job_id"]) if row.get("job_id") else None,
+            status=str(row["status"]),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
         )
 
     @staticmethod
@@ -102,6 +147,7 @@ class PostgresRepository(CollectionRepository):
             lease_expires_at=row.get("lease_expires_at"),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            target_id=str(row["target_id"]) if row.get("target_id") else None,
         )
 
     @staticmethod
@@ -155,32 +201,65 @@ class PostgresRepository(CollectionRepository):
             )
             return str(cursor.fetchone()["id"])
 
+    @staticmethod
+    def _select_source(cursor: Any, source_id: str) -> dict[str, Any] | None:
+        cursor.execute(
+            """
+            SELECT cs.id::text, cs.type::text, cs.config, cs.enabled, cs.created_at, cs.updated_at, cs.next_run_at,
+                   cs.target_id::text, ct.canonical_key, ct.coverage, ct.last_completed_at
+            FROM collection_sources cs
+            LEFT JOIN collection_targets ct ON ct.id = cs.target_id
+            WHERE cs.id = %s
+            """,
+            (source_id,),
+        )
+        return cursor.fetchone()
+
     def create_source(self, *, source_type: SourceType, config: dict[str, Any]) -> SourceRecord:
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
                 INSERT INTO collection_sources (type, config)
                 VALUES (%s, %s)
-                RETURNING id::text, type::text, config, enabled, created_at, updated_at, next_run_at
+                RETURNING id::text
                 """,
                 (source_type.value, Json(config)),
             )
-            return self._source(cursor.fetchone())
+            row = self._select_source(cursor, str(cursor.fetchone()["id"]))
+            assert row is not None
+            return self._source(row)
 
     def get_source(self, source_id: str) -> SourceRecord:
         with self._connection() as connection, connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT id::text, type::text, config, enabled, created_at, updated_at, next_run_at FROM collection_sources WHERE id = %s",
-                (source_id,),
-            )
-            row = cursor.fetchone()
+            row = self._select_source(cursor, source_id)
             if not row:
                 raise NotFoundError(f"Source '{source_id}' was not found")
             return self._source(row)
 
     def list_sources(self) -> list[SourceRecord]:
         with self._connection() as connection, connection.cursor() as cursor:
-            cursor.execute("SELECT id::text, type::text, config, enabled, created_at, updated_at, next_run_at FROM collection_sources ORDER BY created_at")
+            cursor.execute(
+                """
+                SELECT cs.id::text, cs.type::text, cs.config, cs.enabled, cs.created_at, cs.updated_at, cs.next_run_at,
+                       cs.target_id::text, ct.canonical_key, ct.coverage, ct.last_completed_at
+                FROM collection_sources cs
+                LEFT JOIN collection_targets ct ON ct.id = cs.target_id
+                WHERE cs.target_id IS NULL
+                   OR cs.id = (
+                     SELECT cr.source_id
+                     FROM collection_requests cr
+                     JOIN collection_sources primary_source ON primary_source.id = cr.source_id
+                     WHERE cr.target_id = cs.target_id AND cr.source_id IS NOT NULL
+                     ORDER BY (COALESCE(primary_source.config ->> 'includeComments', 'false') = 'true') DESC,
+                              COALESCE((primary_source.config ->> 'maxVideos')::integer, 0) DESC,
+                              COALESCE((primary_source.config ->> 'maxPagesPerRun')::integer, 0) DESC,
+                              COALESCE((primary_source.config ->> 'maxCommentPagesPerVideo')::integer, 0) DESC,
+                              cr.created_at, cr.id
+                     LIMIT 1
+                   )
+                ORDER BY cs.created_at
+                """
+            )
             return [self._source(row) for row in cursor.fetchall()]
 
     def update_source(self, source_id: str, **changes: Any) -> SourceRecord:
@@ -198,14 +277,15 @@ class PostgresRepository(CollectionRepository):
         values.append(source_id)
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
-                f"UPDATE collection_sources SET {', '.join(assignments)}, updated_at = now() WHERE id = %s "
-                "RETURNING id::text, type::text, config, enabled, created_at, updated_at, next_run_at",
+                f"UPDATE collection_sources SET {', '.join(assignments)}, updated_at = now() WHERE id = %s RETURNING id::text",
                 values,
             )
             row = cursor.fetchone()
             if not row:
                 raise NotFoundError(f"Source '{source_id}' was not found")
-            return self._source(row)
+            selected = self._select_source(cursor, str(row["id"]))
+            assert selected is not None
+            return self._source(selected)
 
     def delete_source(self, source_id: str) -> None:
         with self._connection() as connection, connection.cursor() as cursor:
@@ -230,22 +310,461 @@ class PostgresRepository(CollectionRepository):
         runtime_config_id: str | None = None,
     ) -> JobRecord:
         with self._connection() as connection, connection.cursor() as cursor:
-            cursor.execute("SELECT 1 FROM collection_sources WHERE id = %s", (source_id,))
-            if not cursor.fetchone():
+            cursor.execute("SELECT target_id::text FROM collection_sources WHERE id = %s", (source_id,))
+            source = cursor.fetchone()
+            if not source:
                 raise NotFoundError(f"Source '{source_id}' was not found")
+            if source.get("target_id"):
+                cursor.execute("SELECT id FROM collection_targets WHERE id = %s FOR UPDATE", (source["target_id"],))
+                cursor.execute(
+                    """
+                    SELECT * FROM sync_jobs
+                    WHERE target_id = %s AND state IN ('queued', 'running', 'waiting_retry', 'waiting_quota')
+                    ORDER BY created_at
+                    LIMIT 1
+                    FOR UPDATE
+                    """,
+                    (source["target_id"],),
+                )
+                active = cursor.fetchone()
+                if active:
+                    return self._job(active)
             config_id = runtime_config_id or self._active_runtime_config(cursor)
             cursor.execute(
                 """
                 INSERT INTO sync_jobs (
-                    source_id, runtime_config_id, state, current_stage, idempotency_key,
+                    source_id, target_id, runtime_config_id, state, current_stage, idempotency_key,
                     include_comments, max_videos, max_comments_per_video
                 )
-                VALUES (%s, %s, 'queued', 'queued', %s, %s, %s, %s)
+                VALUES (%s, %s, %s, 'queued', 'queued', %s, %s, %s, %s)
                 RETURNING *
                 """,
-                (source_id, config_id, new_id(), include_comments, max_videos, max_comments_per_video),
+                (source_id, source.get("target_id"), config_id, new_id(), include_comments, max_videos, max_comments_per_video),
             )
             return self._job(cursor.fetchone())
+
+    @staticmethod
+    def _desired_coverage(source_type: SourceType, config: dict[str, Any]) -> dict[str, Any]:
+        desired: dict[str, Any] = {
+            "complete": False,
+            "includeComments": bool(config.get("includeComments", False)),
+            "maxCommentPagesPerVideo": int(config.get("maxCommentPagesPerVideo") or 1),
+        }
+        if source_type is SourceType.CHANNEL:
+            desired["maxVideos"] = int(config.get("maxVideos") or 50)
+        elif source_type is SourceType.KEYWORD:
+            desired["maxPagesPerRun"] = int(config.get("maxPagesPerRun") or 1)
+        return desired
+
+    @staticmethod
+    def _merge_config(source_type: SourceType, current: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(current)
+        for key, value in incoming.items():
+            merged.setdefault(key, value)
+        merged["includeComments"] = bool(current.get("includeComments", False) or incoming.get("includeComments", False))
+        merged["maxCommentPagesPerVideo"] = max(
+            int(current.get("maxCommentPagesPerVideo") or 1), int(incoming.get("maxCommentPagesPerVideo") or 1)
+        )
+        if source_type is SourceType.CHANNEL:
+            merged["maxVideos"] = max(int(current.get("maxVideos") or 1), int(incoming.get("maxVideos") or 1))
+        elif source_type is SourceType.KEYWORD:
+            merged["maxPagesPerRun"] = max(int(current.get("maxPagesPerRun") or 1), int(incoming.get("maxPagesPerRun") or 1))
+        return merged
+
+    @staticmethod
+    def _coverage_satisfies(coverage: dict[str, Any], desired: dict[str, Any]) -> bool:
+        if not coverage.get("complete"):
+            return False
+        if desired.get("includeComments") and not coverage.get("includeComments"):
+            return False
+        for key in ("maxVideos", "maxPagesPerRun"):
+            if key in desired and int(coverage.get(key) or 0) < int(desired[key]):
+                return False
+        return not desired.get("includeComments") or int(coverage.get("maxCommentPagesPerVideo") or 0) >= int(
+            desired.get("maxCommentPagesPerVideo") or 1
+        )
+
+    @staticmethod
+    def _job_coverage(job: JobRecord, source_type: SourceType, source_config: dict[str, Any]) -> dict[str, Any]:
+        coverage = {
+            "complete": False,
+            "includeComments": bool(job.include_comments),
+            "maxCommentPagesPerVideo": int(job.max_comments_per_video or source_config.get("maxCommentPagesPerVideo") or 1),
+        }
+        if source_type is SourceType.CHANNEL:
+            coverage["maxVideos"] = int(job.max_videos or source_config.get("maxVideos") or 50)
+        elif source_type is SourceType.KEYWORD:
+            # The legacy job schema has no keyword-page breadth field.  A running
+            # keyword job is treated conservatively unless it was queued and can be
+            # safely widened before claim.
+            coverage["maxPagesPerRun"] = int(source_config.get("maxPagesPerRun") or 1)
+        return coverage
+
+    def _target_source(self, cursor: Any, target_id: str) -> SourceRecord | None:
+        cursor.execute(
+            """
+            SELECT cs.id::text
+            FROM collection_requests cr
+            JOIN collection_sources cs ON cs.id = cr.source_id
+            WHERE cr.target_id = %s AND cr.source_id IS NOT NULL
+            ORDER BY (COALESCE(cs.config ->> 'includeComments', 'false') = 'true') DESC,
+                     COALESCE((cs.config ->> 'maxVideos')::integer, 0) DESC,
+                     COALESCE((cs.config ->> 'maxPagesPerRun')::integer, 0) DESC,
+                     COALESCE((cs.config ->> 'maxCommentPagesPerVideo')::integer, 0) DESC,
+                     cr.created_at, cr.id
+            LIMIT 1
+            FOR UPDATE
+            """,
+            (target_id,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            cursor.execute(
+                """
+                SELECT id::text FROM collection_sources WHERE target_id = %s
+                ORDER BY (COALESCE(config ->> 'includeComments', 'false') = 'true') DESC,
+                         COALESCE((config ->> 'maxVideos')::integer, 0) DESC,
+                         COALESCE((config ->> 'maxPagesPerRun')::integer, 0) DESC,
+                         COALESCE((config ->> 'maxCommentPagesPerVideo')::integer, 0) DESC,
+                         created_at, id
+                LIMIT 1 FOR UPDATE
+                """,
+                (target_id,),
+            )
+            row = cursor.fetchone()
+        if not row:
+            return None
+        selected = self._select_source(cursor, str(row["id"]))
+        return self._source(selected) if selected else None
+
+    def _create_target_job(
+        self,
+        cursor: Any,
+        *,
+        target_id: str,
+        source: SourceRecord,
+        runtime_config_id: str | None,
+    ) -> JobRecord:
+        desired = self._desired_coverage(source.type, source.config)
+        config_id = runtime_config_id or self._active_runtime_config(cursor)
+        cursor.execute(
+            """
+            INSERT INTO sync_jobs (
+              source_id, target_id, runtime_config_id, state, current_stage, idempotency_key,
+              include_comments, max_videos, max_comments_per_video
+            ) VALUES (%s, %s, %s, 'queued', 'queued', %s, %s, %s, %s)
+            RETURNING *
+            """,
+            (
+                source.id,
+                target_id,
+                config_id,
+                new_id(),
+                bool(desired["includeComments"]),
+                desired.get("maxVideos"),
+                desired.get("maxCommentPagesPerVideo"),
+            ),
+        )
+        return self._job(cursor.fetchone())
+
+    def _submission(self, cursor: Any, request: CollectionRequestRecord) -> CollectionSubmission:
+        cursor.execute("SELECT * FROM collection_targets WHERE id = %s", (request.target_id,))
+        target_row = cursor.fetchone()
+        if not target_row:
+            raise NotFoundError(f"Target '{request.target_id}' was not found")
+        target = self._target(target_row)
+        source_id = request.source_id
+        if source_id is None:
+            source = self._target_source(cursor, target.id)
+        else:
+            source_row = self._select_source(cursor, source_id)
+            source = self._source(source_row) if source_row else None
+        if not source:
+            raise RepositoryError(f"Target '{target.id}' has no worker source")
+        job: JobRecord | None = None
+        if request.job_id:
+            cursor.execute("SELECT * FROM sync_jobs WHERE id = %s", (request.job_id,))
+            job_row = cursor.fetchone()
+            job = self._job(job_row) if job_row else None
+        if request.job_id is None and request.status == "queued":
+            disposition = "successor_queued"
+        elif request.status == "completed":
+            disposition = "cached"
+        elif request.status == "joined":
+            disposition = "joined"
+        else:
+            disposition = "queued"
+        return CollectionSubmission(request=request, target=target, source=source, job=job, disposition=disposition)
+
+    def submit_collection_request(
+        self,
+        *,
+        source_type: SourceType,
+        config: dict[str, Any],
+        canonical_key: str,
+        aliases: list[tuple[str, str]],
+        force_refresh: bool,
+        idempotency_key: str | None,
+        runtime_config_id: str | None = None,
+    ) -> CollectionSubmission:
+        with self._connection() as connection, connection.cursor() as cursor:
+            if idempotency_key:
+                cursor.execute("SELECT * FROM collection_requests WHERE idempotency_key = %s ORDER BY created_at LIMIT 1 FOR UPDATE", (idempotency_key,))
+                replay = cursor.fetchone()
+                if replay:
+                    return self._submission(cursor, self._request(replay))
+
+            target: CollectionTargetRecord | None = None
+            for alias_kind, alias_value in aliases:
+                cursor.execute(
+                    """
+                    SELECT ct.*
+                    FROM collection_target_aliases cta
+                    JOIN collection_targets ct ON ct.id = cta.target_id
+                    WHERE cta.target_type = %s AND cta.alias_kind = %s AND cta.alias_value = %s
+                    FOR UPDATE OF ct
+                    """,
+                    (source_type.value, alias_kind, alias_value),
+                )
+                row = cursor.fetchone()
+                if row:
+                    target = self._target(row)
+                    break
+
+            # A cached channel handle can immediately resolve to its immutable ID,
+            # even if the request arrived as a handle rather than a UC identifier.
+            if target is None and source_type is SourceType.CHANNEL:
+                handle = next((value for kind, value in aliases if kind == "handle"), None)
+                if handle:
+                    cursor.execute(
+                        "SELECT youtube_channel_id FROM channels WHERE lower(handle) = lower(%s) ORDER BY source_fetched_at DESC NULLS LAST LIMIT 1",
+                        (handle,),
+                    )
+                    channel = cursor.fetchone()
+                    if channel:
+                        canonical_key = f"channel:{channel['youtube_channel_id']}"
+
+            if target is None:
+                cursor.execute(
+                    """
+                    INSERT INTO collection_targets (type, canonical_key, config)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (type, canonical_key) DO UPDATE SET updated_at = now()
+                    RETURNING *
+                    """,
+                    (source_type.value, canonical_key, Json(config)),
+                )
+                target = self._target(cursor.fetchone())
+
+            # Target upsert/alias lookup locks the shared target row.  Recheck here
+            # so two concurrent browser retries with the same key serialize instead
+            # of racing the partial unique request index.
+            if idempotency_key:
+                cursor.execute(
+                    "SELECT * FROM collection_requests WHERE target_id = %s AND idempotency_key = %s FOR UPDATE",
+                    (target.id, idempotency_key),
+                )
+                replay = cursor.fetchone()
+                if replay:
+                    return self._submission(cursor, self._request(replay))
+
+            for alias_kind, alias_value in aliases:
+                cursor.execute(
+                    """
+                    INSERT INTO collection_target_aliases (target_id, target_type, alias_kind, alias_value)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (target_type, alias_kind, alias_value) DO NOTHING
+                    """,
+                    (target.id, source_type.value, alias_kind, alias_value),
+                )
+
+            source = self._target_source(cursor, target.id)
+            source_is_new = source is None
+            if source is None:
+                cursor.execute(
+                    "INSERT INTO collection_sources (type, config, target_id) VALUES (%s, %s, %s) RETURNING id::text",
+                    (source_type.value, Json(config), target.id),
+                )
+                row = self._select_source(cursor, str(cursor.fetchone()["id"]))
+                assert row is not None
+                source = self._source(row)
+
+            prior_config = dict(source.config)
+            merged_config = self._merge_config(source_type, prior_config, target.config)
+            merged_config = self._merge_config(source_type, merged_config, config)
+            cursor.execute("UPDATE collection_sources SET config = %s, updated_at = now() WHERE id = %s", (Json(merged_config), source.id))
+            cursor.execute("UPDATE collection_targets SET config = %s, updated_at = now() WHERE id = %s RETURNING *", (Json(merged_config), target.id))
+            target = self._target(cursor.fetchone())
+            source_row = self._select_source(cursor, source.id)
+            assert source_row is not None
+            source = self._source(source_row)
+
+            cursor.execute(
+                """
+                SELECT * FROM sync_jobs
+                WHERE target_id = %s AND state IN ('queued', 'running', 'waiting_retry', 'waiting_quota')
+                ORDER BY created_at
+                LIMIT 1
+                FOR UPDATE
+                """,
+                (target.id,),
+            )
+            active_row = cursor.fetchone()
+            active = self._job(active_row) if active_row else None
+            desired = self._desired_coverage(source_type, config)
+            request_status = "queued"
+            request_job_id: str | None = None
+
+            if not force_refresh and self._coverage_satisfies(target.coverage, desired):
+                request_status = "completed"
+            elif active and self._coverage_satisfies(self._job_coverage(active, source_type, prior_config), desired):
+                request_status = "joined"
+                request_job_id = active.id
+            elif active and active.state is JobState.QUEUED:
+                active_desired = self._desired_coverage(source_type, merged_config)
+                cursor.execute(
+                    """
+                    UPDATE sync_jobs
+                    SET include_comments = %s, max_videos = %s, max_comments_per_video = %s, updated_at = now()
+                    WHERE id = %s
+                    """,
+                    (
+                        bool(active_desired["includeComments"]),
+                        active_desired.get("maxVideos"),
+                        active_desired.get("maxCommentPagesPerVideo"),
+                        active.id,
+                    ),
+                )
+                request_job_id = active.id
+            elif not active:
+                active = self._create_target_job(cursor, target_id=target.id, source=source, runtime_config_id=runtime_config_id)
+                request_job_id = active.id
+
+            cursor.execute(
+                """
+                INSERT INTO collection_requests (target_id, source_id, request_config, idempotency_key, job_id, status)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING *
+                """,
+                (
+                    target.id,
+                    source.id if source_is_new else None,
+                    Json(config),
+                    idempotency_key,
+                    request_job_id,
+                    request_status,
+                ),
+            )
+            return self._submission(cursor, self._request(cursor.fetchone()))
+
+    def promote_channel_target(
+        self, *, source_id: str, youtube_channel_id: str, handle: str | None = None
+    ) -> CollectionTargetRecord | None:
+        """Promote a provisional handle target after the worker resolves its UC ID."""
+
+        with self._connection() as connection, connection.cursor() as cursor:
+            source_row = self._select_source(cursor, source_id)
+            if not source_row or not source_row.get("target_id"):
+                return None
+            current = self._source(source_row)
+            if current.type is not SourceType.CHANNEL:
+                return None
+            cursor.execute("SELECT * FROM collection_targets WHERE id = %s FOR UPDATE", (current.target_id,))
+            current_target_row = cursor.fetchone()
+            if not current_target_row:
+                return None
+            current_target = self._target(current_target_row)
+            canonical_key = f"channel:{youtube_channel_id}"
+            cursor.execute(
+                "SELECT * FROM collection_targets WHERE type = 'channel' AND canonical_key = %s FOR UPDATE",
+                (canonical_key,),
+            )
+            existing_row = cursor.fetchone()
+            if existing_row and str(existing_row["id"]) != current_target.id:
+                target = self._target(existing_row)
+                # The partial active-target index permits only one live job after a
+                # merge.  Retain the already-canonical target's live work and leave
+                # redundant provisional jobs auditable but detached from the target.
+                cursor.execute(
+                    """
+                    SELECT id::text, target_id::text FROM sync_jobs
+                    WHERE target_id IN (%s, %s)
+                      AND state IN ('queued', 'running', 'waiting_retry', 'waiting_quota')
+                    ORDER BY created_at
+                    FOR UPDATE
+                    """,
+                    (current_target.id, target.id),
+                )
+                active_jobs = cursor.fetchall()
+                if any(str(job["target_id"]) == target.id for job in active_jobs):
+                    cursor.execute(
+                        """
+                        UPDATE sync_jobs SET target_id = NULL, updated_at = now()
+                        WHERE target_id = %s
+                          AND state IN ('queued', 'running', 'waiting_retry', 'waiting_quota')
+                        """,
+                        (current_target.id,),
+                    )
+                # Preserve every reference before retiring the provisional target.
+                cursor.execute("UPDATE collection_sources SET target_id = %s WHERE target_id = %s", (target.id, current_target.id))
+                cursor.execute("UPDATE collection_requests SET target_id = %s WHERE target_id = %s", (target.id, current_target.id))
+                cursor.execute("UPDATE sync_jobs SET target_id = %s WHERE target_id = %s", (target.id, current_target.id))
+                cursor.execute(
+                    """
+                    INSERT INTO collection_target_videos (target_id, video_id, first_seen_at, last_seen_at)
+                    SELECT %s, video_id, first_seen_at, last_seen_at
+                    FROM collection_target_videos WHERE target_id = %s
+                    ON CONFLICT (target_id, video_id) DO UPDATE
+                    SET first_seen_at = LEAST(collection_target_videos.first_seen_at, EXCLUDED.first_seen_at),
+                        last_seen_at = GREATEST(collection_target_videos.last_seen_at, EXCLUDED.last_seen_at)
+                    """,
+                    (target.id, current_target.id),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO collection_target_aliases (target_id, target_type, alias_kind, alias_value)
+                    SELECT %s, target_type, alias_kind, alias_value
+                    FROM collection_target_aliases WHERE target_id = %s
+                    ON CONFLICT (target_type, alias_kind, alias_value) DO NOTHING
+                    """,
+                    (target.id, current_target.id),
+                )
+                cursor.execute("DELETE FROM collection_target_aliases WHERE target_id = %s", (current_target.id,))
+                cursor.execute("DELETE FROM collection_targets WHERE id = %s", (current_target.id,))
+            else:
+                cursor.execute(
+                    """
+                    UPDATE collection_targets ct
+                    SET canonical_key = %s,
+                        resolved_channel_id = channels.id,
+                        updated_at = now()
+                    FROM channels
+                    WHERE ct.id = %s AND channels.youtube_channel_id = %s
+                    RETURNING ct.*
+                    """,
+                    (canonical_key, current_target.id, youtube_channel_id),
+                )
+                promoted = cursor.fetchone()
+                if not promoted:
+                    cursor.execute(
+                        "UPDATE collection_targets SET canonical_key = %s, updated_at = now() WHERE id = %s RETURNING *",
+                        (canonical_key, current_target.id),
+                    )
+                    promoted = cursor.fetchone()
+                target = self._target(promoted)
+            aliases = [("channel_id", youtube_channel_id)]
+            if handle:
+                aliases.append(("handle", handle.casefold()))
+            for alias_kind, alias_value in aliases:
+                cursor.execute(
+                    """
+                    INSERT INTO collection_target_aliases (target_id, target_type, alias_kind, alias_value)
+                    VALUES (%s, 'channel', %s, %s)
+                    ON CONFLICT (target_type, alias_kind, alias_value) DO UPDATE SET target_id = EXCLUDED.target_id
+                    """,
+                    (target.id, alias_kind, alias_value),
+                )
+            return target
 
     def get_job(self, job_id: str) -> JobRecord:
         with self._connection() as connection, connection.cursor() as cursor:
@@ -274,6 +793,15 @@ class PostgresRepository(CollectionRepository):
         if unknown:
             raise RepositoryError(f"Unsupported job changes: {', '.join(sorted(unknown))}")
         with self._connection() as connection, connection.cursor() as cursor:
+            # Use the same target -> job lock order as request submission.  This
+            # prevents a just-finished job from missing a concurrently inserted
+            # successor request between its terminal transition and pending scan.
+            cursor.execute("SELECT target_id FROM sync_jobs WHERE id = %s", (job_id,))
+            target_hint = cursor.fetchone()
+            if not target_hint:
+                raise NotFoundError(f"Job '{job_id}' was not found")
+            if target_hint.get("target_id"):
+                cursor.execute("SELECT id FROM collection_targets WHERE id = %s FOR UPDATE", (target_hint["target_id"],))
             cursor.execute("SELECT * FROM sync_jobs WHERE id = %s FOR UPDATE", (job_id,))
             row = cursor.fetchone()
             if not row:
@@ -288,7 +816,47 @@ class PostgresRepository(CollectionRepository):
                 values.append(Json(value) if key in {"checkpoint", "partial_errors"} else value)
             values.append(job_id)
             cursor.execute(f"UPDATE sync_jobs SET {', '.join(assignments)}, updated_at = now() WHERE id = %s RETURNING *", values)
-            return self._job(cursor.fetchone())
+            updated = self._job(cursor.fetchone())
+            if updated.state.is_terminal:
+                cursor.execute(
+                    "UPDATE collection_requests SET status = %s, updated_at = now() WHERE job_id = %s",
+                    (updated.state.value, updated.id),
+                )
+                if updated.target_id:
+                    if updated.state is JobState.COMPLETED:
+                        source_row = self._select_source(cursor, updated.source_id)
+                        if source_row:
+                            source = self._source(source_row)
+                            coverage = self._job_coverage(updated, source.type, source.config)
+                            coverage["complete"] = True
+                            cursor.execute(
+                                "UPDATE collection_targets SET coverage = %s, last_completed_at = now(), updated_at = now() WHERE id = %s",
+                                (Json(coverage), updated.target_id),
+                            )
+                    cursor.execute(
+                        """
+                        SELECT id::text FROM collection_requests
+                        WHERE target_id = %s AND job_id IS NULL AND status = 'queued'
+                        ORDER BY created_at
+                        FOR UPDATE
+                        """,
+                        (updated.target_id,),
+                    )
+                    pending = [str(row["id"]) for row in cursor.fetchall()]
+                    if pending:
+                        source = self._target_source(cursor, updated.target_id)
+                        if source:
+                            successor = self._create_target_job(
+                                cursor,
+                                target_id=updated.target_id,
+                                source=source,
+                                runtime_config_id=updated.runtime_config_id,
+                            )
+                            cursor.execute(
+                                "UPDATE collection_requests SET job_id = %s, status = 'queued', updated_at = now() WHERE id = ANY(%s)",
+                                (successor.id, pending),
+                            )
+            return updated
 
     def claim_next_job(self, *, worker_id: str, lease_seconds: int = 120) -> JobRecord | None:
         with self._connection() as connection, connection.cursor() as cursor:
@@ -447,6 +1015,16 @@ class PostgresRepository(CollectionRepository):
             )
             if cursor.rowcount != 1:
                 raise NotFoundError(f"Video '{youtube_video_id}' was not found")
+            cursor.execute(
+                """
+                INSERT INTO collection_target_videos (target_id, video_id)
+                SELECT collection_sources.target_id, video.id FROM collection_sources
+                CROSS JOIN (SELECT id FROM videos WHERE youtube_video_id = %s) video
+                WHERE collection_sources.id = %s AND collection_sources.target_id IS NOT NULL
+                ON CONFLICT (target_id, video_id) DO UPDATE SET last_seen_at = now()
+                """,
+                (youtube_video_id, source_id),
+            )
 
     def upsert_comment(self, comment: CommentRecord) -> CommentRecord:
         with self._connection() as connection, connection.cursor() as cursor:
@@ -524,6 +1102,29 @@ class PostgresRepository(CollectionRepository):
         )
         return [self._video(row) for row in cursor.fetchall()]
 
+    def _target_videos(self, cursor: Any, target_id: str) -> list[VideoRecord]:
+        cursor.execute(
+            """
+            SELECT v.id::text, v.youtube_video_id, c.youtube_channel_id, v.title, v.description, v.published_at,
+                   v.duration_seconds, v.privacy_status, v.made_for_kids, v.source_fetched_at,
+                   jsonb_build_object(
+                     'viewCount', COALESCE(stats.view_count, 0), 'likeCount', COALESCE(stats.like_count, 0),
+                     'commentCount', COALESCE(stats.comment_count, 0)
+                   ) AS statistics
+            FROM collection_target_videos tv
+            JOIN videos v ON v.id = tv.video_id
+            LEFT JOIN channels c ON c.id = v.channel_id
+            LEFT JOIN LATERAL (
+              SELECT view_count, like_count, comment_count FROM video_stat_snapshots
+              WHERE video_id = v.id ORDER BY fetched_at DESC LIMIT 1
+            ) stats ON TRUE
+            WHERE tv.target_id = %s
+            ORDER BY v.published_at DESC NULLS LAST, v.youtube_video_id
+            """,
+            (target_id,),
+        )
+        return [self._video(row) for row in cursor.fetchall()]
+
     def _comments(self, cursor: Any, video_ids: list[str]) -> list[CommentRecord]:
         if not video_ids:
             return []
@@ -560,14 +1161,16 @@ class PostgresRepository(CollectionRepository):
 
     def get_source_results(self, source_id: str) -> dict[str, Any]:
         with self._connection() as connection, connection.cursor() as cursor:
-            cursor.execute("SELECT id::text, type::text, config, enabled, created_at, updated_at, next_run_at FROM collection_sources WHERE id = %s", (source_id,))
-            source_row = cursor.fetchone()
+            source_row = self._select_source(cursor, source_id)
             if not source_row:
                 raise NotFoundError(f"Source '{source_id}' was not found")
             source = self._source(source_row)
-            cursor.execute("SELECT * FROM sync_jobs WHERE source_id = %s ORDER BY created_at DESC LIMIT 1", (source_id,))
+            if source.target_id:
+                cursor.execute("SELECT * FROM sync_jobs WHERE target_id = %s ORDER BY created_at DESC LIMIT 1", (source.target_id,))
+            else:
+                cursor.execute("SELECT * FROM sync_jobs WHERE source_id = %s ORDER BY created_at DESC LIMIT 1", (source_id,))
             latest_row = cursor.fetchone()
-            videos = self._source_videos(cursor, source_id)
+            videos = self._target_videos(cursor, source.target_id) if source.target_id else self._source_videos(cursor, source_id)
             comments = self._comments(cursor, [video.youtube_video_id for video in videos])
             summary = build_summary(videos, comments)
             return {"source": source, "latest_job": self._job(latest_row) if latest_row else None, "videos": videos, "comments": comments, "analysis": summary}

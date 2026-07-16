@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, FastAPI, Request, Response, status
+from fastapi import APIRouter, Depends, FastAPI, Header, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
@@ -17,6 +17,8 @@ from .contracts import (
     CollectionSource,
     CollectionSourceCreate,
     CollectionSourceUpdate,
+    CollectionRequestCreate,
+    CollectionRequestResponse,
     HealthResponse,
     JobCreate,
     JobStatus,
@@ -57,7 +59,7 @@ def create_app(repository: CollectionRepository | None = None, settings: Setting
         allow_origins=cors_origins,
         allow_credentials=False,
         allow_methods=["GET", "POST", "PATCH", "DELETE"],
-        allow_headers=["Content-Type", "Accept"],
+        allow_headers=["Content-Type", "Accept", "Idempotency-Key"],
     )
 
     @app.exception_handler(NotFoundError)
@@ -109,6 +111,21 @@ def create_app(repository: CollectionRepository | None = None, settings: Setting
     )
     def create_source(payload: CollectionSourceCreate, service: Service) -> CollectionSource:
         return service.create_source(payload)
+
+    @router.post(
+        "/collection-requests",
+        response_model=CollectionRequestResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["collection"],
+    )
+    def submit_collection_request(
+        payload: CollectionRequestCreate,
+        service: Service,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", max_length=255),
+    ) -> CollectionRequestResponse:
+        """Create or join a shared target collection job in one atomic command."""
+
+        return service.submit_collection_request(payload, idempotency_key=idempotency_key)
 
     @router.get("/sources", response_model=list[CollectionSource], tags=["sources"])
     def list_sources(service: Service) -> list[CollectionSource]:

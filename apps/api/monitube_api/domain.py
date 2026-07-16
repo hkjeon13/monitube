@@ -59,6 +59,13 @@ class SourceRecord:
     created_at: datetime
     updated_at: datetime
     next_run_at: datetime | None = None
+    # ``collection_sources`` remains a backwards-compatible worker-facing table.
+    # New collection flows attach it to one canonical target instead of creating a
+    # new physical source for every browser submission.
+    target_id: str | None = None
+    canonical_key: str | None = None
+    coverage: dict[str, Any] = field(default_factory=dict)
+    last_completed_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +91,48 @@ class JobRecord:
     lease_expires_at: datetime | None = None
     created_at: datetime = field(default_factory=utcnow)
     updated_at: datetime = field(default_factory=utcnow)
+    target_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CollectionTargetRecord:
+    """A canonical physical collection target shared by all user requests."""
+
+    id: str
+    type: SourceType
+    canonical_key: str
+    config: dict[str, Any]
+    coverage: dict[str, Any]
+    resolved_channel_id: str | None
+    last_completed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class CollectionRequestRecord:
+    """A browser request attached to a target and, when needed, a shared job."""
+
+    id: str
+    target_id: str
+    source_id: str | None
+    request_config: dict[str, Any]
+    idempotency_key: str | None
+    job_id: str | None
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class CollectionSubmission:
+    """Atomic result of accepting a collection request."""
+
+    request: CollectionRequestRecord
+    target: CollectionTargetRecord
+    source: SourceRecord
+    job: JobRecord | None
+    disposition: str
 
 
 @dataclass(frozen=True, slots=True)

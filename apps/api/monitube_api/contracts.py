@@ -119,28 +119,31 @@ class CollectionSourceUpdate(ApiModel):
     nextRunAt: datetime | None = None
 
 
-class ChannelCollectionSource(ApiModel):
+class CollectionSourceBase(ApiModel):
     id: str
+    enabled: bool
+    nextRunAt: datetime | None = None
+    # These fields are optional while a database is being migrated from the legacy
+    # source-only model.  They let clients render one shared collection card.
+    targetId: str | None = None
+    canonicalKey: str | None = None
+    coverage: dict[str, Any] = Field(default_factory=dict)
+    lastCompletedAt: datetime | None = None
+
+
+class ChannelCollectionSource(CollectionSourceBase):
     type: Literal[SourceType.CHANNEL] = SourceType.CHANNEL
-    enabled: bool
     config: ChannelSourceConfig
-    nextRunAt: datetime | None = None
 
 
-class KeywordCollectionSource(ApiModel):
-    id: str
+class KeywordCollectionSource(CollectionSourceBase):
     type: Literal[SourceType.KEYWORD] = SourceType.KEYWORD
-    enabled: bool
     config: KeywordSourceConfig
-    nextRunAt: datetime | None = None
 
 
-class VideoCollectionSource(ApiModel):
-    id: str
+class VideoCollectionSource(CollectionSourceBase):
     type: Literal[SourceType.VIDEO] = SourceType.VIDEO
-    enabled: bool
     config: VideoSourceConfig
-    nextRunAt: datetime | None = None
 
 
 CollectionSource: TypeAlias = Annotated[
@@ -153,6 +156,30 @@ class JobCreate(ApiModel):
     include_comments: bool = False
     max_videos: int | None = Field(default=None, ge=1, le=5_000)
     max_comments_per_video: int | None = Field(default=None, ge=1, le=100)
+
+
+class ChannelCollectionRequestCreate(ChannelCollectionSourceCreate):
+    """Submit a channel collection intent to the shared target coordinator."""
+
+    forceRefresh: bool = False
+
+
+class KeywordCollectionRequestCreate(KeywordCollectionSourceCreate):
+    """Submit a keyword collection intent to the shared target coordinator."""
+
+    forceRefresh: bool = False
+
+
+class VideoCollectionRequestCreate(VideoCollectionSourceCreate):
+    """Submit a direct-video collection intent to the shared target coordinator."""
+
+    forceRefresh: bool = False
+
+
+CollectionRequestCreate: TypeAlias = Annotated[
+    ChannelCollectionRequestCreate | KeywordCollectionRequestCreate | VideoCollectionRequestCreate,
+    Field(discriminator="type"),
+]
 
 
 class JobProgress(ApiModel):
@@ -179,6 +206,16 @@ class JobStatus(ApiModel):
     resumeAt: datetime | None = None
     resumeIsAutomatic: bool = False
     partialErrors: list[PartialError] = Field(default_factory=list)
+
+
+class CollectionRequestResponse(ApiModel):
+    """Outcome of an atomic, target-aware collection submission."""
+
+    id: str
+    disposition: Literal["cached", "joined", "queued", "successor_queued"]
+    targetId: str
+    source: CollectionSource
+    job: JobStatus | None = None
 
 
 class VideoStatistics(ApiModel):

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+
 from .channel_resolution import resolve_channel_input
 from .contracts import (
     ChannelLookup,
@@ -14,6 +16,8 @@ from .contracts import (
     CollectionSource,
     CollectionSourceCreate,
     CollectionSourceUpdate,
+    CollectionRequestCreate,
+    CollectionRequestResponse,
     JobCreate,
     JobProgress,
     JobStateChange,
@@ -28,14 +32,22 @@ from .contracts import (
     VideoSourceConfig,
     parse_source_config,
 )
-from .domain import CommentRecord, JobRecord, SourceRecord, SourceType, VideoRecord
+from .domain import CollectionSubmission, CommentRecord, JobRecord, SourceRecord, SourceType, VideoRecord
 from .repositories import CollectionRepository
 from .video_resolution import resolve_video_input
 
 
 def _source_contract(record: SourceRecord) -> CollectionSource:
     config = parse_source_config(record.type, record.config)
-    shared = {"id": record.id, "enabled": record.enabled, "nextRunAt": record.next_run_at}
+    shared = {
+        "id": record.id,
+        "enabled": record.enabled,
+        "nextRunAt": record.next_run_at,
+        "targetId": record.target_id,
+        "canonicalKey": record.canonical_key,
+        "coverage": record.coverage,
+        "lastCompletedAt": record.last_completed_at,
+    }
     if record.type is SourceType.CHANNEL:
         return ChannelCollectionSource(type=SourceType.CHANNEL, config=config, **shared)
     if record.type is SourceType.KEYWORD:
@@ -123,7 +135,60 @@ class CollectionService:
         config = parse_source_config(source_type, raw_config)
         if isinstance(config, VideoSourceConfig):
             return config.model_copy(update={"input": resolve_video_input(config.input).normalized})
+        if source_type is SourceType.CHANNEL:
+            return config.model_copy(update={"input": resolve_channel_input(config.input).normalized})
         return config
+
+    @staticmethod
+    def _canonical_target(source_type: SourceType, config: SourceConfig) -> tuple[str, list[tuple[str, str]]]:
+        """Build a stable target key while excluding requested collection breadth.
+
+        Handles and custom URLs are aliases rather than permanent identities.  Their
+        provisional key is intentionally replaced with ``channel:<UC…>`` once the
+        worker resolves the public channel ID.
+        """
+
+        serialized = config.model_dump(mode="json", exclude_none=True)
+        if source_type is SourceType.CHANNEL:
+            resolution = resolve_channel_input(str(serialized["input"]))
+            normalized = resolution.normalized
+            lowered = normalized.casefold()
+            if resolution.kind.value == "channel_id":
+                return f"channel:{normalized}", [("channel_id", normalized), ("input", normalized)]
+            return (
+                f"channel:{resolution.kind.value}:{lowered}",
+                [(resolution.kind.value, lowered), ("input", lowered)],
+            )
+        if source_type is SourceType.VIDEO:
+            video_id = str(serialized["input"])
+            return f"video:{video_id}", [("video_id", video_id), ("input", video_id)]
+
+        # A keyword target identity includes only search semantics.  Limits and
+        # comment depth are coverage, so different user requests still share it.
+        # Keep this material deliberately rendering-independent: the migration uses
+        # the exact same unit-separator contract when it backfills legacy targets.
+        fingerprint_material = "\x1f".join(
+            (
+                " ".join(str(serialized.get("query") or "").split()).lower(),
+                str(serialized.get("publishedAfter") or ""),
+                str(serialized.get("publishedBefore") or ""),
+                str(serialized.get("regionCode") or "").upper(),
+                str(serialized.get("relevanceLanguage") or "").lower(),
+                str(serialized.get("order") or "date"),
+            )
+        )
+        fingerprint = hashlib.sha256(fingerprint_material.encode("utf-8")).hexdigest()
+        return f"keyword:{fingerprint}", [("keyword", fingerprint)]
+
+    @staticmethod
+    def _submission_contract(submission: CollectionSubmission) -> CollectionRequestResponse:
+        return CollectionRequestResponse(
+            id=submission.request.id,
+            disposition=submission.disposition,
+            targetId=submission.target.id,
+            source=_source_contract(submission.source),
+            job=_job_contract(submission.job) if submission.job else None,
+        )
 
     def create_source(self, request: CollectionSourceCreate) -> CollectionSource:
         config = self._canonical_config(request.type, request.config)
@@ -133,6 +198,22 @@ class CollectionService:
                 config=config.model_dump(mode="json", exclude_none=True),
             )
         )
+
+    def submit_collection_request(
+        self, request: CollectionRequestCreate, *, idempotency_key: str | None = None
+    ) -> CollectionRequestResponse:
+        config = self._canonical_config(request.type, request.config)
+        canonical_key, aliases = self._canonical_target(request.type, config)
+        submission = self.repository.submit_collection_request(
+            source_type=request.type,
+            config=config.model_dump(mode="json", exclude_none=True),
+            canonical_key=canonical_key,
+            aliases=aliases,
+            force_refresh=request.forceRefresh,
+            idempotency_key=idempotency_key.strip() if idempotency_key else None,
+            runtime_config_id=self.runtime_config_id,
+        )
+        return self._submission_contract(submission)
 
     def list_sources(self) -> list[CollectionSource]:
         return [_source_contract(record) for record in self.repository.list_sources()]
