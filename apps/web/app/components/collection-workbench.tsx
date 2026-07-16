@@ -397,37 +397,25 @@ function StatusPill({ job }: { job?: JobStatus | null }) {
 
 function SourceProgress({ source }: { source: SourceSummary }) {
   const job = source.latestJob;
-  if (!job) return <div className="source-progress source-progress-idle"><span>아직 실행 기록이 없습니다.</span></div>;
+  if (!job) return <div className="source-progress source-progress-idle"><span>기록 없음</span></div>;
 
   const commentsRequested = source.config.includeComments === true || source.coverage?.includeComments === true;
-  const phase = (label: string, progress: JobStatus["progress"] | undefined, disabled = false) => {
-    if (disabled) return <div className="source-progress-phase" key={label}><span>{label}</span><small>수집 안 함</small></div>;
-    if (!progress) return <div className="source-progress-phase" key={label}><span>{label}</span><small>이전 이력</small></div>;
+  const phase = (prefix: string, progress: JobStatus["progress"] | undefined, disabled = false) => {
+    if (disabled) return `${prefix} 미수집`;
+    if (!progress) return `${prefix} —`;
     const total = progress.total;
-    const percent = total === undefined ? 0 : total === 0 ? 100 : Math.min(100, Math.round((progress.completed / total) * 100));
-    const copy = total === undefined ? `${formatCount(progress.completed)} 처리` : total === 0 ? "확인 대상 없음" : `${formatCount(progress.completed)} / ${formatCount(total)}`;
-    return (
-      <div className="source-progress-phase" key={label}>
-        <div><span>{label}</span><strong>{copy}</strong></div>
-        <i aria-hidden="true"><b style={{ width: `${percent}%` }} /></i>
-      </div>
-    );
+    const copy = total === undefined ? "—" : total === 0 ? "0" : `${formatCount(progress.completed)}/${formatCount(total)}`;
+    return `${prefix} ${copy}`;
   };
 
   const fullyCovered = job.state === "completed" && source.coverage?.complete === true;
-  const status = fullyCovered
-    ? "전체 범위 수집 완료"
-    : job.state === "completed"
-      ? "최근 작업 종료 · 전체 범위 확인 필요"
-      : statusCopy(job);
+  const status = fullyCovered ? "완료" : job.state === "completed" ? "종료" : statusCopy(job).replace("수집 ", "");
 
   return (
     <div className="source-progress" aria-label={`${sourceLabel(source)} 수집 진행률`}>
-      <div className="source-progress-heading"><StatusPill job={job} /><small>{status}</small></div>
-      <div className="source-progress-phases">
-        {phase("영상 정보", job.videoProgress)}
-        {phase("댓글", job.commentProgress, !commentsRequested)}
-      </div>
+      <span className={`source-progress-state source-progress-state-${job.state}`}>{status}</span>
+      <span>{phase("영상", job.videoProgress)}</span>
+      {commentsRequested && <span>{phase("댓글", job.commentProgress)}</span>}
     </div>
   );
 }
