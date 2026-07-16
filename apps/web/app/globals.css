@@ -526,9 +526,19 @@ svg { display: block; width: 1.125rem; height: 1.125rem; stroke-width: 1.7; }
   .secondary-action { min-height: var(--touch-target); }
   .overview-intro { align-items: flex-start; flex-direction: column; gap: 0.875rem; padding: 2rem 0 1.4375rem; }
   .overview-intro h1 { font-size: 2.5rem; line-height: 1.05; }
-  .workspace-page-heading { padding: 2rem 0 1.25rem; }
-  .workspace-page-heading h1 { font-size: 2.5rem; line-height: 1.05; }
-  .sources-page-list { grid-template-columns: 1fr; }
+  .workspace-page-heading { padding: 1.5rem 0 1rem; }
+  .workspace-page-heading h1 { font-size: 2.25rem; line-height: 1.02; }
+  .workspace-page-heading > p:last-child { margin-top: 0.625rem; font-size: 0.75rem; line-height: 1.48; }
+  .sources-page-list { grid-template-columns: 1fr; gap: 0.625rem; }
+  .source-page-card { gap: 0.4375rem; padding: 0.875rem; border-radius: 1rem; }
+  .source-page-select { display: flex; flex-wrap: wrap; align-items: center; column-gap: 0.5rem; row-gap: 0.375rem; }
+  .source-page-select .source-type-chip { width: auto; min-height: 1.5rem; flex: 0 0 auto; padding: 0 0.5rem; font-size: 0.625rem; }
+  .source-page-select > strong { flex: 1 1 10rem; font-size: 0.8125rem; }
+  .source-page-select > small { flex: 1 0 100%; font-size: 0.625rem; line-height: 1.35; }
+  .source-page-card footer { min-height: 2.5rem; padding-top: 0.5rem; font-size: 0.625rem; }
+  .source-card-actions { gap: 0.4375rem; }
+  .source-refresh-button, .source-delete-button { width: 2.5rem; height: 2.5rem; border-radius: 0.6875rem; }
+  .source-refresh-button svg, .source-delete-button svg { width: 1rem; height: 1rem; }
   .explore-section { margin-bottom: 1.5rem; padding: 2rem 0 1rem; }
   .explore-heading h2 { font-size: 3.25rem; }
   .explore-channel-strip { margin-top: 1.75rem; }
