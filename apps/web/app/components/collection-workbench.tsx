@@ -22,6 +22,7 @@ import {
   XMarkIcon,
 } from "@heroicons/react/24/outline";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import type {
   ChannelSourceConfig,
   CollectionSourceType,
@@ -405,6 +406,8 @@ function MetricCard({
 }
 
 export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePage }) {
+  const router = useRouter();
+  const [requestedSourceId, setRequestedSourceId] = useState<string | null>(null);
   const [form, setForm] = useState<FormState>(initialForm);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -437,6 +440,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   const videoTriggerRef = useRef<HTMLElement | null>(null);
   const collectionDrawerRef = useRef<HTMLElement | null>(null);
   const videoDrawerRef = useRef<HTMLElement | null>(null);
+  const appliedSourceQueryRef = useRef<string | null>(null);
 
   const requestBody = useMemo(() => sourceRequest(form), [form]);
   const validationError = useMemo(() => validate(requestBody), [requestBody]);
@@ -477,6 +481,10 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     setForm((current) => ({ ...current, [key]: value }));
     setError(null);
   };
+
+  const openSourceWorkspace = useCallback((sourceId: string) => {
+    router.push(`/?source=${encodeURIComponent(sourceId)}`);
+  }, [router]);
 
   const refreshSources = useCallback(async () => {
     setIsSourcesLoading(true);
@@ -583,8 +591,19 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   }, [loadComments]);
 
   useEffect(() => {
+    setRequestedSourceId(new URLSearchParams(window.location.search).get("source"));
+  }, []);
+
+  useEffect(() => {
     void refreshSources();
   }, [refreshSources]);
+
+  useEffect(() => {
+    if (!requestedSourceId || appliedSourceQueryRef.current === requestedSourceId) return;
+    if (!sources.some((source) => source.id === requestedSourceId)) return;
+    appliedSourceQueryRef.current = requestedSourceId;
+    setActiveSourceId(requestedSourceId);
+  }, [requestedSourceId, sources]);
 
   useEffect(() => {
     void refreshExplore();
@@ -611,13 +630,15 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
         const nextJob = await getJob(jobId);
         setJob(nextJob);
         setJobSourceId(sourceId);
+        await refreshResults(sourceId);
+        if (isTerminalJob(nextJob)) void refreshExplore();
       } catch {
         // Keep the last valid state visible through a transient polling failure.
       }
     };
     const timer = window.setInterval(() => { void poll(); }, 5_000);
     return () => window.clearInterval(timer);
-  }, [activeJob, activeSourceId]);
+  }, [activeJob, activeSourceId, refreshExplore, refreshResults]);
 
   useEffect(() => {
     if (jobSourceId && isTerminalJob(job)) void refreshResults(jobSourceId);
@@ -800,7 +821,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
               const pinned = source.targetId ? pinsByTargetId.get(source.targetId)?.enabled !== false : false;
               return (
                 <article key={source.id} className={source.id === activeSourceId ? "source-page-card source-page-card-active" : "source-page-card"}>
-                  <button type="button" className="source-page-select" onClick={() => setActiveSourceId(source.id)}>
+                  <button type="button" className="source-page-select" onClick={() => openSourceWorkspace(source.id)} aria-label={`${sourceLabel(source)} 작업 공간 열기`}>
                     <span className="source-type-chip">{sourceTypeCopy(source.type)}</span>
                     <strong>{sourceLabel(source)}</strong>
                     <small>{sourceCoverage(source)}</small>

@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import timedelta
 
 from monitube_api.domain import CommentRecord, JobState, QuotaBucket, SourceType, VideoRecord, new_id, utcnow
@@ -215,6 +216,7 @@ def test_channel_refresh_stops_at_known_upload_page_and_comment_page() -> None:
         source_type=SourceType.CHANNEL,
         config={"input": "@example", "includeComments": True, "collectAllVideos": True, "collectAllComments": True},
     )
+    repository._sources[source.id] = replace(source, coverage={"complete": True, "collectAllVideos": True})
     job = repository.create_job(source_id=source.id, include_comments=True, max_videos=None, max_comments_per_video=None)
     client = IncrementalChannelClient()
 

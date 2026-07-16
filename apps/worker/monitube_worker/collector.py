@@ -177,7 +177,9 @@ class YouTubeCollector:
         )
         return item
 
-    def _channel_video_ids(self, job: JobRecord, source_config: Mapping[str, Any]) -> tuple[list[str], dict[str, VideoRecord]]:
+    def _channel_video_ids(
+        self, job: JobRecord, source_config: Mapping[str, Any], *, incremental_refresh: bool
+    ) -> tuple[list[str], dict[str, VideoRecord]]:
         channel = self._resolve_channel(job, str(source_config["input"]))
         playlist_id = ((channel.get("contentDetails") or {}).get("relatedPlaylists") or {}).get("uploads")
         if not playlist_id:
@@ -217,7 +219,7 @@ class YouTubeCollector:
             # Upload playlists are newest-first. After refreshing the newest
             # already-known page, older pages cannot introduce a new upload for
             # this channel, so stop before spending more API calls.
-            if collect_all and page_ids and len(existing_on_page) == len(page_ids):
+            if incremental_refresh and collect_all and page_ids and len(existing_on_page) == len(page_ids):
                 break
             if not page_token:
                 break
@@ -318,7 +320,9 @@ class YouTubeCollector:
             source_fetched_at=utcnow(),
         )
 
-    def _collect_comments(self, job: JobRecord, video: VideoRecord, max_pages: int | None) -> int:
+    def _collect_comments(
+        self, job: JobRecord, video: VideoRecord, max_pages: int | None, *, incremental_refresh: bool
+    ) -> int:
         page_token, completed_pages = self._resume_cursor(job, stage="comments", scope_key=video.youtube_video_id)
         count = 0
         page = completed_pages
@@ -368,7 +372,7 @@ class YouTubeCollector:
             self._checkpoint(job, stage="comments", scope_key=video.youtube_video_id, page_token=page_token, batch_cursor=page)
             # ``order=time`` makes the first all-known page the incremental
             # boundary. We still upsert that page above so likes/edits remain fresh.
-            if page_comment_ids and len(known_comment_ids) == len(page_comment_ids):
+            if incremental_refresh and page_comment_ids and len(known_comment_ids) == len(page_comment_ids):
                 break
             if not page_token:
                 break
@@ -381,13 +385,18 @@ class YouTubeCollector:
         self._active_checkpoint = dict(job.checkpoint)
         try:
             if source.type is SourceType.CHANNEL:
-                video_ids, known_videos = self._channel_video_ids(job, source.config)
+                incremental_refresh = bool(source.coverage.get("complete") and source.coverage.get("collectAllVideos"))
+                video_ids, known_videos = self._channel_video_ids(
+                    job, source.config, incremental_refresh=incremental_refresh
+                )
             elif source.type is SourceType.KEYWORD:
                 video_ids = self._keyword_video_ids(job, source.config)
                 known_videos = {}
+                incremental_refresh = False
             else:
                 video_ids = [str(source.config["input"])]
                 known_videos = {}
+                incremental_refresh = False
 
             self.repository.update_job_progress(job.id, completed=0, total=len(video_ids), unit="videos", current_stage="fetching_videos")
             videos = self._video_records(job, video_ids)
@@ -403,13 +412,16 @@ class YouTubeCollector:
                 videos_with_new_comments = [
                     video
                     for video in videos
-                    if source.type is not SourceType.CHANNEL
+                    if not incremental_refresh
+                    or source.type is not SourceType.CHANNEL
                     or video.youtube_video_id not in known_videos
                     or video.statistics.get("commentCount", 0) > known_videos[video.youtube_video_id].statistics.get("commentCount", 0)
                 ]
                 collected_comments = 0
                 for index, video in enumerate(videos_with_new_comments, start=1):
-                    collected_comments += self._collect_comments(job, video, max_pages)
+                    collected_comments += self._collect_comments(
+                        job, video, max_pages, incremental_refresh=incremental_refresh
+                    )
                     self.repository.update_job_progress(job.id, completed=index, total=len(videos_with_new_comments), unit="comments", current_stage="collecting_comments")
                 self._checkpoint(job, stage="analysis", scope_key=source.id, page_token=None, batch_cursor=collected_comments)
 
