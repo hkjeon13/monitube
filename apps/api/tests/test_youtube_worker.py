@@ -276,12 +276,11 @@ def test_channel_count_deficit_continues_to_oldest_playlist_pages() -> None:
         source_type=SourceType.CHANNEL,
         config={"input": "@example", "includeComments": False, "collectAllVideos": True},
     )
-    repository._sources[source.id] = replace(source, coverage={"complete": True, "collectAllVideos": True})
     job = repository.create_job(source_id=source.id, include_comments=False, max_videos=None, max_comments_per_video=None)
     client = HistoricalBackfillClient()
 
     ids, known_videos, backfill_required = YouTubeCollector(repository, client)._channel_video_ids(
-        job, source.config, incremental_refresh=True
+        job, source.config, incremental_refresh=False
     )
 
     assert backfill_required is True

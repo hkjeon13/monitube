@@ -200,9 +200,7 @@ class YouTubeCollector:
         # be incomplete when an earlier quota pause meant we never reached its tail.
         # In that case do not stop at the first known page: traverse the playlist and
         # then process the returned IDs oldest-first to fill the historical gap.
-        backfill_required = bool(
-            incremental_refresh and collect_all and expected_video_count > stored_video_count
-        )
+        backfill_required = bool(collect_all and expected_video_count > stored_video_count)
         ids: list[str] = []
         known_videos: dict[str, VideoRecord] = {}
         # Discovery pages are idempotently replayed after a quota pause. The page
