@@ -3,7 +3,6 @@
 import {
   ArrowPathIcon,
   ArrowsUpDownIcon,
-  BookmarkIcon,
   CheckCircleIcon,
   ChevronRightIcon,
   ClockIcon,
@@ -834,7 +833,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
                         {coverVideo ? <img src={youtubeThumbnail(coverVideo.youtubeVideoId)} alt="" /> : <span className="explore-avatar">{(channel.title ?? channel.handle ?? "Y").slice(0, 1).toUpperCase()}</span>}
                         <span><strong>{channel.title ?? channel.handle ?? channel.youtubeChannelId}</strong><small>{channel.handle ? `@${channel.handle.replace(/^@/, "")}` : `${formatCount(channel.videoCount)} videos`}</small></span>
                       </button>
-                      {hasTarget && <button className={pinned ? "pin-button pin-button-active" : "pin-button"} type="button" disabled={pinningTargetId === channel.targetId} onClick={() => channel.targetId && void togglePin(channel.targetId, pinned)} aria-pressed={pinned} aria-label={pinned ? `${channel.title ?? channel.youtubeChannelId} 자동 갱신 해제` : `${channel.title ?? channel.youtubeChannelId} 자동 갱신 핀 설정`}><BookmarkIcon aria-hidden="true" /></button>}
+                      {hasTarget && <button className={pinned ? "refresh-button refresh-button-stop" : "refresh-button"} type="button" disabled={pinningTargetId === channel.targetId} onClick={() => channel.targetId && void togglePin(channel.targetId, pinned)} aria-pressed={pinned} aria-label={pinned ? `${channel.title ?? channel.youtubeChannelId} 자동 갱신 중지` : `${channel.title ?? channel.youtubeChannelId} 자동 갱신 재개`}>{pinned ? "중지" : "재개"}</button>}
                     </div>
                   );
                 })}

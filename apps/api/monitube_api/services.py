@@ -124,6 +124,8 @@ class CollectionService:
         self.repository = repository
         self.runtime_config_id = runtime_config_id
 
+    _DEFAULT_CHANNEL_REFRESH_MINUTES = 360
+
     def resolve_channel(self, input_value: str) -> ChannelResolutionResponse:
         resolution = resolve_channel_input(input_value)
         return ChannelResolutionResponse(
@@ -216,6 +218,15 @@ class CollectionService:
             idempotency_key=idempotency_key.strip() if idempotency_key else None,
             runtime_config_id=self.runtime_config_id,
         )
+        # Channels are subscriptions by default.  The initial request still starts
+        # immediately; this durable target-level pin schedules later refreshes of
+        # the same canonical channel without creating duplicate user requests.
+        if request.type is SourceType.CHANNEL:
+            self.repository.set_target_pin(
+                target_id=submission.target.id,
+                enabled=True,
+                interval_minutes=self._DEFAULT_CHANNEL_REFRESH_MINUTES,
+            )
         return self._submission_contract(submission)
 
     def list_sources(self) -> list[CollectionSource]:
