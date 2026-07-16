@@ -158,7 +158,8 @@ svg { display: block; width: 1.125rem; height: 1.125rem; stroke-width: 1.7; }
    workspace rather than scrolling within one long dashboard. */
 .page-overview .explore-section, .page-overview .sources-page { display: none; }
 .page-overview .collection-health-panel, .page-overview .word-panel { display: none; }
-.page-explore .overview-intro, .page-explore .sources-page, .page-explore .dashboard-content, .page-explore .empty-overview { display: none; }
+.page-explore .overview-intro, .page-explore .sources-page, .page-explore .dashboard-content, .page-explore .empty-overview, .page-explore .channel-details-page { display: none; }
+.page-explore .explore-channel-strip, .page-explore .explore-channel-overview { display: none; }
 .page-sources .overview-intro, .page-sources .explore-section, .page-sources .dashboard-content, .page-sources .empty-overview { display: none; }
 .page-sources .sources-page { display: block; }
 .page-jobs .overview-intro, .page-jobs .explore-section, .page-jobs .sources-page, .page-jobs .empty-overview { display: none; }
@@ -169,6 +170,8 @@ svg { display: block; width: 1.125rem; height: 1.125rem; stroke-width: 1.7; }
 .page-insights .word-panel { grid-column: 1 / -1; }
 
 .explore-section { margin: 0 0 2.25rem; padding: 3.75rem 0 1.5rem; scroll-margin-top: 1.5rem; }
+.channel-details-page { display: none; padding: 2rem 0 0; }
+.page-overview .channel-details-page { display: block; }
 .page-explore .explore-section { padding-top: 1.5rem; }
 .explore-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
 .explore-heading h2 { margin: 0; color: #121914; font-family: var(--font-sans); font-size: clamp(3.25rem, 7vw, 6.25rem); font-weight: 820; letter-spacing: -0.075em; line-height: 0.86; }

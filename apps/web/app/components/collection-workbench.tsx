@@ -873,11 +873,9 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   }, [closeCollectionDrawer, requestBody, validationError]);
 
   const navigation = [
-    { id: "overview" as const, label: "Overview", href: "/", Icon: HomeIcon },
-    { id: "explore" as const, label: "Explore", href: "/explore", Icon: Squares2X2Icon },
+    { id: "explore" as const, label: "Explore", href: "/", Icon: Squares2X2Icon },
+    { id: "overview" as const, label: "Channels", href: "/channels", Icon: HomeIcon },
     { id: "sources" as const, label: "Sources", href: "/sources", Icon: FolderIcon },
-    { id: "jobs" as const, label: "Collection jobs", href: "/jobs", Icon: QueueListIcon },
-    { id: "insights" as const, label: "Insights", href: "/insights", Icon: SparklesIcon },
   ];
 
   return (
@@ -988,10 +986,27 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
           </div>
         </section>
 
+        <section className="channel-details-page" aria-label="채널 상세">
+          <div className="explore-channel-strip" aria-label="수집된 채널">
+            {explore.channels.map((channel) => {
+              const coverVideo = explore.videos.find((video) => video.channelId === channel.youtubeChannelId);
+              const selected = channel.youtubeChannelId === exploreChannelId;
+              const avatarUrl = channel.thumbnailUrl ?? (coverVideo ? youtubeThumbnail(coverVideo.youtubeVideoId) : undefined);
+              return <button className={selected ? "explore-channel-avatar-button explore-channel-avatar-button-selected" : "explore-channel-avatar-button"} type="button" key={channel.youtubeChannelId} onClick={() => { setExploreChannelId((current) => current === channel.youtubeChannelId ? null : channel.youtubeChannelId); setExploreVisibleCount(12); }} aria-pressed={selected} aria-label={`${channel.title ?? channel.handle ?? channel.youtubeChannelId} 채널 상세 보기`} title={channel.title ?? channel.handle ?? channel.youtubeChannelId}>{avatarUrl ? <img src={avatarUrl} alt="" /> : <span className="explore-avatar">{(channel.title ?? channel.handle ?? "Y").slice(0, 1).toUpperCase()}</span>}</button>;
+            })}
+          </div>
+          {selectedExploreChannel && <section className="explore-channel-overview" aria-labelledby="channel-overview-title">
+            <div className="channel-overview-avatar">{selectedExploreChannel.thumbnailUrl ? <img src={selectedExploreChannel.thumbnailUrl} alt="" /> : <span>{(selectedExploreChannel.title ?? selectedExploreChannel.handle ?? "Y").slice(0, 1).toUpperCase()}</span>}</div>
+            <div className="channel-overview-copy"><p className="section-kicker">CHANNEL OVERVIEW</p><h3 id="channel-overview-title">{selectedExploreChannel.title ?? selectedExploreChannel.handle ?? selectedExploreChannel.youtubeChannelId}</h3><p className="channel-overview-id">{selectedExploreChannel.handle ? `@${selectedExploreChannel.handle.replace(/^@/, "")} · ` : ""}{selectedExploreChannel.youtubeChannelId}</p>{selectedExploreChannel.description && <p className="channel-overview-description">{selectedExploreChannel.description}</p>}</div>
+            <dl className="channel-overview-stats"><div><dt>구독자</dt><dd>{selectedExploreChannel.hiddenSubscriberCount ? "비공개" : formatCount(selectedExploreChannel.subscriberCount)}</dd></div><div><dt>채널 영상</dt><dd>{formatCount(selectedExploreChannel.youtubeVideoCount ?? selectedExploreChannel.videoCount)}</dd></div><div><dt>저장 영상</dt><dd>{formatCount(selectedExploreChannel.videoCount)}</dd></div><div><dt>수집 댓글</dt><dd>{formatCount(selectedExploreChannel.commentCount)}</dd></div></dl>
+            {!selectedExploreChannel.hiddenSubscriberCount && <SubscriberTrend samples={subscriberHistory} />}
+          </section>}
+        </section>
+
         <section className="overview-intro" id="overview" aria-labelledby="overview-title" tabIndex={-1}>
           <div>
             <p className="section-kicker">MONITUBE / ANALYSIS WORKSPACE</p>
-            <h1 id="overview-title">Overview</h1>
+            <h1 id="overview-title">Channels</h1>
             <p>{sourceScope(activeSource)}</p>
           </div>
           {activeSource && (
