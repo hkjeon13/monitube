@@ -715,7 +715,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     if (page !== "explore" || hasSearchQuery || !sentinel || visibleExploreVideos.length >= exploreVideos.length) return;
     const observer = new IntersectionObserver(([entry]) => {
       if (entry.isIntersecting) setExploreVisibleCount((count) => Math.min(count + 12, exploreVideos.length));
-    }, { rootMargin: "18rem 0px" });
+    }, { rootMargin: "288px 0px" });
     observer.observe(sentinel);
     return () => observer.disconnect();
   }, [hasSearchQuery, page, exploreVideos.length, visibleExploreVideos.length]);
