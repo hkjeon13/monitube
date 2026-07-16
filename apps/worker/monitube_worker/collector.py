@@ -69,14 +69,44 @@ class YouTubeCollector:
 
     def _checkpoint(self, job: JobRecord, *, stage: str, scope_key: str, page_token: str | None, batch_cursor: int = 0) -> None:
         quota_retry_attempt = as_int(self._active_checkpoint.get("quotaRetryAttempt"))
+        phase_progress = self._active_checkpoint.get("phaseProgress")
         self._active_checkpoint = {
             "stage": stage,
             "scopeKey": scope_key,
             "pageToken": page_token,
             "batchCursor": batch_cursor,
         }
+        if isinstance(phase_progress, dict):
+            self._active_checkpoint["phaseProgress"] = phase_progress
         if quota_retry_attempt:
             self._active_checkpoint["quotaRetryAttempt"] = quota_retry_attempt
+        self.repository.checkpoint_job(job.id, self._active_checkpoint)
+
+    def _set_phase_progress(
+        self,
+        job: JobRecord,
+        *,
+        phase: str,
+        completed: int,
+        total: int | None,
+        current_stage: str,
+    ) -> None:
+        """Persist independently renderable video/comment progress with the job."""
+
+        existing = self._active_checkpoint.get("phaseProgress")
+        phases = dict(existing) if isinstance(existing, dict) else {}
+        phases[phase] = {"completed": max(0, completed), "total": max(0, total) if total is not None else None}
+        self._active_checkpoint["phaseProgress"] = phases
+        self.repository.update_job_progress(
+            job.id,
+            completed=max(0, completed),
+            total=max(0, total) if total is not None else None,
+            unit="videos" if phase == "videos" else "comments",
+            current_stage=current_stage,
+        )
+        # Keep the current cursor untouched.  In particular, replacing a
+        # comment-page checkpoint here would prevent a quota-paused job from
+        # resuming that video's page cursor.
         self.repository.checkpoint_job(job.id, self._active_checkpoint)
 
     @staticmethod
@@ -321,6 +351,13 @@ class YouTubeCollector:
                 )
                 records.append(self.repository.upsert_video(record))
             self._checkpoint(job, stage="video_details", scope_key="videos", page_token=None, batch_cursor=offset + len(batch))
+            self._set_phase_progress(
+                job,
+                phase="videos",
+                completed=offset + len(batch),
+                total=len(distinct_ids),
+                current_stage="fetching_videos",
+            )
         return records
 
     def _comment_from_item(self, *, video_id: str, thread_id: str, item: Mapping[str, Any], parent_id: str | None = None) -> CommentRecord:
@@ -419,11 +456,11 @@ class YouTubeCollector:
                 backfill_required = False
 
             stage = "backfilling_oldest_videos" if backfill_required else "fetching_videos"
-            self.repository.update_job_progress(job.id, completed=0, total=len(video_ids), unit="videos", current_stage=stage)
+            self._set_phase_progress(job, phase="videos", completed=0, total=len(video_ids), current_stage=stage)
             videos = self._video_records(job, video_ids)
             for video in videos:
                 self.repository.link_source_video(source.id, video.youtube_video_id)
-            self.repository.update_job_progress(job.id, completed=len(videos), total=len(video_ids), unit="videos", current_stage="videos_persisted")
+            self._set_phase_progress(job, phase="videos", completed=len(video_ids), total=len(video_ids), current_stage="videos_persisted")
 
             include_comments = bool(job.include_comments or source.config.get("includeComments"))
             if include_comments:
@@ -439,11 +476,24 @@ class YouTubeCollector:
                     or video.statistics.get("commentCount", 0) > known_videos[video.youtube_video_id].statistics.get("commentCount", 0)
                 ]
                 collected_comments = 0
+                self._set_phase_progress(
+                    job,
+                    phase="comments",
+                    completed=0,
+                    total=len(videos_with_new_comments),
+                    current_stage="collecting_comments",
+                )
                 for index, video in enumerate(videos_with_new_comments, start=1):
                     collected_comments += self._collect_comments(
                         job, video, max_pages, incremental_refresh=incremental_refresh
                     )
-                    self.repository.update_job_progress(job.id, completed=index, total=len(videos_with_new_comments), unit="comments", current_stage="collecting_comments")
+                    self._set_phase_progress(
+                        job,
+                        phase="comments",
+                        completed=index,
+                        total=len(videos_with_new_comments),
+                        current_stage="collecting_comments",
+                    )
                 self._checkpoint(job, stage="analysis", scope_key=source.id, page_token=None, batch_cursor=collected_comments)
 
             self.repository.save_analysis_summary(source.id)

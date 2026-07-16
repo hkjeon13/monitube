@@ -19,6 +19,7 @@ export interface SourceSummary {
   canonicalKey?: string;
   coverage?: Record<string, unknown>;
   lastCompletedAt?: string;
+  latestJob?: JobStatus;
 }
 
 export type CollectionRequestDisposition = "cached" | "joined" | "queued" | "successor_queued";
@@ -230,6 +231,9 @@ function normalizeSource(value: unknown): SourceSummary | null {
     ...(asText(record.lastCompletedAt ?? record.last_completed_at)
       ? { lastCompletedAt: asText(record.lastCompletedAt ?? record.last_completed_at) }
       : {}),
+    ...(normalizeJob(record.latestJob ?? record.latest_job)
+      ? { latestJob: normalizeJob(record.latestJob ?? record.latest_job) }
+      : {}),
   };
 }
 
@@ -275,6 +279,17 @@ function normalizeJob(value: unknown): JobStatus | undefined {
   const completed = asNumber(progress?.completed ?? record.progressCompleted ?? record.progress_completed) ?? 0;
   const total = asNumber(progress?.total ?? record.progressTotal ?? record.progress_total);
   const unit = asText(progress?.unit ?? record.progressUnit ?? record.progress_unit) ?? "sources";
+  const phaseProgress = (phaseValue: unknown, fallbackUnit: "videos" | "comments") => {
+    const phase = asRecord(phaseValue);
+    if (!phase) return undefined;
+    const phaseCompleted = asNumber(phase.completed) ?? 0;
+    const phaseTotal = asNumber(phase.total);
+    return {
+      completed: phaseCompleted,
+      ...(phaseTotal === undefined ? {} : { total: phaseTotal }),
+      unit: (asText(phase.unit) ?? fallbackUnit) as JobStatus["progress"]["unit"],
+    };
+  };
 
   return {
     id,
@@ -285,6 +300,12 @@ function normalizeJob(value: unknown): JobStatus | undefined {
       ...(total === undefined ? {} : { total }),
       unit: unit as JobStatus["progress"]["unit"],
     },
+    ...(phaseProgress(record.videoProgress ?? record.video_progress, "videos")
+      ? { videoProgress: phaseProgress(record.videoProgress ?? record.video_progress, "videos") }
+      : {}),
+    ...(phaseProgress(record.commentProgress ?? record.comment_progress, "comments")
+      ? { commentProgress: phaseProgress(record.commentProgress ?? record.comment_progress, "comments") }
+      : {}),
     ...(asText(record.pauseReason ?? record.pause_reason)
       ? { pauseReason: asText(record.pauseReason ?? record.pause_reason) }
       : {}),

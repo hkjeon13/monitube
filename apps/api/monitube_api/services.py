@@ -53,6 +53,7 @@ def _source_contract(record: SourceRecord) -> CollectionSource:
         "canonicalKey": record.canonical_key,
         "coverage": record.coverage,
         "lastCompletedAt": record.last_completed_at,
+        "latestJob": _job_contract(record.latest_job) if record.latest_job else None,
     }
     if record.type is SourceType.CHANNEL:
         return ChannelCollectionSource(type=SourceType.CHANNEL, config=config, **shared)
@@ -62,11 +63,30 @@ def _source_contract(record: SourceRecord) -> CollectionSource:
 
 
 def _job_contract(record: JobRecord) -> JobStatus:
+    details = record.checkpoint.get("phaseProgress") if isinstance(record.checkpoint, dict) else None
+
+    def phase(name: str, unit: str) -> JobProgress | None:
+        item = details.get(name) if isinstance(details, dict) else None
+        if not isinstance(item, dict):
+            # Older jobs did not retain separate phases. Preserve the one
+            # durable aggregate instead of inventing a misleading total.
+            if record.progress_unit != unit:
+                return None
+            return JobProgress(completed=record.progress_completed, total=record.progress_total, unit=unit)
+        total = item.get("total")
+        return JobProgress(
+            completed=max(0, int(item.get("completed") or 0)),
+            total=max(0, int(total)) if total is not None else None,
+            unit=unit,
+        )
+
     return JobStatus(
         id=record.id,
         state=record.state,
         currentStage=record.current_stage,
         progress=JobProgress(completed=record.progress_completed, total=record.progress_total, unit=record.progress_unit),
+        videoProgress=phase("videos", "videos"),
+        commentProgress=phase("comments", "comments"),
         pauseReason=record.pause_reason,
         quotaBucket=record.quota_bucket,
         resumeAt=record.resume_at,

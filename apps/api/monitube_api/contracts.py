@@ -125,6 +125,36 @@ class CollectionSourceUpdate(ApiModel):
     nextRunAt: datetime | None = None
 
 
+class JobProgress(ApiModel):
+    completed: int = Field(ge=0)
+    total: int | None = Field(default=None, ge=0)
+    unit: Literal["sources", "pages", "videos", "comments"] = "sources"
+
+
+class PartialError(ApiModel):
+    scope: Literal["channel", "video", "comment", "source"]
+    sourceId: str
+    code: str
+    retryable: bool
+    message: str | None = None
+
+
+class JobStatus(ApiModel):
+    id: str
+    state: JobState
+    currentStage: str
+    progress: JobProgress
+    # These two values are retained independently in the job checkpoint, so a
+    # completed card can state what happened to video details and comments.
+    videoProgress: JobProgress | None = None
+    commentProgress: JobProgress | None = None
+    pauseReason: str | None = None
+    quotaBucket: QuotaBucket | None = None
+    resumeAt: datetime | None = None
+    resumeIsAutomatic: bool = False
+    partialErrors: list[PartialError] = Field(default_factory=list)
+
+
 class CollectionSourceBase(ApiModel):
     id: str
     enabled: bool
@@ -135,6 +165,7 @@ class CollectionSourceBase(ApiModel):
     canonicalKey: str | None = None
     coverage: dict[str, Any] = Field(default_factory=dict)
     lastCompletedAt: datetime | None = None
+    latestJob: JobStatus | None = None
 
 
 class TargetPinUpdate(ApiModel):
@@ -241,32 +272,6 @@ CollectionRequestCreate: TypeAlias = Annotated[
     ChannelCollectionRequestCreate | KeywordCollectionRequestCreate | VideoCollectionRequestCreate,
     Field(discriminator="type"),
 ]
-
-
-class JobProgress(ApiModel):
-    completed: int = Field(ge=0)
-    total: int | None = Field(default=None, ge=0)
-    unit: Literal["sources", "pages", "videos", "comments"] = "sources"
-
-
-class PartialError(ApiModel):
-    scope: Literal["channel", "video", "comment", "source"]
-    sourceId: str
-    code: str
-    retryable: bool
-    message: str | None = None
-
-
-class JobStatus(ApiModel):
-    id: str
-    state: JobState
-    currentStage: str
-    progress: JobProgress
-    pauseReason: str | None = None
-    quotaBucket: QuotaBucket | None = None
-    resumeAt: datetime | None = None
-    resumeIsAutomatic: bool = False
-    partialErrors: list[PartialError] = Field(default_factory=list)
 
 
 class CollectionRequestResponse(ApiModel):

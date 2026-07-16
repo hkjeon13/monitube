@@ -57,6 +57,10 @@ def test_source_and_job_contract_is_project_free() -> None:
     assert job["resumeIsAutomatic"] is False
     assert job["partialErrors"] == []
     assert client.get(f"/v1/jobs/{job['id']}").json() == job
+    listed = client.get("/v1/sources").json()
+    assert listed[0]["latestJob"]["id"] == job["id"]
+    assert listed[0]["latestJob"]["videoProgress"] is None
+    assert listed[0]["latestJob"]["commentProgress"] is None
 
     assert client.delete(f"/v1/sources/{source['id']}").status_code == 204
     assert client.get(f"/v1/sources/{source['id']}").status_code == 404

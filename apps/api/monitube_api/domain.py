@@ -66,6 +66,9 @@ class SourceRecord:
     canonical_key: str | None = None
     coverage: dict[str, Any] = field(default_factory=dict)
     last_completed_at: datetime | None = None
+    # Populated for read models such as the Sources list.  It is intentionally
+    # not a persisted source column: a job is the durable owner of progress.
+    latest_job: JobRecord | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -181,7 +181,12 @@ class InMemoryRepository(CollectionRepository):
 
     @staticmethod
     def _clone_source(record: SourceRecord) -> SourceRecord:
-        return replace(record, config=deepcopy(record.config), coverage=deepcopy(record.coverage))
+        return replace(
+            record,
+            config=deepcopy(record.config),
+            coverage=deepcopy(record.coverage),
+            latest_job=InMemoryRepository._clone_job(record.latest_job) if record.latest_job else None,
+        )
 
     @staticmethod
     def _clone_job(record: JobRecord) -> JobRecord:
@@ -196,11 +201,19 @@ class InMemoryRepository(CollectionRepository):
         return replace(record, request_config=deepcopy(record.request_config))
 
     def _source_with_target(self, record: SourceRecord) -> SourceRecord:
+        latest_candidates = [
+            job
+            for job in self._jobs.values()
+            if (record.target_id and job.target_id == record.target_id)
+            or (not record.target_id and job.source_id == record.id)
+        ]
+        latest_job = max(latest_candidates, key=lambda job: job.created_at, default=None)
+        source = replace(self._clone_source(record), latest_job=self._clone_job(latest_job) if latest_job else None)
         if not record.target_id or record.target_id not in self._targets:
-            return self._clone_source(record)
+            return source
         target = self._targets[record.target_id]
         return replace(
-            self._clone_source(record),
+            source,
             canonical_key=target.canonical_key,
             coverage=deepcopy(target.coverage),
             last_completed_at=target.last_completed_at,

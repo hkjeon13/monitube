@@ -395,6 +395,43 @@ function StatusPill({ job }: { job?: JobStatus | null }) {
   );
 }
 
+function SourceProgress({ source }: { source: SourceSummary }) {
+  const job = source.latestJob;
+  if (!job) return <div className="source-progress source-progress-idle"><span>아직 실행 기록이 없습니다.</span></div>;
+
+  const commentsRequested = source.config.includeComments === true || source.coverage?.includeComments === true;
+  const phase = (label: string, progress: JobStatus["progress"] | undefined, disabled = false) => {
+    if (disabled) return <div className="source-progress-phase" key={label}><span>{label}</span><small>수집 안 함</small></div>;
+    if (!progress) return <div className="source-progress-phase" key={label}><span>{label}</span><small>이전 이력</small></div>;
+    const total = progress.total;
+    const percent = total === undefined ? 0 : total === 0 ? 100 : Math.min(100, Math.round((progress.completed / total) * 100));
+    const copy = total === undefined ? `${formatCount(progress.completed)} 처리` : total === 0 ? "확인 대상 없음" : `${formatCount(progress.completed)} / ${formatCount(total)}`;
+    return (
+      <div className="source-progress-phase" key={label}>
+        <div><span>{label}</span><strong>{copy}</strong></div>
+        <i aria-hidden="true"><b style={{ width: `${percent}%` }} /></i>
+      </div>
+    );
+  };
+
+  const fullyCovered = job.state === "completed" && source.coverage?.complete === true;
+  const status = fullyCovered
+    ? "전체 범위 수집 완료"
+    : job.state === "completed"
+      ? "최근 작업 종료 · 전체 범위 확인 필요"
+      : statusCopy(job);
+
+  return (
+    <div className="source-progress" aria-label={`${sourceLabel(source)} 수집 진행률`}>
+      <div className="source-progress-heading"><StatusPill job={job} /><small>{status}</small></div>
+      <div className="source-progress-phases">
+        {phase("영상 정보", job.videoProgress)}
+        {phase("댓글", job.commentProgress, !commentsRequested)}
+      </div>
+    </div>
+  );
+}
+
 function MetricCard({
   label,
   value,
@@ -674,6 +711,13 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   }, [refreshSources]);
 
   useEffect(() => {
+    const hasRunningSource = sources.some((source) => source.latestJob && !isTerminalJob(source.latestJob));
+    if (!hasRunningSource) return;
+    const timer = window.setInterval(() => { void refreshSources(); }, 5_000);
+    return () => window.clearInterval(timer);
+  }, [refreshSources, sources]);
+
+  useEffect(() => {
     if (!requestedSourceId || appliedSourceQueryRef.current === requestedSourceId) return;
     if (!sources.some((source) => source.id === requestedSourceId)) return;
     appliedSourceQueryRef.current = requestedSourceId;
@@ -902,6 +946,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
                     <strong>{typeof source.config.query === "string" ? source.config.query : typeof source.config.input === "string" ? source.config.input : sourceLabel(source)}</strong>
                     <small>{sourceRowStatus(source)}</small>
                   </button>
+                  <SourceProgress source={source} />
                   <div className="source-card-actions">
                     <button className="source-more-button" type="button" disabled={deletingSourceId === source.id} onClick={() => setOpenSourceMenuId((current) => current === source.id ? null : source.id)} aria-label={`${sourceLabel(source)} 관리 메뉴`} aria-expanded={menuOpen} aria-haspopup="menu"><EllipsisHorizontalIcon aria-hidden="true" /></button>
                     {menuOpen && <div className="source-action-menu" role="menu" aria-label={`${sourceLabel(source)} 관리`}>

@@ -80,6 +80,8 @@ export interface JobStatus {
   state: JobState;
   currentStage: string;
   progress: JobProgress;
+  videoProgress?: JobProgress;
+  commentProgress?: JobProgress;
   pauseReason?: string;
   quotaBucket?: QuotaBucket;
   resumeAt?: string;
@@ -93,4 +95,5 @@ export interface CollectionSource {
   enabled: boolean;
   config: ChannelSourceConfig | KeywordSourceConfig | VideoSourceConfig;
   nextRunAt?: string;
+  latestJob?: JobStatus;
 }

@@ -79,6 +79,7 @@ class PostgresRepository(CollectionRepository):
 
     @staticmethod
     def _source(row: dict[str, Any]) -> SourceRecord:
+        latest_job = row.get("latest_job")
         return SourceRecord(
             id=str(row["id"]),
             type=SourceType(row["type"]),
@@ -91,6 +92,7 @@ class PostgresRepository(CollectionRepository):
             canonical_key=row.get("canonical_key"),
             coverage=dict(row.get("coverage") or {}),
             last_completed_at=row.get("last_completed_at"),
+            latest_job=PostgresRepository._job(latest_job) if isinstance(latest_job, dict) else None,
         )
 
     @staticmethod
@@ -214,9 +216,17 @@ class PostgresRepository(CollectionRepository):
         cursor.execute(
             """
             SELECT cs.id::text, cs.type::text, cs.config, cs.enabled, cs.created_at, cs.updated_at, cs.next_run_at,
-                   cs.target_id::text, ct.canonical_key, ct.coverage, ct.last_completed_at
+                   cs.target_id::text, ct.canonical_key, ct.coverage, ct.last_completed_at, latest_job.latest_job
             FROM collection_sources cs
             LEFT JOIN collection_targets ct ON ct.id = cs.target_id
+            LEFT JOIN LATERAL (
+              SELECT to_jsonb(job) AS latest_job
+              FROM sync_jobs job
+              WHERE (cs.target_id IS NOT NULL AND job.target_id = cs.target_id)
+                 OR (cs.target_id IS NULL AND job.source_id = cs.id)
+              ORDER BY job.created_at DESC
+              LIMIT 1
+            ) latest_job ON TRUE
             WHERE cs.id = %s
             """,
             (source_id,),
@@ -249,9 +259,17 @@ class PostgresRepository(CollectionRepository):
             cursor.execute(
                 """
                 SELECT cs.id::text, cs.type::text, cs.config, cs.enabled, cs.created_at, cs.updated_at, cs.next_run_at,
-                       cs.target_id::text, ct.canonical_key, ct.coverage, ct.last_completed_at
+                       cs.target_id::text, ct.canonical_key, ct.coverage, ct.last_completed_at, latest_job.latest_job
                 FROM collection_sources cs
                 LEFT JOIN collection_targets ct ON ct.id = cs.target_id
+                LEFT JOIN LATERAL (
+                  SELECT to_jsonb(job) AS latest_job
+                  FROM sync_jobs job
+                  WHERE (cs.target_id IS NOT NULL AND job.target_id = cs.target_id)
+                     OR (cs.target_id IS NULL AND job.source_id = cs.id)
+                  ORDER BY job.created_at DESC
+                  LIMIT 1
+                ) latest_job ON TRUE
                 WHERE cs.target_id IS NULL
                    OR cs.id = (
                      SELECT cr.source_id

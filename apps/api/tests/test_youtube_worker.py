@@ -170,6 +170,8 @@ def test_channel_all_content_flags_continue_past_legacy_numeric_limits() -> None
 
     assert completed.state is JobState.COMPLETED
     assert client.playlist_calls == 2
+    assert completed.checkpoint["phaseProgress"]["videos"] == {"completed": 2, "total": 2}
+    assert completed.checkpoint["phaseProgress"]["comments"] == {"completed": 0, "total": 0}
 
 
 class IncrementalChannelClient:
