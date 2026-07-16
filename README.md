@@ -160,15 +160,18 @@ release/provisioning path. Give it the non-secret repository remote through
 `MONITUBE_REPO_URL`; it clones the requested `MONITUBE_BRANCH` (default `main`) into
 the fixed directory. Later deployments run the checked-out script directly. The
 script refuses a dirty checkout, copies `.env.example` only when `.env` is missing,
-sets restrictive file permissions, keeps `YOUTUBE_API_KEY=` blank, builds with
-`docker compose up --build --detach`, applies migrations, and verifies `/health` from
-inside the API container.
+sets restrictive file permissions, keeps `YOUTUBE_API_KEY=` blank in that repository
+file, builds the runtime images, recreates API/worker/web, and verifies `/health`
+from inside the API container.
 
 Do not put a YouTube key in `.env`, a shell command, Git configuration, logs, or a
-commit. A production launcher or Secret Manager integration may inject
-`YOUTUBE_API_KEY` only into the deployment process environment; the script neither
-reads nor prints it. If no key is injected, deployment remains valid and API/worker
-operate in fixture/no-op mode until live collection is intentionally enabled.
+commit. The deployment host uses the regular, mode-`0600` file
+`/data/psyche/.config/monitube/youtube.env` by default (override only with
+`MONITUBE_YOUTUBE_SECRET_ENV_FILE`). It may contain one `YOUTUBE_API_KEY=...` entry
+and is loaded only into API and worker; the deployment script validates it without
+printing or sourcing the value. If the file is empty, deployment remains valid and
+API/worker operate in fixture/no-op mode until live collection is intentionally
+enabled.
 
 ### Remote ports and reverse proxy
 
@@ -177,12 +180,14 @@ or MinIO to the network. On a shared host, edit only the non-secret port setting
 the remote `.env` before deployment—for example, choose unused `API_PORT`,
 `WEB_PORT`, `POSTGRES_PORT`, `REDIS_PORT`, `MINIO_API_PORT`, and
 `MINIO_CONSOLE_PORT` values. Keep database/cache/object-store bind addresses on
-loopback. Place a reverse proxy in front of Web/API if public access is required.
+loopback. The Next web server exposes a same-origin `/api/*` rewrite to its internal
+API target, so a public tunnel or reverse proxy only needs to publish the web service.
 
-Set `NEXT_PUBLIC_API_BASE_URL` and `CORS_ORIGINS` to the browser-visible reverse-proxy
-URLs before a production build: `NEXT_PUBLIC_*` values are compiled into the Next.js
-bundle. The default localhost values are intentionally safe for an unexposed remote
-deployment but are not a public-site configuration.
+For a public deployment, set `NEXT_PUBLIC_API_BASE_URL=/api` before the web build.
+The browser then never calls a server-local address: Next proxies `/api/v1/...` to the
+private API container. `NEXT_PUBLIC_*` values are compiled into the Next.js bundle;
+never put credentials in them. Set `CORS_ORIGINS` to the public web origin if direct
+API access is also intentionally enabled.
 
 For an existing remote volume, the deployment script invokes the same migration
 runner as `make migrate`. It never runs `down --volumes`, so it will not reset

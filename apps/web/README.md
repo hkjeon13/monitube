@@ -14,7 +14,7 @@ npm run dev
 
 ## Browser API contract
 
-`NEXT_PUBLIC_API_BASE_URL`은 브라우저가 호출할 API origin입니다. 예: `http://localhost:8000`. 끝의 `/`는 넣지 않습니다. 운영 YouTube API credential은 백엔드에서만 관리하며 브라우저 환경 변수나 요청에 포함하지 않습니다.
+`NEXT_PUBLIC_API_BASE_URL`은 브라우저가 호출할 API 기준 경로입니다. 로컬 단독 개발에서는 `http://localhost:8000`을, Docker/공개 배포에서는 같은 origin의 `/api`를 사용합니다. `/api` 요청은 Next 서버가 내부 API 서비스로 프록시하므로 브라우저는 서버의 `localhost` 주소를 알 필요가 없습니다. 운영 YouTube API credential은 백엔드에서만 관리하며 브라우저 환경 변수나 요청에 포함하지 않습니다.
 
 웹은 다음 JSON endpoint를 사용합니다. API는 CORS에서 웹 origin을 허용해야 합니다.
 
