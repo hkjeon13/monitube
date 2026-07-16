@@ -239,6 +239,14 @@ class PostgresRepository(CollectionRepository):
             else:
                 cursor.execute("UPDATE youtube_runtime_keys SET status = 'active', failure_count = 0, last_error_reason = NULL, unavailable_until = NULL, last_used_at = now(), updated_at = now() WHERE runtime_config_id = %s AND key_fingerprint = %s", (runtime_config_id, key_fingerprint))
 
+    def load_runtime_keys(self, *, runtime_config_id: str, encryption_key: str) -> tuple[str, ...]:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT pgp_sym_decrypt(encrypted_key, %s)::text AS api_key FROM youtube_runtime_keys WHERE runtime_config_id = %s AND status <> 'disabled' ORDER BY created_at",
+                (encryption_key, runtime_config_id),
+            )
+            return tuple(str(row["api_key"]) for row in cursor.fetchall())
+
     @staticmethod
     def _select_source(cursor: Any, source_id: str) -> dict[str, Any] | None:
         cursor.execute(

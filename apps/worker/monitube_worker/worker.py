@@ -58,6 +58,13 @@ def main() -> None:
         if not job:
             shutdown_requested.wait(timeout=settings.worker_poll_seconds)
             continue
+        if settings.youtube_api_key_encryption_key and hasattr(repository, "load_runtime_keys"):
+            registered_keys = repository.load_runtime_keys(
+                runtime_config_id=runtime_config_id,
+                encryption_key=settings.youtube_api_key_encryption_key,
+            )
+            if registered_keys:
+                collector.client.replace_keys(registered_keys)
         completed = runner.run(job.id)
         logger.info("Collection job %s entered %s", completed.id, completed.state.value)
     logger.info("Monitube worker stopped.")

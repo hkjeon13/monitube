@@ -102,9 +102,19 @@ class RotatingYouTubeDataClient:
     def __init__(self, api_keys: tuple[str, ...], **kwargs: Any) -> None:
         if not api_keys:
             raise ValueError("At least one YouTube API key is required")
-        self._clients = [YouTubeDataClient(key, **kwargs) for key in api_keys]
-        self._fingerprints = [hashlib.sha256(key.encode("utf-8")).hexdigest()[:24] for key in api_keys]
+        self._kwargs = kwargs
+        self._clients: list[YouTubeDataClient] = []
+        self._fingerprints: list[str] = []
         self._index = 0
+        self.replace_keys(api_keys)
+
+    def replace_keys(self, api_keys: tuple[str, ...]) -> None:
+        if not api_keys:
+            return
+        current = self.key_fingerprint if self._fingerprints else None
+        self._clients = [YouTubeDataClient(key, **self._kwargs) for key in api_keys]
+        self._fingerprints = [hashlib.sha256(key.encode("utf-8")).hexdigest()[:24] for key in api_keys]
+        self._index = self._fingerprints.index(current) if current in self._fingerprints else 0
 
     @property
     def key_fingerprint(self) -> str:
