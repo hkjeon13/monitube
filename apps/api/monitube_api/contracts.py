@@ -131,6 +131,36 @@ class CollectionSourceBase(ApiModel):
     lastCompletedAt: datetime | None = None
 
 
+class TargetPinUpdate(ApiModel):
+    enabled: bool = True
+    intervalMinutes: int = Field(default=360, ge=15, le=10_080)
+
+
+class TargetPin(ApiModel):
+    targetId: str
+    enabled: bool
+    intervalMinutes: int
+    nextRunAt: datetime
+    lastDispatchedAt: datetime | None = None
+
+
+class ExploreChannel(ApiModel):
+    youtubeChannelId: str
+    handle: str | None = None
+    title: str | None = None
+    description: str | None = None
+    videoCount: int = Field(ge=0)
+    commentCount: int = Field(ge=0)
+    lastFetchedAt: datetime | None = None
+    targetId: str | None = None
+    pin: TargetPin | None = None
+
+
+class ExploreResponse(ApiModel):
+    channels: list[ExploreChannel] = Field(default_factory=list)
+    videos: list["CollectedVideo"] = Field(default_factory=list)
+
+
 class ChannelCollectionSource(CollectionSourceBase):
     type: Literal[SourceType.CHANNEL] = SourceType.CHANNEL
     config: ChannelSourceConfig

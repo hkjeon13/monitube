@@ -18,6 +18,9 @@ from .contracts import (
     CollectionSourceUpdate,
     CollectionRequestCreate,
     CollectionRequestResponse,
+    ExploreResponse,
+    TargetPin,
+    TargetPinUpdate,
     JobCreate,
     JobProgress,
     JobStateChange,
@@ -271,6 +274,31 @@ class CollectionService:
             comments=[_comment_contract(comment) for comment in result["comments"]],
             summary=_comment_summary(result["summary"]),
         )
+
+    @staticmethod
+    def _pin_contract(pin: dict[str, object]) -> TargetPin:
+        return TargetPin(
+            targetId=str(pin["target_id"]), enabled=bool(pin["enabled"]),
+            intervalMinutes=int(pin["interval_minutes"]), nextRunAt=pin["next_run_at"],
+            lastDispatchedAt=pin.get("last_dispatched_at"),
+        )
+
+    def set_target_pin(self, target_id: str, request: TargetPinUpdate) -> TargetPin:
+        return self._pin_contract(self.repository.set_target_pin(
+            target_id=target_id, enabled=request.enabled, interval_minutes=request.intervalMinutes,
+        ))
+
+    def get_target_pin(self, target_id: str) -> TargetPin | None:
+        pin = self.repository.get_target_pin(target_id=target_id)
+        return self._pin_contract(pin) if pin else None
+
+    def explore(self) -> ExploreResponse:
+        result = self.repository.list_explore()
+        channels = []
+        for channel in result["channels"]:
+            pin = channel.pop("pin", None)
+            channels.append({**channel, "pin": self._pin_contract(pin) if pin else None})
+        return ExploreResponse(channels=channels, videos=[_video_contract(video) for video in result["videos"]])
 
     def change_job_state(self, job_id: str, request: JobStateChange) -> JobStatus:
         changes = request.model_dump(exclude={"state"}, exclude_none=True)

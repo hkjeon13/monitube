@@ -19,10 +19,13 @@ from .contracts import (
     CollectionSourceUpdate,
     CollectionRequestCreate,
     CollectionRequestResponse,
+    ExploreResponse,
     HealthResponse,
     JobCreate,
     JobStatus,
     SourceResultsResponse,
+    TargetPin,
+    TargetPinUpdate,
     VideoCommentsResponse,
     VideoResolutionRequest,
     VideoResolutionResponse,
@@ -130,6 +133,18 @@ def create_app(repository: CollectionRepository | None = None, settings: Setting
     @router.get("/sources", response_model=list[CollectionSource], tags=["sources"])
     def list_sources(service: Service) -> list[CollectionSource]:
         return service.list_sources()
+
+    @router.get("/explore", response_model=ExploreResponse, tags=["explore"])
+    def explore(service: Service) -> ExploreResponse:
+        return service.explore()
+
+    @router.put("/collection-targets/{target_id}/pin", response_model=TargetPin, tags=["pins"])
+    def set_target_pin(target_id: str, payload: TargetPinUpdate, service: Service) -> TargetPin:
+        return service.set_target_pin(target_id, payload)
+
+    @router.get("/collection-targets/{target_id}/pin", response_model=TargetPin | None, tags=["pins"])
+    def get_target_pin(target_id: str, service: Service) -> TargetPin | None:
+        return service.get_target_pin(target_id)
 
     @router.get("/sources/{source_id}", response_model=CollectionSource, tags=["sources"])
     def get_source(source_id: str, service: Service) -> CollectionSource:

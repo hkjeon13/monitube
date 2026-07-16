@@ -86,6 +86,31 @@ export interface PagedComments {
   nextCursor?: string;
 }
 
+export interface TargetPin {
+  targetId: string;
+  enabled: boolean;
+  intervalMinutes: number;
+  nextRunAt: string;
+  lastDispatchedAt?: string;
+}
+
+export interface ExploreChannel {
+  youtubeChannelId: string;
+  handle?: string;
+  title?: string;
+  description?: string;
+  videoCount: number;
+  commentCount: number;
+  lastFetchedAt?: string;
+  targetId?: string;
+  pin?: TargetPin;
+}
+
+export interface ExploreData {
+  channels: ExploreChannel[];
+  videos: CollectedVideo[];
+}
+
 const defaultApiBaseUrl = "http://localhost:8000";
 const defaultTimeoutMs = 10_000;
 
@@ -172,6 +197,33 @@ function normalizeSource(value: unknown): SourceSummary | null {
     ...(asText(record.lastCompletedAt ?? record.last_completed_at)
       ? { lastCompletedAt: asText(record.lastCompletedAt ?? record.last_completed_at) }
       : {}),
+  };
+}
+
+function normalizePin(value: unknown): TargetPin | undefined {
+  const record = asRecord(value);
+  const targetId = asText(record?.targetId ?? record?.target_id);
+  const intervalMinutes = asNumber(record?.intervalMinutes ?? record?.interval_minutes);
+  const nextRunAt = asText(record?.nextRunAt ?? record?.next_run_at);
+  if (!targetId || intervalMinutes === undefined || !nextRunAt) return undefined;
+  return { targetId, enabled: record?.enabled !== false, intervalMinutes, nextRunAt,
+    ...(asText(record?.lastDispatchedAt ?? record?.last_dispatched_at) ? { lastDispatchedAt: asText(record?.lastDispatchedAt ?? record?.last_dispatched_at) } : {}) };
+}
+
+function normalizeExploreChannel(value: unknown): ExploreChannel | null {
+  const record = asRecord(value);
+  const youtubeChannelId = asText(record?.youtubeChannelId ?? record?.youtube_channel_id);
+  if (!record || !youtubeChannelId) return null;
+  const pin = normalizePin(record.pin);
+  return {
+    youtubeChannelId, videoCount: asNumber(record.videoCount ?? record.video_count) ?? 0,
+    commentCount: asNumber(record.commentCount ?? record.comment_count) ?? 0,
+    ...(asText(record.handle) ? { handle: asText(record.handle) } : {}),
+    ...(asText(record.title) ? { title: asText(record.title) } : {}),
+    ...(asText(record.description) ? { description: asText(record.description) } : {}),
+    ...(asText(record.lastFetchedAt ?? record.last_fetched_at) ? { lastFetchedAt: asText(record.lastFetchedAt ?? record.last_fetched_at) } : {}),
+    ...(asText(record.targetId ?? record.target_id) ? { targetId: asText(record.targetId ?? record.target_id) } : {}),
+    ...(pin ? { pin } : {}),
   };
 }
 
@@ -484,6 +536,30 @@ export async function getVideoComments(videoId: string, cursor?: string): Promis
     }),
     ...(nextCursor ? { nextCursor } : {}),
   };
+}
+
+export async function getExplore(): Promise<ExploreData> {
+  const response = await request<unknown>("/v1/explore", { method: "GET" });
+  const record = asRecord(response);
+  return {
+    channels: firstArray(record ?? {}, ["channels"]).flatMap((item) => {
+      const channel = normalizeExploreChannel(item);
+      return channel ? [channel] : [];
+    }),
+    videos: firstArray(record ?? {}, ["videos"]).flatMap((item) => {
+      const video = normalizeVideo(item);
+      return video ? [video] : [];
+    }),
+  };
+}
+
+export async function updateTargetPin(targetId: string, payload: { enabled: boolean; intervalMinutes: number }): Promise<TargetPin> {
+  const response = await request<unknown>(`/v1/collection-targets/${encodeURIComponent(targetId)}/pin`, {
+    method: "PUT", body: JSON.stringify(payload),
+  });
+  const pin = normalizePin(response);
+  if (!pin) throw new ApiError("핀 상태를 해석하지 못했습니다.", 502);
+  return pin;
 }
 
 export { ApiError };

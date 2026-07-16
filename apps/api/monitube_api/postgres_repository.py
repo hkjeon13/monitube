@@ -1195,3 +1195,103 @@ class PostgresRepository(CollectionRepository):
             video = self._video(row)
             comments = self._comments(cursor, [video.youtube_video_id])
             return {"video": video, "comments": comments, "summary": build_summary([video], comments)}
+
+    def set_target_pin(self, *, target_id: str, enabled: bool, interval_minutes: int) -> dict[str, Any]:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT id FROM collection_targets WHERE id = %s FOR UPDATE", (target_id,))
+            if not cursor.fetchone():
+                raise NotFoundError(f"Collection target '{target_id}' was not found")
+            cursor.execute(
+                """
+                INSERT INTO collection_target_pins (target_id, enabled, interval_minutes, next_run_at)
+                VALUES (%s, %s, %s, CASE WHEN %s THEN now() ELSE now() END)
+                ON CONFLICT (target_id) DO UPDATE
+                SET enabled = EXCLUDED.enabled, interval_minutes = EXCLUDED.interval_minutes,
+                    next_run_at = CASE WHEN EXCLUDED.enabled THEN now() ELSE collection_target_pins.next_run_at END,
+                    updated_at = now()
+                RETURNING target_id::text, enabled, interval_minutes, next_run_at, last_dispatched_at
+                """,
+                (target_id, enabled, interval_minutes, enabled),
+            )
+            return dict(cursor.fetchone())
+
+    def get_target_pin(self, *, target_id: str) -> dict[str, Any] | None:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT target_id::text, enabled, interval_minutes, next_run_at, last_dispatched_at FROM collection_target_pins WHERE target_id = %s",
+                (target_id,),
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def dispatch_due_pins(self, *, runtime_config_id: str | None = None, limit: int = 10) -> int:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT target_id::text, interval_minutes
+                FROM collection_target_pins
+                WHERE enabled = TRUE AND next_run_at <= now()
+                ORDER BY next_run_at FOR UPDATE SKIP LOCKED LIMIT %s
+                """,
+                (limit,),
+            )
+            due = cursor.fetchall()
+            dispatched = 0
+            for pin in due:
+                target_id = str(pin["target_id"])
+                cursor.execute(
+                    "SELECT 1 FROM sync_jobs WHERE target_id = %s AND state IN ('queued', 'running', 'waiting_retry', 'waiting_quota') LIMIT 1",
+                    (target_id,),
+                )
+                if not cursor.fetchone():
+                    source = self._target_source(cursor, target_id)
+                    if source:
+                        self._create_target_job(cursor, target_id=target_id, source=source, runtime_config_id=runtime_config_id)
+                        cursor.execute(
+                            "UPDATE collection_target_pins SET last_dispatched_at = now(), next_run_at = now() + (interval_minutes * interval '1 minute'), updated_at = now() WHERE target_id = %s",
+                            (target_id,),
+                        )
+                        dispatched += 1
+                        continue
+                cursor.execute(
+                    "UPDATE collection_target_pins SET next_run_at = now() + (interval_minutes * interval '1 minute'), updated_at = now() WHERE target_id = %s",
+                    (target_id,),
+                )
+            return dispatched
+
+    def list_explore(self, *, limit: int = 60) -> dict[str, Any]:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT c.youtube_channel_id, c.handle, c.title, c.description,
+                       COALESCE(video_counts.video_count, 0)::integer AS video_count,
+                       COALESCE(comment_counts.comment_count, 0)::integer AS comment_count,
+                       GREATEST(c.source_fetched_at, video_counts.last_fetched_at) AS last_fetched_at,
+                       target.id::text AS target_id, pin.enabled AS pin_enabled, pin.interval_minutes AS pin_interval_minutes,
+                       pin.next_run_at AS pin_next_run_at, pin.last_dispatched_at AS pin_last_dispatched_at
+                FROM channels c
+                LEFT JOIN LATERAL (SELECT count(*) AS video_count, max(source_fetched_at) AS last_fetched_at FROM videos WHERE channel_id = c.id) video_counts ON TRUE
+                LEFT JOIN LATERAL (SELECT count(*) AS comment_count FROM comments cm JOIN videos v ON v.id = cm.video_id WHERE v.channel_id = c.id) comment_counts ON TRUE
+                LEFT JOIN collection_targets target ON target.resolved_channel_id = c.id
+                LEFT JOIN collection_target_pins pin ON pin.target_id = target.id
+                ORDER BY GREATEST(c.source_fetched_at, video_counts.last_fetched_at) DESC NULLS LAST, c.title
+                """
+            )
+            channels = []
+            for row in cursor.fetchall():
+                pin = None
+                if row.get("pin_enabled") is not None:
+                    pin = {"target_id": str(row["target_id"]), "enabled": bool(row["pin_enabled"]), "interval_minutes": int(row["pin_interval_minutes"]), "next_run_at": row["pin_next_run_at"], "last_dispatched_at": row["pin_last_dispatched_at"]}
+                channels.append({"youtubeChannelId": row["youtube_channel_id"], "handle": row["handle"], "title": row["title"], "description": row["description"], "videoCount": int(row["video_count"]), "commentCount": int(row["comment_count"]), "lastFetchedAt": row["last_fetched_at"], "targetId": str(row["target_id"]) if row.get("target_id") else None, "pin": pin})
+            cursor.execute(
+                """
+                SELECT v.id::text, v.youtube_video_id, c.youtube_channel_id, v.title, v.description, v.published_at,
+                       v.duration_seconds, v.privacy_status, v.made_for_kids, v.source_fetched_at,
+                       jsonb_build_object('viewCount', COALESCE(stats.view_count, 0), 'likeCount', COALESCE(stats.like_count, 0), 'commentCount', COALESCE(stats.comment_count, 0)) AS statistics
+                FROM videos v LEFT JOIN channels c ON c.id = v.channel_id
+                LEFT JOIN LATERAL (SELECT view_count, like_count, comment_count FROM video_stat_snapshots WHERE video_id = v.id ORDER BY fetched_at DESC LIMIT 1) stats ON TRUE
+                ORDER BY v.source_fetched_at DESC NULLS LAST, v.published_at DESC NULLS LAST LIMIT %s
+                """,
+                (limit,),
+            )
+            return {"channels": channels, "videos": [self._video(row) for row in cursor.fetchall()]}

@@ -2,6 +2,7 @@
 
 import {
   ArrowPathIcon,
+  BookmarkIcon,
   CheckCircleIcon,
   ChevronRightIcon,
   ClockIcon,
@@ -15,6 +16,7 @@ import {
   PlusIcon,
   QueueListIcon,
   SparklesIcon,
+  Squares2X2Icon,
   XMarkIcon,
 } from "@heroicons/react/24/outline";
 import type {
@@ -33,19 +35,22 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   createCollectionRequest,
   getJob,
+  getExplore,
   getSourceResults,
   getVideoComments,
   listSources,
+  updateTargetPin,
   type CollectedComment,
   type CollectedVideo,
   type CollectionRequestDisposition,
+  type ExploreData,
   type SourceResults,
   type SourceSummary,
 } from "../lib/api";
 
 type EstimateMode = "local" | null;
 type ViewMetric = "views" | "likes" | "comments";
-type NavItem = "overview" | "sources" | "jobs" | "insights";
+type NavItem = "overview" | "explore" | "sources" | "jobs" | "insights";
 type FormState = {
   sourceType: CollectionSourceType;
   channelInput: string;
@@ -453,6 +458,10 @@ export function CollectionWorkbench() {
   const [isCollectionOpen, setIsCollectionOpen] = useState(false);
   const [viewMetric, setViewMetric] = useState<ViewMetric>("views");
   const [activeNav, setActiveNav] = useState<NavItem>("overview");
+  const [explore, setExplore] = useState<ExploreData>({ channels: [], videos: [] });
+  const [isExploreLoading, setIsExploreLoading] = useState(false);
+  const [exploreError, setExploreError] = useState<string | null>(null);
+  const [pinningTargetId, setPinningTargetId] = useState<string | null>(null);
   const resultsRequest = useRef(0);
   const commentsRequest = useRef(0);
   const collectionTriggerRef = useRef<HTMLElement | null>(null);
@@ -523,6 +532,31 @@ export function CollectionWorkbench() {
     }
   }, []);
 
+  const refreshExplore = useCallback(async () => {
+    setIsExploreLoading(true);
+    setExploreError(null);
+    try {
+      setExplore(await getExplore());
+    } catch (caught) {
+      setExploreError(caught instanceof Error ? caught.message : "Explore 라이브러리를 불러오지 못했습니다.");
+    } finally {
+      setIsExploreLoading(false);
+    }
+  }, []);
+
+  const togglePin = useCallback(async (targetId: string, pinned: boolean) => {
+    setPinningTargetId(targetId);
+    try {
+      await updateTargetPin(targetId, { enabled: !pinned, intervalMinutes: 360 });
+      await refreshExplore();
+      setNotice(pinned ? "자동 갱신을 멈췄습니다. 저장된 데이터는 유지됩니다." : "핀을 설정했습니다. 6시간마다 신규 영상과 댓글을 확인합니다.");
+    } catch (caught) {
+      setExploreError(caught instanceof Error ? caught.message : "핀 상태를 변경하지 못했습니다.");
+    } finally {
+      setPinningTargetId(null);
+    }
+  }, [refreshExplore]);
+
   const loadComments = useCallback(async (video: CollectedVideo, cursor?: string) => {
     const requestId = ++commentsRequest.current;
     setSelectedVideo(video);
@@ -572,6 +606,10 @@ export function CollectionWorkbench() {
   useEffect(() => {
     void refreshSources();
   }, [refreshSources]);
+
+  useEffect(() => {
+    void refreshExplore();
+  }, [refreshExplore]);
 
   useEffect(() => {
     if (!activeSourceId) {
@@ -718,6 +756,7 @@ export function CollectionWorkbench() {
 
   const navigation = [
     { id: "overview" as const, label: "Overview", target: "overview", Icon: HomeIcon },
+    { id: "explore" as const, label: "Explore", target: "explore", Icon: Squares2X2Icon },
     { id: "sources" as const, label: "Sources", target: "source-selector", Icon: FolderIcon },
     { id: "jobs" as const, label: "Collection jobs", target: "collection-jobs", Icon: QueueListIcon },
     { id: "insights" as const, label: "Insights", target: "insights", Icon: SparklesIcon },
@@ -814,6 +853,46 @@ export function CollectionWorkbench() {
               <span className="source-type-chip">{sourceTypeCopy(activeSource.type)}</span>
               <span>{activeSource.enabled ? "수집 활성" : "수집 일시 중지"}</span>
             </div>
+          )}
+        </section>
+
+        <section className="explore-section" id="explore" aria-labelledby="explore-title" tabIndex={-1}>
+          <div className="explore-heading">
+            <div>
+              <p className="section-kicker">SHARED COLLECTION LIBRARY</p>
+              <h2 id="explore-title">Explore</h2>
+              <p>요청 이력과 관계없이 지금까지 수집된 공개 채널과 동영상을 한곳에서 살펴보세요.</p>
+            </div>
+            <button className="icon-button" type="button" onClick={() => void refreshExplore()} disabled={isExploreLoading} aria-label="Explore 라이브러리 새로고침"><ArrowPathIcon aria-hidden="true" /></button>
+          </div>
+          {exploreError && <p className="inline-error" role="status">{exploreError}</p>}
+          {isExploreLoading && explore.channels.length === 0 ? <p className="explore-loading">수집 라이브러리를 불러오는 중입니다…</p> : (
+            <>
+              <div className="explore-channel-grid" aria-label="수집된 채널">
+                {explore.channels.map((channel) => {
+                  const pinned = channel.pin?.enabled === true;
+                  const hasTarget = Boolean(channel.targetId);
+                  return (
+                    <article className={pinned ? "explore-channel-card explore-channel-card-pinned" : "explore-channel-card"} key={channel.youtubeChannelId}>
+                      <div className="explore-channel-card-head">
+                        <span className="explore-avatar">{(channel.title ?? channel.handle ?? "Y").slice(0, 1).toUpperCase()}</span>
+                        {hasTarget && <button className={pinned ? "pin-button pin-button-active" : "pin-button"} type="button" disabled={pinningTargetId === channel.targetId} onClick={() => channel.targetId && void togglePin(channel.targetId, pinned)} aria-pressed={pinned} aria-label={pinned ? `${channel.title ?? channel.youtubeChannelId} 자동 갱신 해제` : `${channel.title ?? channel.youtubeChannelId} 자동 갱신 핀 설정`}><BookmarkIcon aria-hidden="true" /></button>}
+                      </div>
+                      <strong>{channel.title ?? channel.handle ?? channel.youtubeChannelId}</strong>
+                      <span className="explore-handle">{channel.handle ? `@${channel.handle.replace(/^@/, "")}` : channel.youtubeChannelId}</span>
+                      <div className="explore-channel-stats"><span>영상 <b>{formatCount(channel.videoCount)}</b></span><span>댓글 <b>{formatCount(channel.commentCount)}</b></span></div>
+                      <footer>{pinned ? `자동 갱신 · 다음 확인 ${formatShortDate(channel.pin?.nextRunAt)}` : `최근 수집 ${formatShortDate(channel.lastFetchedAt)}`}</footer>
+                    </article>
+                  );
+                })}
+                {explore.channels.length === 0 && <div className="explore-empty">아직 수집된 채널이 없습니다. 첫 수집을 시작하면 이곳에 자동으로 모입니다.</div>}
+              </div>
+              <div className="explore-video-heading"><div><p className="section-kicker">RECENTLY COLLECTED</p><h3>동영상 갤러리</h3></div><span>{formatCount(explore.videos.length)}개</span></div>
+              <div className="explore-video-grid" aria-label="수집된 동영상">
+                {explore.videos.map((video) => <button className="explore-video-card" type="button" key={video.id} onClick={(event) => openVideoDrawer(video, event.currentTarget)}><span className="explore-video-play"><PlayIcon aria-hidden="true" /></span><span className="explore-video-date">{formatShortDate(video.publishedAt)}</span><strong>{video.title ?? video.youtubeVideoId}</strong><footer><span>조회 {formatCount(video.viewCount)}</span><span>댓글 {formatCount(video.commentCount)}</span></footer></button>)}
+                {explore.videos.length === 0 && <div className="explore-empty">저장된 동영상이 아직 없습니다.</div>}
+              </div>
+            </>
           )}
         </section>
 

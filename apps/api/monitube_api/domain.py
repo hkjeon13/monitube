@@ -110,6 +110,15 @@ class CollectionTargetRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class TargetPinRecord:
+    target_id: str
+    enabled: bool
+    interval_minutes: int
+    next_run_at: datetime
+    last_dispatched_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
 class CollectionRequestRecord:
     """A browser request attached to a target and, when needed, a shared job."""
 

@@ -80,6 +80,14 @@ class CollectionRequestRepository(Protocol):
 
     def promote_channel_target(self, *, source_id: str, youtube_channel_id: str, handle: str | None = None) -> CollectionTargetRecord | None: ...
 
+    def set_target_pin(self, *, target_id: str, enabled: bool, interval_minutes: int) -> dict[str, Any]: ...
+
+    def get_target_pin(self, *, target_id: str) -> dict[str, Any] | None: ...
+
+    def dispatch_due_pins(self, *, runtime_config_id: str | None = None, limit: int = 10) -> int: ...
+
+    def list_explore(self, *, limit: int = 60) -> dict[str, Any]: ...
+
 
 class CollectionRepository(SourceRepository, JobRepository, CollectionRequestRepository, Protocol):
     """Methods used by the API service and the polling collection worker."""
@@ -153,6 +161,7 @@ class InMemoryRepository(CollectionRepository):
         self._target_aliases: dict[tuple[SourceType, str, str], str] = {}
         self._requests: dict[str, CollectionRequestRecord] = {}
         self._target_videos: dict[str, set[str]] = {}
+        self._pins: dict[str, dict[str, Any]] = {}
         self._runtime_configs: dict[str, dict[str, Any]] = {}
         self._channels: dict[str, dict[str, Any]] = {}
         self._videos: dict[str, VideoRecord] = {}
@@ -764,6 +773,61 @@ class InMemoryRepository(CollectionRepository):
                     "occurred_at": utcnow(),
                 }
             )
+
+    def set_target_pin(self, *, target_id: str, enabled: bool, interval_minutes: int) -> dict[str, Any]:
+        with self._lock:
+            if target_id not in self._targets:
+                raise NotFoundError(f"Collection target '{target_id}' was not found")
+            current = self._pins.get(target_id, {})
+            now = utcnow()
+            pin = {
+                "target_id": target_id, "enabled": enabled, "interval_minutes": interval_minutes,
+                "next_run_at": now if enabled else current.get("next_run_at", now),
+                "last_dispatched_at": current.get("last_dispatched_at"),
+            }
+            self._pins[target_id] = pin
+            return deepcopy(pin)
+
+    def get_target_pin(self, *, target_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            pin = self._pins.get(target_id)
+            return deepcopy(pin) if pin else None
+
+    def dispatch_due_pins(self, *, runtime_config_id: str | None = None, limit: int = 10) -> int:
+        with self._lock:
+            now = utcnow()
+            dispatched = 0
+            for target_id, pin in sorted(self._pins.items(), key=lambda item: item[1]["next_run_at"]):
+                if dispatched >= limit or not pin["enabled"] or pin["next_run_at"] > now:
+                    continue
+                active = any(job.target_id == target_id and not job.state.is_terminal for job in self._jobs.values())
+                if not active:
+                    source_id = self._primary_source_for_target_locked(target_id)
+                    if source_id:
+                        self._create_target_job_locked(target_id=target_id, source=self._sources[source_id], runtime_config_id=runtime_config_id)
+                        pin["last_dispatched_at"] = now
+                        dispatched += 1
+                pin["next_run_at"] = now + timedelta(minutes=int(pin["interval_minutes"]))
+            return dispatched
+
+    def list_explore(self, *, limit: int = 60) -> dict[str, Any]:
+        with self._lock:
+            channels: list[dict[str, Any]] = []
+            for channel_id, channel in self._channels.items():
+                channel_videos = [video for video in self._videos.values() if video.youtube_channel_id == channel_id]
+                ids = {video.youtube_video_id for video in channel_videos}
+                target = next((target for target in self._targets.values() if target.resolved_channel_id == channel.get("id")), None)
+                pin = self._pins.get(target.id) if target else None
+                channels.append({
+                    "youtubeChannelId": channel_id, "handle": channel.get("handle"), "title": channel.get("title"),
+                    "description": channel.get("description"), "videoCount": len(channel_videos),
+                    "commentCount": sum(1 for comment in self._comments.values() if comment.youtube_video_id in ids),
+                    "lastFetchedAt": max((video.source_fetched_at for video in channel_videos), default=channel.get("source_fetched_at")),
+                    "targetId": target.id if target else None, "pin": deepcopy(pin) if pin else None,
+                })
+            channels.sort(key=lambda item: item["lastFetchedAt"] or utcnow(), reverse=True)
+            videos = sorted(self._videos.values(), key=lambda item: item.source_fetched_at, reverse=True)[:limit]
+            return {"channels": channels, "videos": videos}
 
     def _source_video_records(self, source_id: str) -> list[VideoRecord]:
         source = self._sources.get(source_id)

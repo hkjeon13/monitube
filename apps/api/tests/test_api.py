@@ -201,3 +201,26 @@ def test_keyword_requests_share_a_target_when_only_collection_breadth_changes() 
     assert wider.json()["targetId"] == first.json()["targetId"]
     assert wider.json()["source"]["id"] == first.json()["source"]["id"]
     assert len(client.get("/v1/sources").json()) == 1
+
+
+def test_pinned_target_dispatches_a_follow_up_collection_and_explore_is_public() -> None:
+    repository = InMemoryRepository()
+    client = TestClient(create_app(repository=repository))
+    collected = client.post(
+        "/v1/collection-requests",
+        json={"type": "channel", "config": {"input": "@GoogleDevelopers", "maxVideos": 10, "includeComments": True}},
+    ).json()
+    repository.claim_next_job(worker_id="test-worker")
+    repository.transition_job(collected["job"]["id"], JobState.COMPLETED)
+
+    pin = client.put(
+        f"/v1/collection-targets/{collected['targetId']}/pin",
+        json={"enabled": True, "intervalMinutes": 60},
+    )
+    assert pin.status_code == 200
+    assert pin.json()["enabled"] is True
+    assert pin.json()["intervalMinutes"] == 60
+
+    assert repository.dispatch_due_pins() == 1
+    assert any(job.target_id == collected["targetId"] and job.state is JobState.QUEUED for job in repository._jobs.values())
+    assert client.get("/v1/explore").status_code == 200

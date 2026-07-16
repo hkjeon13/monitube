@@ -27,7 +27,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, _request_shutdown)
     signal.signal(signal.SIGTERM, _request_shutdown)
     settings = Settings.from_environment()
-    repository, _ = create_repository(settings)
+    repository, runtime_config_id = create_repository(settings)
     if not settings.youtube_api_key:
         logger.warning("YOUTUBE_API_KEY is not configured; worker will not claim collection jobs.")
         while not shutdown_requested.wait(timeout=settings.worker_poll_seconds):
@@ -48,6 +48,12 @@ def main() -> None:
     runner = JobRunner(repository, collector)
     logger.info("Monitube worker is polling queued collection jobs.")
     while not shutdown_requested.is_set():
+        # Pins are canonical-target subscriptions.  Dispatching here keeps the
+        # scheduler inside the existing single worker/lease model and never creates
+        # a second active job for the same channel.
+        dispatched = repository.dispatch_due_pins(runtime_config_id=runtime_config_id)
+        if dispatched:
+            logger.info("Dispatched %s due pinned collection target(s)", dispatched)
         job = repository.claim_next_job(worker_id=worker_id, lease_seconds=settings.worker_lease_seconds)
         if not job:
             shutdown_requested.wait(timeout=settings.worker_poll_seconds)
