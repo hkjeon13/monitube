@@ -2,6 +2,7 @@
 
 import {
   ArrowPathIcon,
+  ArrowsUpDownIcon,
   BookmarkIcon,
   CheckCircleIcon,
   ChevronRightIcon,
@@ -51,6 +52,7 @@ import {
 
 type EstimateMode = "local" | null;
 type ViewMetric = "views" | "likes" | "comments";
+type ExploreSort = "recent" | "views" | "comments";
 export type WorkspacePage = "overview" | "explore" | "sources" | "jobs" | "insights";
 type FormState = {
   sourceType: CollectionSourceType;
@@ -160,6 +162,10 @@ function formatDuration(value?: number) {
   return hours > 0
     ? `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
     : `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function youtubeThumbnail(videoId: string) {
+  return `https://i.ytimg.com/vi/${encodeURIComponent(videoId)}/hqdefault.jpg`;
 }
 
 function sourceRequest(form: FormState): CreateCollectionSourceRequest {
@@ -462,6 +468,9 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   const [isExploreLoading, setIsExploreLoading] = useState(false);
   const [exploreError, setExploreError] = useState<string | null>(null);
   const [pinningTargetId, setPinningTargetId] = useState<string | null>(null);
+  const [exploreSort, setExploreSort] = useState<ExploreSort>("recent");
+  const [exploreChannelId, setExploreChannelId] = useState<string | null>(null);
+  const [exploreVisibleCount, setExploreVisibleCount] = useState(12);
   const resultsRequest = useRef(0);
   const commentsRequest = useRef(0);
   const collectionTriggerRef = useRef<HTMLElement | null>(null);
@@ -491,6 +500,15 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   const progressPercent = activeJob?.progress.total
     ? Math.min(100, Math.round((activeJob.progress.completed / activeJob.progress.total) * 100))
     : 0;
+  const exploreVideos = useMemo(() => {
+    const scoped = exploreChannelId ? explore.videos.filter((video) => video.channelId === exploreChannelId) : explore.videos;
+    return [...scoped].sort((left, right) => {
+      if (exploreSort === "views") return (right.viewCount ?? 0) - (left.viewCount ?? 0);
+      if (exploreSort === "comments") return (right.commentCount ?? 0) - (left.commentCount ?? 0);
+      return new Date(right.publishedAt ?? right.fetchedAt ?? 0).getTime() - new Date(left.publishedAt ?? left.fetchedAt ?? 0).getTime();
+    });
+  }, [explore.videos, exploreChannelId, exploreSort]);
+  const visibleExploreVideos = exploreVideos.slice(0, exploreVisibleCount);
 
   const update = <K extends keyof FormState>(key: K, value: FormState[K]) => {
     setForm((current) => ({ ...current, [key]: value }));
@@ -859,39 +877,40 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
         <section className="explore-section" id="explore" aria-labelledby="explore-title" tabIndex={-1}>
           <div className="explore-heading">
             <div>
-              <p className="section-kicker">SHARED COLLECTION LIBRARY</p>
+              <p className="section-kicker">COLLECTED SOCIAL LIBRARY</p>
               <h2 id="explore-title">Explore</h2>
-              <p>요청 이력과 관계없이 지금까지 수집된 공개 채널과 동영상을 한곳에서 살펴보세요.</p>
+              <p>지금까지 수집된 공개 채널과 동영상을 소셜 포스트처럼 탐색하세요.</p>
             </div>
-            <button className="icon-button" type="button" onClick={() => void refreshExplore()} disabled={isExploreLoading} aria-label="Explore 라이브러리 새로고침"><ArrowPathIcon aria-hidden="true" /></button>
+            <div className="explore-heading-actions"><span>{formatCount(explore.videos.length)} posts</span><button className="icon-button" type="button" onClick={() => void refreshExplore()} disabled={isExploreLoading} aria-label="Explore 라이브러리 새로고침"><ArrowPathIcon aria-hidden="true" /></button></div>
           </div>
           {exploreError && <p className="inline-error" role="status">{exploreError}</p>}
           {isExploreLoading && explore.channels.length === 0 ? <p className="explore-loading">수집 라이브러리를 불러오는 중입니다…</p> : (
             <>
-              <div className="explore-channel-grid" aria-label="수집된 채널">
+              <div className="explore-channel-strip" aria-label="수집된 채널">
+                <button className={exploreChannelId === null ? "channel-filter channel-filter-active" : "channel-filter"} type="button" onClick={() => { setExploreChannelId(null); setExploreVisibleCount(12); }}><span>All</span><b>{formatCount(explore.videos.length)}</b></button>
                 {explore.channels.map((channel) => {
                   const pinned = channel.pin?.enabled === true;
                   const hasTarget = Boolean(channel.targetId);
+                  const coverVideo = explore.videos.find((video) => video.channelId === channel.youtubeChannelId);
+                  const selected = channel.youtubeChannelId === exploreChannelId;
                   return (
-                    <article className={pinned ? "explore-channel-card explore-channel-card-pinned" : "explore-channel-card"} key={channel.youtubeChannelId}>
-                      <div className="explore-channel-card-head">
-                        <span className="explore-avatar">{(channel.title ?? channel.handle ?? "Y").slice(0, 1).toUpperCase()}</span>
-                        {hasTarget && <button className={pinned ? "pin-button pin-button-active" : "pin-button"} type="button" disabled={pinningTargetId === channel.targetId} onClick={() => channel.targetId && void togglePin(channel.targetId, pinned)} aria-pressed={pinned} aria-label={pinned ? `${channel.title ?? channel.youtubeChannelId} 자동 갱신 해제` : `${channel.title ?? channel.youtubeChannelId} 자동 갱신 핀 설정`}><BookmarkIcon aria-hidden="true" /></button>}
-                      </div>
-                      <strong>{channel.title ?? channel.handle ?? channel.youtubeChannelId}</strong>
-                      <span className="explore-handle">{channel.handle ? `@${channel.handle.replace(/^@/, "")}` : channel.youtubeChannelId}</span>
-                      <div className="explore-channel-stats"><span>영상 <b>{formatCount(channel.videoCount)}</b></span><span>댓글 <b>{formatCount(channel.commentCount)}</b></span></div>
-                      <footer>{pinned ? `자동 갱신 · 다음 확인 ${formatShortDate(channel.pin?.nextRunAt)}` : `최근 수집 ${formatShortDate(channel.lastFetchedAt)}`}</footer>
-                    </article>
+                    <div className={selected ? "explore-channel-card explore-channel-card-selected" : pinned ? "explore-channel-card explore-channel-card-pinned" : "explore-channel-card"} key={channel.youtubeChannelId}>
+                      <button className="explore-channel-select" type="button" onClick={() => { setExploreChannelId(channel.youtubeChannelId); setExploreVisibleCount(12); }} aria-pressed={selected}>
+                        {coverVideo ? <img src={youtubeThumbnail(coverVideo.youtubeVideoId)} alt="" /> : <span className="explore-avatar">{(channel.title ?? channel.handle ?? "Y").slice(0, 1).toUpperCase()}</span>}
+                        <span><strong>{channel.title ?? channel.handle ?? channel.youtubeChannelId}</strong><small>{channel.handle ? `@${channel.handle.replace(/^@/, "")}` : `${formatCount(channel.videoCount)} videos`}</small></span>
+                      </button>
+                      {hasTarget && <button className={pinned ? "pin-button pin-button-active" : "pin-button"} type="button" disabled={pinningTargetId === channel.targetId} onClick={() => channel.targetId && void togglePin(channel.targetId, pinned)} aria-pressed={pinned} aria-label={pinned ? `${channel.title ?? channel.youtubeChannelId} 자동 갱신 해제` : `${channel.title ?? channel.youtubeChannelId} 자동 갱신 핀 설정`}><BookmarkIcon aria-hidden="true" /></button>}
+                    </div>
                   );
                 })}
                 {explore.channels.length === 0 && <div className="explore-empty">아직 수집된 채널이 없습니다. 첫 수집을 시작하면 이곳에 자동으로 모입니다.</div>}
               </div>
-              <div className="explore-video-heading"><div><p className="section-kicker">RECENTLY COLLECTED</p><h3>동영상 갤러리</h3></div><span>{formatCount(explore.videos.length)}개</span></div>
+              <div className="explore-video-heading"><div><p className="section-kicker">LATEST SOCIAL POSTS</p><h3>{exploreChannelId ? explore.channels.find((channel) => channel.youtubeChannelId === exploreChannelId)?.title ?? "채널 동영상" : "동영상 갤러리"}</h3></div><label className="explore-sort"><ArrowsUpDownIcon aria-hidden="true" /><span className="visually-hidden">동영상 정렬</span><select value={exploreSort} onChange={(event) => { setExploreSort(event.target.value as ExploreSort); setExploreVisibleCount(12); }}><option value="recent">최근 수집</option><option value="views">조회수</option><option value="comments">댓글 수</option></select></label></div>
               <div className="explore-video-grid" aria-label="수집된 동영상">
-                {explore.videos.map((video) => <button className="explore-video-card" type="button" key={video.id} onClick={(event) => openVideoDrawer(video, event.currentTarget)}><span className="explore-video-play"><PlayIcon aria-hidden="true" /></span><span className="explore-video-date">{formatShortDate(video.publishedAt)}</span><strong>{video.title ?? video.youtubeVideoId}</strong><footer><span>조회 {formatCount(video.viewCount)}</span><span>댓글 {formatCount(video.commentCount)}</span></footer></button>)}
-                {explore.videos.length === 0 && <div className="explore-empty">저장된 동영상이 아직 없습니다.</div>}
+                {visibleExploreVideos.map((video, index) => <button className={index === 0 ? "explore-video-card explore-video-card-featured" : "explore-video-card"} type="button" key={video.id} onClick={(event) => openVideoDrawer(video, event.currentTarget)}><img src={youtubeThumbnail(video.youtubeVideoId)} alt="" loading={index < 6 ? "eager" : "lazy"} /><span className="explore-video-shade" aria-hidden="true" /><span className="explore-video-play"><PlayIcon aria-hidden="true" /></span><span className="explore-video-date">{formatShortDate(video.publishedAt)}</span><strong>{video.title ?? video.youtubeVideoId}</strong><footer><span>조회 {formatCount(video.viewCount)}</span><span>댓글 {formatCount(video.commentCount)}</span></footer></button>)}
+                {exploreVideos.length === 0 && <div className="explore-empty">조건에 맞는 저장 동영상이 없습니다.</div>}
               </div>
+              {exploreVideos.length > visibleExploreVideos.length && <button className="explore-load-more" type="button" onClick={() => setExploreVisibleCount((count) => count + 12)}>동영상 더 보기 <ChevronRightIcon aria-hidden="true" /></button>}
             </>
           )}
         </section>

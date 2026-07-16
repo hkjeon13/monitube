@@ -34,6 +34,7 @@ export interface CollectionRequestResponse {
 export interface CollectedVideo {
   id: string;
   youtubeVideoId: string;
+  channelId?: string;
   title: string;
   publishedAt?: string;
   viewCount?: number;
@@ -277,6 +278,9 @@ function normalizeVideo(value: unknown): CollectedVideo | null {
   return {
     id,
     youtubeVideoId: asText(record.youtubeVideoId ?? record.youtube_video_id ?? record.videoId ?? record.video_id) ?? id,
+    ...(asText(record.channelId ?? record.channel_id ?? record.youtubeChannelId ?? record.youtube_channel_id)
+      ? { channelId: asText(record.channelId ?? record.channel_id ?? record.youtubeChannelId ?? record.youtube_channel_id) }
+      : {}),
     title: asText(record.title ?? record.name) ?? "제목 없는 동영상",
     ...(asText(record.publishedAt ?? record.published_at ?? record.published) ? {
       publishedAt: asText(record.publishedAt ?? record.published_at ?? record.published),
