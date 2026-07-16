@@ -187,13 +187,22 @@ class YouTubeCollector:
 
     def _channel_video_ids(
         self, job: JobRecord, source_config: Mapping[str, Any], *, incremental_refresh: bool
-    ) -> tuple[list[str], dict[str, VideoRecord]]:
+    ) -> tuple[list[str], dict[str, VideoRecord], bool]:
         channel = self._resolve_channel(job, str(source_config["input"]))
         playlist_id = ((channel.get("contentDetails") or {}).get("relatedPlaylists") or {}).get("uploads")
         if not playlist_id:
-            return [], {}
+            return [], {}, False
         collect_all = bool(source_config.get("collectAllVideos"))
         limit = None if collect_all else job.max_videos or as_int(source_config.get("maxVideos")) or 50
+        expected_video_count = as_int((channel.get("statistics") or {}).get("videoCount"))
+        stored_video_count = self.repository.count_videos_by_channel(str(channel["id"]))
+        # The uploads playlist is newest-first.  A target marked complete can still
+        # be incomplete when an earlier quota pause meant we never reached its tail.
+        # In that case do not stop at the first known page: traverse the playlist and
+        # then process the returned IDs oldest-first to fill the historical gap.
+        backfill_required = bool(
+            incremental_refresh and collect_all and expected_video_count > stored_video_count
+        )
         ids: list[str] = []
         known_videos: dict[str, VideoRecord] = {}
         # Discovery pages are idempotently replayed after a quota pause. The page
@@ -224,14 +233,17 @@ class YouTubeCollector:
             known_videos.update(existing_on_page)
             page_token = payload.get("nextPageToken")
             self._checkpoint(job, stage="channel_playlist", scope_key=str(playlist_id), page_token=page_token, batch_cursor=page_count)
-            # Upload playlists are newest-first. After refreshing the newest
-            # already-known page, older pages cannot introduce a new upload for
-            # this channel, so stop before spending more API calls.
-            if incremental_refresh and collect_all and page_ids and len(existing_on_page) == len(page_ids):
+            # Upload playlists are newest-first. On a healthy incremental refresh,
+            # an all-known page proves older pages cannot introduce an upload. A
+            # count deficit disables this shortcut until historical coverage catches
+            # up with the channel's public video count.
+            if incremental_refresh and not backfill_required and collect_all and page_ids and len(existing_on_page) == len(page_ids):
                 break
             if not page_token:
                 break
-        return ids, known_videos
+        if backfill_required:
+            ids.reverse()
+        return ids, known_videos, backfill_required
 
     def _keyword_video_ids(self, job: JobRecord, source_config: Mapping[str, Any]) -> list[str]:
         max_pages = as_int(source_config.get("maxPagesPerRun")) or 1
@@ -394,19 +406,22 @@ class YouTubeCollector:
         try:
             if source.type is SourceType.CHANNEL:
                 incremental_refresh = bool(source.coverage.get("complete") and source.coverage.get("collectAllVideos"))
-                video_ids, known_videos = self._channel_video_ids(
+                video_ids, known_videos, backfill_required = self._channel_video_ids(
                     job, source.config, incremental_refresh=incremental_refresh
                 )
             elif source.type is SourceType.KEYWORD:
                 video_ids = self._keyword_video_ids(job, source.config)
                 known_videos = {}
                 incremental_refresh = False
+                backfill_required = False
             else:
                 video_ids = [str(source.config["input"])]
                 known_videos = {}
                 incremental_refresh = False
+                backfill_required = False
 
-            self.repository.update_job_progress(job.id, completed=0, total=len(video_ids), unit="videos", current_stage="fetching_videos")
+            stage = "backfilling_oldest_videos" if backfill_required else "fetching_videos"
+            self.repository.update_job_progress(job.id, completed=0, total=len(video_ids), unit="videos", current_stage=stage)
             videos = self._video_records(job, video_ids)
             for video in videos:
                 self.repository.link_source_video(source.id, video.youtube_video_id)

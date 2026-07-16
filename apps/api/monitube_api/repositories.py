@@ -115,6 +115,8 @@ class CollectionRepository(SourceRepository, JobRepository, CollectionRequestRep
 
     def get_videos_by_youtube_ids(self, youtube_video_ids: Iterable[str]) -> dict[str, VideoRecord]: ...
 
+    def count_videos_by_channel(self, youtube_channel_id: str) -> int: ...
+
     def link_source_video(self, source_id: str, youtube_video_id: str) -> None: ...
 
     def upsert_comment(self, comment: CommentRecord) -> CommentRecord: ...
@@ -769,6 +771,10 @@ class InMemoryRepository(CollectionRepository):
                 for video_id in set(youtube_video_ids)
                 if video_id in self._videos
             }
+
+    def count_videos_by_channel(self, youtube_channel_id: str) -> int:
+        with self._lock:
+            return sum(video.youtube_channel_id == youtube_channel_id for video in self._videos.values())
 
     def link_source_video(self, source_id: str, youtube_video_id: str) -> None:
         with self._lock:

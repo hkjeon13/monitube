@@ -1073,6 +1073,19 @@ class PostgresRepository(CollectionRepository):
             )
             return {row["youtube_video_id"]: self._video(row) for row in cursor.fetchall()}
 
+    def count_videos_by_channel(self, youtube_channel_id: str) -> int:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT count(*)::integer AS video_count
+                FROM videos v
+                JOIN channels c ON c.id = v.channel_id
+                WHERE c.youtube_channel_id = %s
+                """,
+                (youtube_channel_id,),
+            )
+            return int(cursor.fetchone()["video_count"])
+
     def link_source_video(self, source_id: str, youtube_video_id: str) -> None:
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(

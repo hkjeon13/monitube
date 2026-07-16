@@ -95,6 +95,7 @@ const stageLabels: Record<string, string> = {
   listing_channel_videos: "채널 업로드 목록을 불러오는 중",
   searching_keywords: "키워드 검색 결과를 불러오는 중",
   fetching_video_details: "동영상 상세 정보를 불러오는 중",
+  backfilling_oldest_videos: "누락된 과거 동영상을 오래된 순으로 보완하는 중",
   fetching_comments: "공개 댓글을 불러오는 중",
   persisting: "결과를 저장하는 중",
   analyzing: "분석을 준비하는 중",

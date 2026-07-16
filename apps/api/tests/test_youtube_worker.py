@@ -229,6 +229,67 @@ def test_channel_refresh_stops_at_known_upload_page_and_comment_page() -> None:
     assert client.comment_requests[0]["order"] == "time"
 
 
+class HistoricalBackfillClient:
+    def __init__(self) -> None:
+        self.playlist_calls = 0
+
+    @staticmethod
+    def bucket_for(_endpoint: str) -> QuotaBucket:
+        return QuotaBucket.CORE
+
+    def request(self, endpoint: str, _params: dict[str, object]):
+        if endpoint == "channels":
+            return {
+                "items": [{
+                    "id": "UCabcdefghijklmnopqrstuv", "snippet": {"title": "Example"},
+                    "contentDetails": {"relatedPlaylists": {"uploads": "UUexample"}},
+                    "statistics": {"videoCount": "4"},
+                }]
+            }
+        if endpoint == "playlistItems":
+            self.playlist_calls += 1
+            if self.playlist_calls == 1:
+                return {
+                    "items": [
+                        {"contentDetails": {"videoId": "newest-1"}},
+                        {"contentDetails": {"videoId": "newest-2"}},
+                    ],
+                    "nextPageToken": "older-page",
+                }
+            return {"items": [
+                {"contentDetails": {"videoId": "oldest-1"}},
+                {"contentDetails": {"videoId": "oldest-2"}},
+            ]}
+        raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+
+def test_channel_count_deficit_continues_to_oldest_playlist_pages() -> None:
+    repository = InMemoryRepository()
+    channel_id = "UCabcdefghijklmnopqrstuv"
+    for video_id in ("newest-1", "newest-2"):
+        repository.upsert_video(VideoRecord(
+            id=new_id(), youtube_video_id=video_id, youtube_channel_id=channel_id,
+            title="Stored", description=None, published_at=None, duration_seconds=None,
+            privacy_status="public", made_for_kids=False, statistics={}, source_fetched_at=utcnow(),
+        ))
+    source = repository.create_source(
+        source_type=SourceType.CHANNEL,
+        config={"input": "@example", "includeComments": False, "collectAllVideos": True},
+    )
+    repository._sources[source.id] = replace(source, coverage={"complete": True, "collectAllVideos": True})
+    job = repository.create_job(source_id=source.id, include_comments=False, max_videos=None, max_comments_per_video=None)
+    client = HistoricalBackfillClient()
+
+    ids, known_videos, backfill_required = YouTubeCollector(repository, client)._channel_video_ids(
+        job, source.config, incremental_refresh=True
+    )
+
+    assert backfill_required is True
+    assert client.playlist_calls == 2
+    assert ids == ["oldest-2", "oldest-1", "newest-2", "newest-1"]
+    assert set(known_videos) == {"newest-1", "newest-2"}
+
+
 def test_expired_running_lease_is_reclaimed_and_active_owner_can_renew() -> None:
     repository = InMemoryRepository()
     source = repository.create_source(
