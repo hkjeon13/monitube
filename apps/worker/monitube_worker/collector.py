@@ -177,14 +177,15 @@ class YouTubeCollector:
         )
         return item
 
-    def _channel_video_ids(self, job: JobRecord, source_config: Mapping[str, Any]) -> list[str]:
+    def _channel_video_ids(self, job: JobRecord, source_config: Mapping[str, Any]) -> tuple[list[str], dict[str, VideoRecord]]:
         channel = self._resolve_channel(job, str(source_config["input"]))
         playlist_id = ((channel.get("contentDetails") or {}).get("relatedPlaylists") or {}).get("uploads")
         if not playlist_id:
-            return []
+            return [], {}
         collect_all = bool(source_config.get("collectAllVideos"))
         limit = None if collect_all else job.max_videos or as_int(source_config.get("maxVideos")) or 50
         ids: list[str] = []
+        known_videos: dict[str, VideoRecord] = {}
         # Discovery pages are idempotently replayed after a quota pause. The page
         # checkpoint alone cannot reconstruct IDs from earlier pages, so resuming its
         # cursor would silently omit them before they are linked to this source.
@@ -200,17 +201,27 @@ class YouTubeCollector:
                 pageToken=page_token,
             )
             page_count += 1
+            page_ids: list[str] = []
             for item in payload.get("items", []):
                 video_id = (item.get("contentDetails") or {}).get("videoId") or (item.get("snippet") or {}).get("resourceId", {}).get("videoId")
+                if video_id and video_id not in page_ids:
+                    page_ids.append(video_id)
                 if video_id and video_id not in ids:
                     ids.append(video_id)
                     if limit is not None and len(ids) >= limit:
                         break
+            existing_on_page = self.repository.get_videos_by_youtube_ids(page_ids)
+            known_videos.update(existing_on_page)
             page_token = payload.get("nextPageToken")
             self._checkpoint(job, stage="channel_playlist", scope_key=str(playlist_id), page_token=page_token, batch_cursor=page_count)
+            # Upload playlists are newest-first. After refreshing the newest
+            # already-known page, older pages cannot introduce a new upload for
+            # this channel, so stop before spending more API calls.
+            if collect_all and page_ids and len(existing_on_page) == len(page_ids):
+                break
             if not page_token:
                 break
-        return ids
+        return ids, known_videos
 
     def _keyword_video_ids(self, job: JobRecord, source_config: Mapping[str, Any]) -> list[str]:
         max_pages = as_int(source_config.get("maxPagesPerRun")) or 1
@@ -321,6 +332,7 @@ class YouTubeCollector:
                     videoId=video.youtube_video_id,
                     maxResults=100,
                     textFormat="plainText",
+                    order="time",
                     pageToken=page_token,
                 )
             except YouTubeApiError as exc:
@@ -329,7 +341,18 @@ class YouTubeCollector:
                     self._add_partial_error(job, scope="video", code=exc.reasons[0] if exc.reasons else "comments_unavailable", message=str(exc), retryable=False)
                     return count
                 raise
-            for thread in payload.get("items", []):
+            threads = payload.get("items", [])
+            page_comment_ids: list[str] = []
+            for thread in threads:
+                top = (thread.get("snippet") or {}).get("topLevelComment")
+                if top and top.get("id"):
+                    page_comment_ids.append(str(top["id"]))
+                for reply in ((thread.get("replies") or {}).get("comments") or []):
+                    if reply.get("id"):
+                        page_comment_ids.append(str(reply["id"]))
+            page_comment_ids = list(dict.fromkeys(page_comment_ids))
+            known_comment_ids = self.repository.existing_comment_ids(page_comment_ids)
+            for thread in threads:
                 thread_id = str(thread.get("id") or "")
                 top = (thread.get("snippet") or {}).get("topLevelComment")
                 if top and top.get("id"):
@@ -343,6 +366,10 @@ class YouTubeCollector:
                             count += 1
             page_token = payload.get("nextPageToken")
             self._checkpoint(job, stage="comments", scope_key=video.youtube_video_id, page_token=page_token, batch_cursor=page)
+            # ``order=time`` makes the first all-known page the incremental
+            # boundary. We still upsert that page above so likes/edits remain fresh.
+            if page_comment_ids and len(known_comment_ids) == len(page_comment_ids):
+                break
             if not page_token:
                 break
         return count
@@ -354,11 +381,13 @@ class YouTubeCollector:
         self._active_checkpoint = dict(job.checkpoint)
         try:
             if source.type is SourceType.CHANNEL:
-                video_ids = self._channel_video_ids(job, source.config)
+                video_ids, known_videos = self._channel_video_ids(job, source.config)
             elif source.type is SourceType.KEYWORD:
                 video_ids = self._keyword_video_ids(job, source.config)
+                known_videos = {}
             else:
                 video_ids = [str(source.config["input"])]
+                known_videos = {}
 
             self.repository.update_job_progress(job.id, completed=0, total=len(video_ids), unit="videos", current_stage="fetching_videos")
             videos = self._video_records(job, video_ids)
@@ -371,10 +400,17 @@ class YouTubeCollector:
                 max_pages = None if source.config.get("collectAllComments") else (
                     job.max_comments_per_video or as_int(source.config.get("maxCommentPagesPerVideo")) or 1
                 )
+                videos_with_new_comments = [
+                    video
+                    for video in videos
+                    if source.type is not SourceType.CHANNEL
+                    or video.youtube_video_id not in known_videos
+                    or video.statistics.get("commentCount", 0) > known_videos[video.youtube_video_id].statistics.get("commentCount", 0)
+                ]
                 collected_comments = 0
-                for index, video in enumerate(videos, start=1):
+                for index, video in enumerate(videos_with_new_comments, start=1):
                     collected_comments += self._collect_comments(job, video, max_pages)
-                    self.repository.update_job_progress(job.id, completed=index, total=len(videos), unit="comments", current_stage="collecting_comments")
+                    self.repository.update_job_progress(job.id, completed=index, total=len(videos_with_new_comments), unit="comments", current_stage="collecting_comments")
                 self._checkpoint(job, stage="analysis", scope_key=source.id, page_token=None, batch_cursor=collected_comments)
 
             self.repository.save_analysis_summary(source.id)

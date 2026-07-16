@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta
 import hashlib
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 try:  # Keep the in-memory API usable when optional runtime dependencies are absent.
     import psycopg
@@ -1015,6 +1015,36 @@ class PostgresRepository(CollectionRepository):
             )
             return replace(video, id=internal_id)
 
+    def get_videos_by_youtube_ids(self, youtube_video_ids: Iterable[str]) -> dict[str, VideoRecord]:
+        video_ids = list(dict.fromkeys(youtube_video_ids))
+        if not video_ids:
+            return {}
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT v.id::text, v.youtube_video_id, c.youtube_channel_id, v.title, v.description,
+                       v.published_at, v.duration_seconds, v.privacy_status, v.made_for_kids,
+                       COALESCE(
+                         (SELECT jsonb_build_object(
+                           'viewCount', vs.view_count,
+                           'likeCount', vs.like_count,
+                           'commentCount', vs.comment_count
+                         )
+                         FROM video_stat_snapshots vs
+                         WHERE vs.video_id = v.id
+                         ORDER BY vs.fetched_at DESC
+                         LIMIT 1),
+                         '{}'::jsonb
+                       ) AS statistics,
+                       v.source_fetched_at
+                FROM videos v
+                LEFT JOIN channels c ON c.id = v.channel_id
+                WHERE v.youtube_video_id = ANY(%s)
+                """,
+                (video_ids,),
+            )
+            return {row["youtube_video_id"]: self._video(row) for row in cursor.fetchall()}
+
     def link_source_video(self, source_id: str, youtube_video_id: str) -> None:
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
@@ -1078,6 +1108,14 @@ class PostgresRepository(CollectionRepository):
                 ),
             )
             return replace(comment, id=str(cursor.fetchone()["id"]))
+
+    def existing_comment_ids(self, youtube_comment_ids: Iterable[str]) -> set[str]:
+        comment_ids = list(dict.fromkeys(youtube_comment_ids))
+        if not comment_ids:
+            return set()
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT youtube_comment_id FROM comments WHERE youtube_comment_id = ANY(%s)", (comment_ids,))
+            return {str(row["youtube_comment_id"]) for row in cursor.fetchall()}
 
     def record_api_request(
         self, *, job_id: str, bucket: QuotaBucket, endpoint: str, status_code: int, error_reason: str | None = None

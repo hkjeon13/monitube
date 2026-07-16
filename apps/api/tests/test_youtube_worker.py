@@ -1,6 +1,6 @@
 from datetime import timedelta
 
-from monitube_api.domain import JobState, QuotaBucket, SourceType, utcnow
+from monitube_api.domain import CommentRecord, JobState, QuotaBucket, SourceType, VideoRecord, new_id, utcnow
 from monitube_api.repositories import InMemoryRepository
 from monitube_worker.collector import YouTubeCollector, quota_retry_delay_seconds
 from monitube_worker.runner import JobRunner
@@ -169,6 +169,62 @@ def test_channel_all_content_flags_continue_past_legacy_numeric_limits() -> None
 
     assert completed.state is JobState.COMPLETED
     assert client.playlist_calls == 2
+
+
+class IncrementalChannelClient:
+    def __init__(self) -> None:
+        self.playlist_calls = 0
+        self.comment_requests: list[dict[str, object]] = []
+
+    @staticmethod
+    def bucket_for(_endpoint: str) -> QuotaBucket:
+        return QuotaBucket.CORE
+
+    def request(self, endpoint: str, params: dict[str, object]):
+        if endpoint == "channels":
+            return {"items": [{"id": "UCabcdefghijklmnopqrstuv", "snippet": {"title": "Example"}, "contentDetails": {"relatedPlaylists": {"uploads": "UUexample"}}}]}
+        if endpoint == "playlistItems":
+            self.playlist_calls += 1
+            return {"items": [{"contentDetails": {"videoId": "dQw4w9WgXcQ"}}, {"contentDetails": {"videoId": "M7lc1UVf-VE"}}], "nextPageToken": "older"}
+        if endpoint == "videos":
+            return {"items": [
+                {"id": "dQw4w9WgXcQ", "snippet": {"channelId": "UCabcdefghijklmnopqrstuv", "title": "Newest known", "publishedAt": "2025-01-02T03:04:05Z"}, "contentDetails": {"duration": "PT1M"}, "status": {}, "statistics": {"commentCount": "2"}},
+                {"id": "M7lc1UVf-VE", "snippet": {"channelId": "UCabcdefghijklmnopqrstuv", "title": "Also known", "publishedAt": "2025-01-01T03:04:05Z"}, "contentDetails": {"duration": "PT1M"}, "status": {}, "statistics": {"commentCount": "0"}},
+            ]}
+        if endpoint == "commentThreads":
+            self.comment_requests.append(params)
+            return {"items": [{"id": "thread-known", "snippet": {"topLevelComment": {"id": "comment-known", "snippet": {"textDisplay": "Already stored", "publishedAt": "2025-01-02T03:04:05Z"}}}}], "nextPageToken": "older-comments"}
+        raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+
+def test_channel_refresh_stops_at_known_upload_page_and_comment_page() -> None:
+    repository = InMemoryRepository()
+    for video_id, comments in (("dQw4w9WgXcQ", 1), ("M7lc1UVf-VE", 0)):
+        repository.upsert_video(VideoRecord(
+            id=new_id(), youtube_video_id=video_id, youtube_channel_id="UCabcdefghijklmnopqrstuv",
+            title="Stored", description=None, published_at=None, duration_seconds=None,
+            privacy_status="public", made_for_kids=False,
+            statistics={"viewCount": 0, "likeCount": 0, "commentCount": comments}, source_fetched_at=utcnow(),
+        ))
+    repository.upsert_comment(CommentRecord(
+        id=new_id(), youtube_comment_id="comment-known", youtube_video_id="dQw4w9WgXcQ",
+        youtube_parent_comment_id=None, youtube_thread_id="thread-known", text_display="Already stored",
+        like_count=0, published_at=None, updated_at=None, source_fetched_at=utcnow(),
+    ))
+    source = repository.create_source(
+        source_type=SourceType.CHANNEL,
+        config={"input": "@example", "includeComments": True, "collectAllVideos": True, "collectAllComments": True},
+    )
+    job = repository.create_job(source_id=source.id, include_comments=True, max_videos=None, max_comments_per_video=None)
+    client = IncrementalChannelClient()
+
+    completed = JobRunner(repository, YouTubeCollector(repository, client)).run(job.id)
+
+    assert completed.state is JobState.COMPLETED
+    assert client.playlist_calls == 1
+    assert len(client.comment_requests) == 1
+    assert client.comment_requests[0]["videoId"] == "dQw4w9WgXcQ"
+    assert client.comment_requests[0]["order"] == "time"
 
 
 def test_expired_running_lease_is_reclaimed_and_active_owner_can_renew() -> None:

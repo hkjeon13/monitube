@@ -6,7 +6,7 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta
 from threading import RLock
-from typing import Any, Protocol
+from typing import Any, Iterable, Protocol
 
 from .analysis import build_summary
 from .domain import (
@@ -110,9 +110,13 @@ class CollectionRepository(SourceRepository, JobRepository, CollectionRequestRep
 
     def upsert_video(self, video: VideoRecord) -> VideoRecord: ...
 
+    def get_videos_by_youtube_ids(self, youtube_video_ids: Iterable[str]) -> dict[str, VideoRecord]: ...
+
     def link_source_video(self, source_id: str, youtube_video_id: str) -> None: ...
 
     def upsert_comment(self, comment: CommentRecord) -> CommentRecord: ...
+
+    def existing_comment_ids(self, youtube_comment_ids: Iterable[str]) -> set[str]: ...
 
     def record_api_request(self, *, job_id: str, bucket: QuotaBucket, endpoint: str, status_code: int, error_reason: str | None = None) -> None: ...
 
@@ -755,6 +759,14 @@ class InMemoryRepository(CollectionRepository):
             self._videos[video.youtube_video_id] = stored
             return stored
 
+    def get_videos_by_youtube_ids(self, youtube_video_ids: Iterable[str]) -> dict[str, VideoRecord]:
+        with self._lock:
+            return {
+                video_id: self._videos[video_id]
+                for video_id in set(youtube_video_ids)
+                if video_id in self._videos
+            }
+
     def link_source_video(self, source_id: str, youtube_video_id: str) -> None:
         with self._lock:
             source = self.get_source(source_id)
@@ -770,6 +782,10 @@ class InMemoryRepository(CollectionRepository):
             stored = replace(comment, id=current.id) if current else comment
             self._comments[comment.youtube_comment_id] = stored
             return stored
+
+    def existing_comment_ids(self, youtube_comment_ids: Iterable[str]) -> set[str]:
+        with self._lock:
+            return set(youtube_comment_ids).intersection(self._comments)
 
     def record_api_request(
         self, *, job_id: str, bucket: QuotaBucket, endpoint: str, status_code: int, error_reason: str | None = None
