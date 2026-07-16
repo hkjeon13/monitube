@@ -1466,7 +1466,7 @@ class PostgresRepository(CollectionRepository):
                        jsonb_build_object('viewCount', COALESCE(stats.view_count, 0), 'likeCount', COALESCE(stats.like_count, 0), 'commentCount', COALESCE(stats.comment_count, 0)) AS statistics
                 FROM videos v LEFT JOIN channels c ON c.id = v.channel_id
                 LEFT JOIN LATERAL (SELECT view_count, like_count, comment_count FROM video_stat_snapshots WHERE video_id = v.id ORDER BY fetched_at DESC LIMIT 1) stats ON TRUE
-                WHERE (%s IS NULL OR c.youtube_channel_id = %s)
+                WHERE (%s::text IS NULL OR c.youtube_channel_id = %s)
                 ORDER BY v.source_fetched_at DESC NULLS LAST, v.published_at DESC NULLS LAST LIMIT %s
                 """,
                 (channel_id, channel_id, 10_000 if channel_id else limit),
