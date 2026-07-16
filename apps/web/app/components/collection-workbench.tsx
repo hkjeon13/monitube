@@ -19,6 +19,7 @@ import {
   Squares2X2Icon,
   XMarkIcon,
 } from "@heroicons/react/24/outline";
+import Link from "next/link";
 import type {
   ChannelSourceConfig,
   CollectionSourceType,
@@ -50,7 +51,7 @@ import {
 
 type EstimateMode = "local" | null;
 type ViewMetric = "views" | "likes" | "comments";
-type NavItem = "overview" | "explore" | "sources" | "jobs" | "insights";
+export type WorkspacePage = "overview" | "explore" | "sources" | "jobs" | "insights";
 type FormState = {
   sourceType: CollectionSourceType;
   channelInput: string;
@@ -433,7 +434,7 @@ function MetricCard({
   );
 }
 
-export function CollectionWorkbench() {
+export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePage }) {
   const [form, setForm] = useState<FormState>(initialForm);
   const [estimates, setEstimates] = useState<QuotaEstimate[]>([]);
   const [estimateWarnings, setEstimateWarnings] = useState<string[]>([]);
@@ -457,7 +458,6 @@ export function CollectionWorkbench() {
   const [commentsError, setCommentsError] = useState<string | null>(null);
   const [isCollectionOpen, setIsCollectionOpen] = useState(false);
   const [viewMetric, setViewMetric] = useState<ViewMetric>("views");
-  const [activeNav, setActiveNav] = useState<NavItem>("overview");
   const [explore, setExplore] = useState<ExploreData>({ channels: [], videos: [] });
   const [isExploreLoading, setIsExploreLoading] = useState(false);
   const [exploreError, setExploreError] = useState<string | null>(null);
@@ -747,23 +747,16 @@ export function CollectionWorkbench() {
     }
   }, [closeCollectionDrawer, estimateMode, requestBody, validationError]);
 
-  const navigateTo = (item: NavItem, target: string) => {
-    setActiveNav(item);
-    const targetElement = document.getElementById(target);
-    targetElement?.scrollIntoView({ behavior: "smooth", block: "start" });
-    targetElement?.focus({ preventScroll: true });
-  };
-
   const navigation = [
-    { id: "overview" as const, label: "Overview", target: "overview", Icon: HomeIcon },
-    { id: "explore" as const, label: "Explore", target: "explore", Icon: Squares2X2Icon },
-    { id: "sources" as const, label: "Sources", target: "source-selector", Icon: FolderIcon },
-    { id: "jobs" as const, label: "Collection jobs", target: "collection-jobs", Icon: QueueListIcon },
-    { id: "insights" as const, label: "Insights", target: "insights", Icon: SparklesIcon },
+    { id: "overview" as const, label: "Overview", href: "/", Icon: HomeIcon },
+    { id: "explore" as const, label: "Explore", href: "/explore", Icon: Squares2X2Icon },
+    { id: "sources" as const, label: "Sources", href: "/sources", Icon: FolderIcon },
+    { id: "jobs" as const, label: "Collection jobs", href: "/jobs", Icon: QueueListIcon },
+    { id: "insights" as const, label: "Insights", href: "/insights", Icon: SparklesIcon },
   ];
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell page-${page}`}>
       <aside className="sidebar" aria-label="Monitube 탐색">
         <div className="brand-lockup">
           <span className="brand-mark" aria-hidden="true"><PlayIcon /></span>
@@ -771,18 +764,17 @@ export function CollectionWorkbench() {
         </div>
 
         <nav className="sidebar-nav" aria-label="주요 메뉴">
-          {navigation.map(({ id, label, target, Icon }) => (
-            <button
+          {navigation.map(({ id, label, href, Icon }) => (
+            <Link
               key={id}
-              className={activeNav === id ? "nav-item nav-item-active" : "nav-item"}
-              type="button"
+              className={page === id ? "nav-item nav-item-active" : "nav-item"}
               aria-label={label}
-              aria-current={activeNav === id ? "page" : undefined}
-              onClick={() => navigateTo(id, target)}
+              aria-current={page === id ? "page" : undefined}
+              href={href}
             >
               <Icon aria-hidden="true" />
               <span>{label}</span>
-            </button>
+            </Link>
           ))}
         </nav>
 
@@ -841,6 +833,14 @@ export function CollectionWorkbench() {
             </button>
           </div>
         </header>
+
+        <section className="sources-page" aria-labelledby="sources-page-title">
+          <div className="workspace-page-heading"><p className="section-kicker">COLLECTION TARGETS</p><h1 id="sources-page-title">Sources</h1><p>중복 없이 정규화된 수집 대상을 관리하고, 선택한 대상의 수집 범위를 확인합니다.</p></div>
+          <div className="sources-page-list">
+            {sources.map((source) => <button key={source.id} type="button" className={source.id === activeSourceId ? "source-page-card source-page-card-active" : "source-page-card"} onClick={() => setActiveSourceId(source.id)}><span className="source-type-chip">{sourceTypeCopy(source.type)}</span><strong>{sourceLabel(source)}</strong><small>{sourceCoverage(source)}</small><footer>{source.lastCompletedAt ? `완료 ${formatShortDate(source.lastCompletedAt)}` : "수집 이력 없음"}</footer></button>)}
+            {sources.length === 0 && <div className="explore-empty">아직 등록된 수집 대상이 없습니다.</div>}
+          </div>
+        </section>
 
         <section className="overview-intro" id="overview" aria-labelledby="overview-title" tabIndex={-1}>
           <div>
