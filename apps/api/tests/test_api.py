@@ -271,3 +271,23 @@ def test_pinned_target_dispatches_a_follow_up_collection_and_explore_is_public()
     assert repository.dispatch_due_pins() == 1
     assert any(job.target_id == collected["targetId"] and job.state is JobState.QUEUED for job in repository._jobs.values())
     assert client.get("/v1/explore").status_code == 200
+
+
+def test_deleting_a_canonical_source_stops_its_target_without_deleting_collected_data() -> None:
+    repository = InMemoryRepository()
+    client = TestClient(create_app(repository=repository))
+    created = client.post(
+        "/v1/collection-requests",
+        json={"type": "channel", "config": {"input": "@GoogleDevelopers", "includeComments": True}},
+    ).json()
+    client.put(
+        f"/v1/collection-targets/{created['targetId']}/pin",
+        json={"enabled": True, "intervalMinutes": 60},
+    )
+
+    deleted = client.delete(f"/v1/sources/{created['source']['id']}")
+
+    assert deleted.status_code == 204
+    assert client.get("/v1/sources").json() == []
+    assert created["targetId"] not in repository._targets
+    assert created["targetId"] not in repository._pins

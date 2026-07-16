@@ -494,6 +494,10 @@ export async function listSources() {
   });
 }
 
+export async function deleteSource(sourceId: string): Promise<void> {
+  await request<void>(`/v1/sources/${encodeURIComponent(sourceId)}`, { method: "DELETE" });
+}
+
 export async function getSourceResults(sourceId: string): Promise<SourceResults> {
   const response = await request<unknown>(`/v1/sources/${encodeURIComponent(sourceId)}/results`, {
     method: "GET",

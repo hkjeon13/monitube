@@ -19,6 +19,7 @@ import {
   SparklesIcon,
   StopIcon,
   Squares2X2Icon,
+  TrashIcon,
   XMarkIcon,
 } from "@heroicons/react/24/outline";
 import Link from "next/link";
@@ -37,6 +38,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   createCollectionRequest,
+  deleteSource,
   getJob,
   getExplore,
   searchCollected,
@@ -438,6 +440,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   const [isExploreLoading, setIsExploreLoading] = useState(false);
   const [exploreError, setExploreError] = useState<string | null>(null);
   const [pinningTargetId, setPinningTargetId] = useState<string | null>(null);
+  const [deletingSourceId, setDeletingSourceId] = useState<string | null>(null);
   const [exploreSort, setExploreSort] = useState<ExploreSort>("recent");
   const [exploreChannelId, setExploreChannelId] = useState<string | null>(null);
   const [exploreVisibleCount, setExploreVisibleCount] = useState(12);
@@ -588,6 +591,25 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
       setPinningTargetId(null);
     }
   }, [refreshExplore]);
+
+  const removeSource = useCallback(async (source: SourceSummary) => {
+    const confirmed = window.confirm(`“${sourceLabel(source)}” 수집 대상을 삭제할까요? 자동 수집은 중지되지만 이미 저장된 채널·영상·댓글 데이터는 Explore에서 유지됩니다.`);
+    if (!confirmed) return;
+    setDeletingSourceId(source.id);
+    try {
+      await deleteSource(source.id);
+      if (activeSourceId === source.id) {
+        setActiveSourceId("");
+        setSourceResults(null);
+      }
+      await Promise.all([refreshSources(), refreshExplore()]);
+      setNotice("수집 대상과 자동 갱신을 삭제했습니다. 저장된 공개 데이터는 유지됩니다.");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "수집 대상을 삭제하지 못했습니다.");
+    } finally {
+      setDeletingSourceId(null);
+    }
+  }, [activeSourceId, refreshExplore, refreshSources]);
 
   const loadComments = useCallback(async (video: CollectedVideo, cursor?: string) => {
     const requestId = ++commentsRequest.current;
@@ -873,7 +895,10 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
                   </button>
                   <footer>
                     <span>{source.lastCompletedAt ? `완료 ${formatShortDate(source.lastCompletedAt)}` : "수집 이력 없음"}</span>
-                    {canToggleRefresh && <button className={pinned ? "source-refresh-button source-refresh-button-running" : "source-refresh-button source-refresh-button-stopped"} type="button" disabled={pinningTargetId === source.targetId} onClick={() => source.targetId && void togglePin(source.targetId, pinned)} aria-label={pinned ? "자동 수집 일시 중지" : "자동 수집 재개"} title={pinned ? "자동 수집 일시 중지" : "자동 수집 재개"}>{pinned ? <PauseIcon aria-hidden="true" /> : <StopIcon aria-hidden="true" />}</button>}
+                    <span className="source-card-actions">
+                      {canToggleRefresh && <button className={pinned ? "source-refresh-button source-refresh-button-running" : "source-refresh-button source-refresh-button-stopped"} type="button" disabled={pinningTargetId === source.targetId || deletingSourceId === source.id} onClick={() => source.targetId && void togglePin(source.targetId, pinned)} aria-label={pinned ? "자동 수집 일시 중지" : "자동 수집 재개"} title={pinned ? "자동 수집 일시 중지" : "자동 수집 재개"}>{pinned ? <PauseIcon aria-hidden="true" /> : <StopIcon aria-hidden="true" />}</button>}
+                      <button className="source-delete-button" type="button" disabled={deletingSourceId === source.id} onClick={() => void removeSource(source)} aria-label="수집 대상 삭제" title="수집 대상 삭제"><TrashIcon aria-hidden="true" /></button>
+                    </span>
                   </footer>
                 </article>
               );

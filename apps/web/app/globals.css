@@ -144,6 +144,10 @@ svg { display: block; width: 1.125rem; height: 1.125rem; stroke-width: 1.7; }
 .source-refresh-button-stopped { border-color: #ce5b4d; color: #fff; background: #d85b4c; }
 .source-refresh-button:hover:not(:disabled) { border-color: #db7b49; color: #a94f24; background: var(--orange-soft); }
 .source-refresh-button-stopped:hover:not(:disabled) { border-color: #ad4035; color: #fff; background: #b84236; }
+.source-card-actions { display: flex; align-items: center; gap: 0.375rem; }
+.source-delete-button { display: grid; width: 2rem; height: 2rem; place-items: center; border: 0.0625rem solid #e6c7c2; border-radius: 0.5rem; color: #b14d45; background: #fff8f6; }
+.source-delete-button svg { width: 0.875rem; height: 0.875rem; stroke-width: 2.25; }
+.source-delete-button:hover:not(:disabled) { border-color: #c45449; color: #fff; background: #c45449; }
 
 /* The sidebar entries are real routes.  Each route renders only its own
    workspace rather than scrolling within one long dashboard. */

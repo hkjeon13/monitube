@@ -297,9 +297,19 @@ class PostgresRepository(CollectionRepository):
 
     def delete_source(self, source_id: str) -> None:
         with self._connection() as connection, connection.cursor() as cursor:
-            cursor.execute("DELETE FROM collection_sources WHERE id = %s", (source_id,))
-            if cursor.rowcount != 1:
+            cursor.execute("SELECT target_id::text FROM collection_sources WHERE id = %s FOR UPDATE", (source_id,))
+            row = cursor.fetchone()
+            if not row:
                 raise NotFoundError(f"Source '{source_id}' was not found")
+            target_id = row.get("target_id")
+            if not target_id:
+                cursor.execute("DELETE FROM collection_sources WHERE id = %s", (source_id,))
+                return
+            # Dashboard sources are canonical targets. Remove every historical
+            # source/request alias for this target, stop its pin and jobs, but leave
+            # normalized channels, videos and comments available in Explore.
+            cursor.execute("DELETE FROM collection_sources WHERE target_id = %s", (target_id,))
+            cursor.execute("DELETE FROM collection_targets WHERE id = %s", (target_id,))
 
     def _active_runtime_config(self, cursor: Any) -> str:
         cursor.execute("SELECT id::text FROM youtube_runtime_configs WHERE status = 'active' ORDER BY activated_at DESC LIMIT 1")

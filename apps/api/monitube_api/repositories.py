@@ -302,13 +302,31 @@ class InMemoryRepository(CollectionRepository):
 
     def delete_source(self, source_id: str) -> None:
         with self._lock:
-            if source_id not in self._sources:
+            source = self._sources.get(source_id)
+            if not source:
                 raise NotFoundError(f"Source '{source_id}' was not found")
-            del self._sources[source_id]
-            self._source_videos.pop(source_id, None)
-            self._analysis.pop(source_id, None)
-            for job_id in [job.id for job in self._jobs.values() if job.source_id == source_id]:
+            source_ids = [
+                identifier for identifier, candidate in self._sources.items()
+                if candidate.target_id == source.target_id
+            ] if source.target_id else [source_id]
+            for identifier in source_ids:
+                self._sources.pop(identifier, None)
+                self._source_videos.pop(identifier, None)
+                self._analysis.pop(identifier, None)
+            for job_id in [job.id for job in self._jobs.values() if job.source_id in source_ids]:
                 del self._jobs[job_id]
+            if source.target_id:
+                target = self._targets.pop(source.target_id, None)
+                self._target_videos.pop(source.target_id, None)
+                self._pins.pop(source.target_id, None)
+                if target:
+                    self._target_ids_by_key.pop((target.type, target.canonical_key), None)
+                for alias, target_id in list(self._target_aliases.items()):
+                    if target_id == source.target_id:
+                        del self._target_aliases[alias]
+                for request_id, request in list(self._requests.items()):
+                    if request.target_id == source.target_id:
+                        del self._requests[request_id]
 
     def create_job(
         self,
