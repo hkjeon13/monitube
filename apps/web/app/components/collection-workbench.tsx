@@ -466,6 +466,10 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     });
   }, [explore.videos, exploreChannelId, exploreSort]);
   const visibleExploreVideos = exploreVideos.slice(0, exploreVisibleCount);
+  const pinsByTargetId = useMemo(
+    () => new Map(explore.channels.flatMap((channel) => channel.targetId && channel.pin ? [[channel.targetId, channel.pin] as const] : [])),
+    [explore.channels],
+  );
 
   const update = <K extends keyof FormState>(key: K, value: FormState[K]) => {
     setForm((current) => ({ ...current, [key]: value }));
@@ -789,7 +793,23 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
         <section className="sources-page" aria-labelledby="sources-page-title">
           <div className="workspace-page-heading"><p className="section-kicker">COLLECTION TARGETS</p><h1 id="sources-page-title">Sources</h1><p>중복 없이 정규화된 수집 대상을 관리하고, 선택한 대상의 수집 범위를 확인합니다.</p></div>
           <div className="sources-page-list">
-            {sources.map((source) => <button key={source.id} type="button" className={source.id === activeSourceId ? "source-page-card source-page-card-active" : "source-page-card"} onClick={() => setActiveSourceId(source.id)}><span className="source-type-chip">{sourceTypeCopy(source.type)}</span><strong>{sourceLabel(source)}</strong><small>{sourceCoverage(source)}</small><footer>{source.lastCompletedAt ? `완료 ${formatShortDate(source.lastCompletedAt)}` : "수집 이력 없음"}</footer></button>)}
+            {sources.map((source) => {
+              const canToggleRefresh = source.type === "channel" && Boolean(source.targetId);
+              const pinned = source.targetId ? pinsByTargetId.get(source.targetId)?.enabled !== false : false;
+              return (
+                <article key={source.id} className={source.id === activeSourceId ? "source-page-card source-page-card-active" : "source-page-card"}>
+                  <button type="button" className="source-page-select" onClick={() => setActiveSourceId(source.id)}>
+                    <span className="source-type-chip">{sourceTypeCopy(source.type)}</span>
+                    <strong>{sourceLabel(source)}</strong>
+                    <small>{sourceCoverage(source)}</small>
+                  </button>
+                  <footer>
+                    <span>{source.lastCompletedAt ? `완료 ${formatShortDate(source.lastCompletedAt)}` : "수집 이력 없음"}</span>
+                    {canToggleRefresh && <button className={pinned ? "source-refresh-button source-refresh-button-stop" : "source-refresh-button"} type="button" disabled={pinningTargetId === source.targetId} onClick={() => source.targetId && void togglePin(source.targetId, pinned)}>{pinned ? "자동 수집 중지" : "자동 수집 재개"}</button>}
+                  </footer>
+                </article>
+              );
+            })}
             {sources.length === 0 && <div className="explore-empty">아직 등록된 수집 대상이 없습니다.</div>}
           </div>
         </section>
