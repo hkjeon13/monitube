@@ -7,19 +7,17 @@ import {
   ChevronRightIcon,
   ClockIcon,
   DocumentChartBarIcon,
+  EllipsisHorizontalIcon,
   ExclamationTriangleIcon,
   FolderIcon,
   HomeIcon,
   InformationCircleIcon,
   MagnifyingGlassIcon,
   PlayIcon,
-  PauseIcon,
   PlusIcon,
   QueueListIcon,
   SparklesIcon,
-  StopIcon,
   Squares2X2Icon,
-  TrashIcon,
   XMarkIcon,
 } from "@heroicons/react/24/outline";
 import Link from "next/link";
@@ -276,6 +274,14 @@ function sourceCoverage(source?: SourceSummary) {
     : "동영상 메타데이터";
 }
 
+function sourceRowStatus(source: SourceSummary) {
+  const config = source.config;
+  if (source.type === "channel" && (config.collectAllVideos === true || source.coverage?.collectAllVideos === true)) {
+    return "전체 수집";
+  }
+  return source.type === "keyword" ? "검색 수집" : source.type === "video" ? "영상 수집" : "수집 대상";
+}
+
 function normalizedSourceIdentity(source: SourceSummary) {
   if (source.targetId) return `target:${source.targetId}`;
   if (source.canonicalKey) return `key:${source.canonicalKey}`;
@@ -441,6 +447,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   const [exploreError, setExploreError] = useState<string | null>(null);
   const [pinningTargetId, setPinningTargetId] = useState<string | null>(null);
   const [deletingSourceId, setDeletingSourceId] = useState<string | null>(null);
+  const [openSourceMenuId, setOpenSourceMenuId] = useState<string | null>(null);
   const [exploreSort, setExploreSort] = useState<ExploreSort>("recent");
   const [exploreChannelId, setExploreChannelId] = useState<string | null>(null);
   const [exploreVisibleCount, setExploreVisibleCount] = useState(12);
@@ -595,6 +602,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   const removeSource = useCallback(async (source: SourceSummary) => {
     const confirmed = window.confirm(`“${sourceLabel(source)}” 수집 대상을 삭제할까요? 자동 수집은 중지되지만 이미 저장된 채널·영상·댓글 데이터는 Explore에서 유지됩니다.`);
     if (!confirmed) return;
+    setOpenSourceMenuId(null);
     setDeletingSourceId(source.id);
     try {
       await deleteSource(source.id);
@@ -886,20 +894,21 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
             {sources.map((source) => {
               const canToggleRefresh = source.type === "channel" && Boolean(source.targetId);
               const pinned = source.targetId ? pinsByTargetId.get(source.targetId)?.enabled !== false : false;
+              const menuOpen = openSourceMenuId === source.id;
               return (
                 <article key={source.id} className={source.id === activeSourceId ? "source-page-card source-page-card-active" : "source-page-card"}>
-                  <button type="button" className="source-page-select" onClick={() => openSourceWorkspace(source.id)} aria-label={`${sourceLabel(source)} 작업 공간 열기`}>
+                  <button type="button" className="source-page-select" onClick={() => { setOpenSourceMenuId(null); openSourceWorkspace(source.id); }} aria-label={`${sourceLabel(source)} 작업 공간 열기`}>
                     <span className="source-type-chip">{sourceTypeCopy(source.type)}</span>
-                    <strong>{sourceLabel(source)}</strong>
-                    <small>{sourceCoverage(source)}</small>
+                    <strong>{typeof source.config.query === "string" ? source.config.query : typeof source.config.input === "string" ? source.config.input : sourceLabel(source)}</strong>
+                    <small>{sourceRowStatus(source)}</small>
                   </button>
-                  <footer>
-                    <span>{source.lastCompletedAt ? `완료 ${formatShortDate(source.lastCompletedAt)}` : "수집 이력 없음"}</span>
-                    <span className="source-card-actions">
-                      {canToggleRefresh && <button className={pinned ? "source-refresh-button source-refresh-button-running" : "source-refresh-button source-refresh-button-stopped"} type="button" disabled={pinningTargetId === source.targetId || deletingSourceId === source.id} onClick={() => source.targetId && void togglePin(source.targetId, pinned)} aria-label={pinned ? "자동 수집 일시 중지" : "자동 수집 재개"} title={pinned ? "자동 수집 일시 중지" : "자동 수집 재개"}>{pinned ? <PauseIcon aria-hidden="true" /> : <StopIcon aria-hidden="true" />}</button>}
-                      <button className="source-delete-button" type="button" disabled={deletingSourceId === source.id} onClick={() => void removeSource(source)} aria-label="수집 대상 삭제" title="수집 대상 삭제"><TrashIcon aria-hidden="true" /></button>
-                    </span>
-                  </footer>
+                  <div className="source-card-actions">
+                    <button className="source-more-button" type="button" disabled={deletingSourceId === source.id} onClick={() => setOpenSourceMenuId((current) => current === source.id ? null : source.id)} aria-label={`${sourceLabel(source)} 관리 메뉴`} aria-expanded={menuOpen} aria-haspopup="menu"><EllipsisHorizontalIcon aria-hidden="true" /></button>
+                    {menuOpen && <div className="source-action-menu" role="menu" aria-label={`${sourceLabel(source)} 관리`}>
+                      {canToggleRefresh && <button type="button" role="menuitem" disabled={pinningTargetId === source.targetId} onClick={() => { setOpenSourceMenuId(null); source.targetId && void togglePin(source.targetId, pinned); }}>{pinned ? "수집 일시정지" : "수집 재개"}</button>}
+                      <button className="source-action-menu-delete" type="button" role="menuitem" onClick={() => void removeSource(source)}>삭제</button>
+                    </div>}
+                  </div>
                 </article>
               );
             })}
