@@ -86,13 +86,13 @@ elif [[ ! -e "$YOUTUBE_SECRET_ENV_FILE" ]]; then
   : > "$YOUTUBE_SECRET_ENV_FILE"
 fi
 
-# The file may be empty for fixture mode. If present, it can carry only one
-# non-empty server-managed key and is never sourced or printed by this script.
+# The file may be empty for fixture mode. It may carry the legacy single key or
+# a comma-separated same-project key pool plus its server-only encryption and
+# registration secrets; it is never printed by this script.
 chmod 600 "$YOUTUBE_SECRET_ENV_FILE"
-invalid_secret_lines="$(grep -cvE '^[[:space:]]*(#|$)|^YOUTUBE_API_KEY=[^[:space:]]*$' "$YOUTUBE_SECRET_ENV_FILE" || true)"
-key_line_count="$(grep -cE '^YOUTUBE_API_KEY=' "$YOUTUBE_SECRET_ENV_FILE" || true)"
-if [[ "$invalid_secret_lines" != "0" || "$key_line_count" -gt 1 ]]; then
-  die "server secret env file must contain at most one YOUTUBE_API_KEY entry."
+invalid_secret_lines="$(grep -cvE '^[[:space:]]*(#|$)|^YOUTUBE_API_KEY=[^[:space:]]*$|^YOUTUBE_API_KEYS=[^[:space:]]*$|^YOUTUBE_API_KEY_ENCRYPTION_KEY=[^[:space:]]*$|^YOUTUBE_KEY_REGISTRATION_TOKEN=[^[:space:]]*$' "$YOUTUBE_SECRET_ENV_FILE" || true)"
+if [[ "$invalid_secret_lines" != "0" ]]; then
+  die "server secret env file contains an unsupported entry."
 fi
 
 # Docker Compose loads this only into API and worker through the service-scoped
