@@ -1222,6 +1222,23 @@ class PostgresRepository(CollectionRepository):
             cursor.execute("SELECT youtube_comment_id FROM comments WHERE youtube_comment_id = ANY(%s)", (comment_ids,))
             return {str(row["youtube_comment_id"]) for row in cursor.fetchall()}
 
+    def comment_counts_by_video(self, youtube_video_ids: Iterable[str]) -> dict[str, int]:
+        video_ids = list(dict.fromkeys(youtube_video_ids))
+        if not video_ids:
+            return {}
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT v.youtube_video_id, count(c.id)::integer AS comment_count
+                FROM videos v
+                LEFT JOIN comments c ON c.video_id = v.id
+                WHERE v.youtube_video_id = ANY(%s)
+                GROUP BY v.youtube_video_id
+                """,
+                (video_ids,),
+            )
+            return {str(row["youtube_video_id"]): int(row["comment_count"]) for row in cursor.fetchall()}
+
     def record_api_request(
         self, *, job_id: str, bucket: QuotaBucket, endpoint: str, status_code: int, error_reason: str | None = None
     ) -> None:

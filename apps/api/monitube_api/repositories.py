@@ -124,6 +124,8 @@ class CollectionRepository(SourceRepository, JobRepository, CollectionRequestRep
 
     def existing_comment_ids(self, youtube_comment_ids: Iterable[str]) -> set[str]: ...
 
+    def comment_counts_by_video(self, youtube_video_ids: Iterable[str]) -> dict[str, int]: ...
+
     def record_api_request(self, *, job_id: str, bucket: QuotaBucket, endpoint: str, status_code: int, error_reason: str | None = None) -> None: ...
 
     def save_analysis_summary(self, source_id: str) -> dict[str, Any]: ...
@@ -835,6 +837,17 @@ class InMemoryRepository(CollectionRepository):
     def existing_comment_ids(self, youtube_comment_ids: Iterable[str]) -> set[str]:
         with self._lock:
             return set(youtube_comment_ids).intersection(self._comments)
+
+    def comment_counts_by_video(self, youtube_video_ids: Iterable[str]) -> dict[str, int]:
+        """Return persisted comment totals for the requested YouTube videos."""
+
+        with self._lock:
+            requested = set(youtube_video_ids)
+            counts = {video_id: 0 for video_id in requested}
+            for comment in self._comments.values():
+                if comment.youtube_video_id in counts:
+                    counts[comment.youtube_video_id] += 1
+            return counts
 
     def record_api_request(
         self, *, job_id: str, bucket: QuotaBucket, endpoint: str, status_code: int, error_reason: str | None = None

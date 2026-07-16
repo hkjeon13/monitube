@@ -477,20 +477,25 @@ class YouTubeCollector:
                 max_pages = None if source.config.get("collectAllComments") else (
                     job.max_comments_per_video or as_int(source.config.get("maxCommentPagesPerVideo")) or 1
                 )
+                # A failed or quota-paused initial collection may be restarted as a
+                # new job, which has no usable page cursor.  Treat an individual
+                # video as complete once its persisted comments cover YouTube's
+                # advertised count, independent of the parent job's status. This
+                # avoids spending quota again on videos completed by an earlier job.
+                persisted_comment_counts = self.repository.comment_counts_by_video(
+                    video.youtube_video_id for video in videos
+                )
                 videos_with_new_comments = [
-                    video
-                    for video in videos
-                    if not incremental_refresh
-                    or source.type is not SourceType.CHANNEL
-                    or video.youtube_video_id not in known_videos
-                    or video.statistics.get("commentCount", 0) > known_videos[video.youtube_video_id].statistics.get("commentCount", 0)
+                    video for video in videos
+                    if persisted_comment_counts.get(video.youtube_video_id, 0) < video.statistics.get("commentCount", 0)
                 ]
+                completed_comment_videos = len(videos) - len(videos_with_new_comments)
                 collected_comments = 0
                 self._set_phase_progress(
                     job,
                     phase="comments",
-                    completed=0,
-                    total=len(videos_with_new_comments),
+                    completed=completed_comment_videos,
+                    total=len(videos),
                     current_stage="collecting_comments",
                 )
                 for index, video in enumerate(videos_with_new_comments, start=1):
@@ -500,8 +505,8 @@ class YouTubeCollector:
                     self._set_phase_progress(
                         job,
                         phase="comments",
-                        completed=index,
-                        total=len(videos_with_new_comments),
+                        completed=completed_comment_videos + index,
+                        total=len(videos),
                         current_stage="collecting_comments",
                     )
                 self._checkpoint(job, stage="analysis", scope_key=source.id, page_token=None, batch_cursor=collected_comments)

@@ -231,6 +231,56 @@ def test_channel_refresh_stops_at_known_upload_page_and_comment_page() -> None:
     assert client.comment_requests[0]["order"] == "time"
 
 
+class ResumedChannelClient:
+    def __init__(self) -> None:
+        self.comment_calls = 0
+
+    @staticmethod
+    def bucket_for(_endpoint: str) -> QuotaBucket:
+        return QuotaBucket.CORE
+
+    def request(self, endpoint: str, _params: dict[str, object]):
+        if endpoint == "channels":
+            return {"items": [{"id": "UCabcdefghijklmnopqrstuv", "snippet": {"title": "Example"}, "contentDetails": {"relatedPlaylists": {"uploads": "UUexample"}}}]}
+        if endpoint == "playlistItems":
+            return {"items": [{"contentDetails": {"videoId": "dQw4w9WgXcQ"}}]}
+        if endpoint == "videos":
+            return {"items": [{
+                "id": "dQw4w9WgXcQ", "snippet": {"channelId": "UCabcdefghijklmnopqrstuv", "title": "Known", "publishedAt": "2025-01-02T03:04:05Z"},
+                "contentDetails": {"duration": "PT1M"}, "status": {}, "statistics": {"commentCount": "1"},
+            }]}
+        if endpoint == "commentThreads":
+            self.comment_calls += 1
+            return {"items": []}
+        raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+
+def test_resumed_incomplete_channel_skips_video_with_all_comments_already_persisted() -> None:
+    repository = InMemoryRepository()
+    repository.upsert_video(VideoRecord(
+        id=new_id(), youtube_video_id="dQw4w9WgXcQ", youtube_channel_id="UCabcdefghijklmnopqrstuv",
+        title="Known", description=None, published_at=None, duration_seconds=None,
+        privacy_status="public", made_for_kids=False, statistics={"commentCount": 1}, source_fetched_at=utcnow(),
+    ))
+    repository.upsert_comment(CommentRecord(
+        id=new_id(), youtube_comment_id="comment-known", youtube_video_id="dQw4w9WgXcQ",
+        youtube_parent_comment_id=None, youtube_thread_id="thread-known", text_display="Already stored",
+        like_count=0, published_at=None, updated_at=None, source_fetched_at=utcnow(),
+    ))
+    source = repository.create_source(
+        source_type=SourceType.CHANNEL,
+        config={"input": "@example", "includeComments": True, "collectAllVideos": True, "collectAllComments": True},
+    )
+    job = repository.create_job(source_id=source.id, include_comments=True, max_videos=None, max_comments_per_video=None)
+    client = ResumedChannelClient()
+
+    completed = JobRunner(repository, YouTubeCollector(repository, client)).run(job.id)
+
+    assert completed.state is JobState.COMPLETED
+    assert client.comment_calls == 0
+    assert completed.checkpoint["phaseProgress"]["comments"] == {"completed": 1, "total": 1}
+
+
 class HistoricalBackfillClient:
     def __init__(self) -> None:
         self.playlist_calls = 0
