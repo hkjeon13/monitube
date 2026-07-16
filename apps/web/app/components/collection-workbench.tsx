@@ -2,7 +2,6 @@
 
 import {
   ArrowPathIcon,
-  ArrowsUpDownIcon,
   CheckCircleIcon,
   ChevronRightIcon,
   ClockIcon,
@@ -54,7 +53,6 @@ import {
 } from "../lib/api";
 
 type ViewMetric = "views" | "likes" | "comments";
-type ExploreSort = "recent" | "views" | "comments";
 export type WorkspacePage = "overview" | "explore" | "sources" | "jobs" | "insights";
 type FormState = {
   sourceType: CollectionSourceType;
@@ -473,7 +471,6 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   const [pinningTargetId, setPinningTargetId] = useState<string | null>(null);
   const [deletingSourceId, setDeletingSourceId] = useState<string | null>(null);
   const [openSourceMenuId, setOpenSourceMenuId] = useState<string | null>(null);
-  const [exploreSort, setExploreSort] = useState<ExploreSort>("recent");
   const [exploreChannelId, setExploreChannelId] = useState<string | null>(null);
   const [exploreVisibleCount, setExploreVisibleCount] = useState(12);
   const [searchQuery, setSearchQuery] = useState("");
@@ -486,6 +483,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   const videoTriggerRef = useRef<HTMLElement | null>(null);
   const collectionDrawerRef = useRef<HTMLElement | null>(null);
   const videoDrawerRef = useRef<HTMLElement | null>(null);
+  const exploreLoadMoreRef = useRef<HTMLDivElement | null>(null);
   const appliedSourceQueryRef = useRef<string | null>(null);
   const searchRequest = useRef(0);
 
@@ -512,12 +510,8 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     : 0;
   const exploreVideos = useMemo(() => {
     const scoped = exploreChannelId ? explore.videos.filter((video) => video.channelId === exploreChannelId) : explore.videos;
-    return [...scoped].sort((left, right) => {
-      if (exploreSort === "views") return (right.viewCount ?? 0) - (left.viewCount ?? 0);
-      if (exploreSort === "comments") return (right.commentCount ?? 0) - (left.commentCount ?? 0);
-      return new Date(right.publishedAt ?? right.fetchedAt ?? 0).getTime() - new Date(left.publishedAt ?? left.fetchedAt ?? 0).getTime();
-    });
-  }, [explore.videos, exploreChannelId, exploreSort]);
+    return [...scoped].sort((left, right) => new Date(right.publishedAt ?? right.fetchedAt ?? 0).getTime() - new Date(left.publishedAt ?? left.fetchedAt ?? 0).getTime());
+  }, [explore.videos, exploreChannelId]);
   const visibleExploreVideos = exploreVideos.slice(0, exploreVisibleCount);
   const selectedExploreChannel = useMemo(
     () => explore.channels.find((channel) => channel.youtubeChannelId === exploreChannelId) ?? null,
@@ -717,6 +711,16 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   }, [refreshExplore]);
 
   useEffect(() => {
+    const sentinel = exploreLoadMoreRef.current;
+    if (page !== "explore" || hasSearchQuery || !sentinel || visibleExploreVideos.length >= exploreVideos.length) return;
+    const observer = new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) setExploreVisibleCount((count) => Math.min(count + 12, exploreVideos.length));
+    }, { rootMargin: "18rem 0px" });
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [hasSearchQuery, page, exploreVideos.length, visibleExploreVideos.length]);
+
+  useEffect(() => {
     if (!activeSourceId) {
       setSourceResults(null);
       return;
@@ -874,7 +878,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
       </aside>
 
       <main className="dashboard-main">
-        <header className="dashboard-topbar" id="source-selector" tabIndex={-1}>
+        {page !== "explore" && <header className="dashboard-topbar" id="source-selector" tabIndex={-1}>
           <label className="source-select">
             <span className="visually-hidden">수집 대상 선택</span>
             <FolderIcon aria-hidden="true" />
@@ -918,7 +922,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
               수집 대상 추가
             </button>
           </div>
-        </header>
+        </header>}
 
         <section className="sources-page" aria-labelledby="sources-page-title">
           <div className="workspace-page-heading"><p className="section-kicker">COLLECTION TARGETS</p><h1 id="sources-page-title">Sources</h1><p>중복 없이 정규화된 수집 대상을 관리하고, 선택한 대상의 수집 범위를 확인합니다.</p></div>
@@ -928,7 +932,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
               const pinned = source.targetId ? pinsByTargetId.get(source.targetId)?.enabled !== false : false;
               const menuOpen = openSourceMenuId === source.id;
               return (
-                <article key={source.id} className={source.id === activeSourceId ? "source-page-card source-page-card-active" : "source-page-card"}>
+                <article key={source.id} className={`source-page-card${source.id === activeSourceId ? " source-page-card-active" : ""}${menuOpen ? " source-page-card-menu-open" : ""}`}>
                   <button type="button" className="source-page-select" onClick={() => { setOpenSourceMenuId(null); openSourceWorkspace(source.id); }} aria-label={`${sourceLabel(source)} 작업 공간 열기`}>
                     <span className="source-type-chip">{sourceTypeCopy(source.type)}</span>
                     <strong>{typeof source.config.query === "string" ? source.config.query : typeof source.config.input === "string" ? source.config.input : sourceLabel(source)}</strong>
@@ -963,15 +967,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
           )}
         </section>
 
-        <section className="explore-section" id="explore" aria-labelledby="explore-title" tabIndex={-1}>
-          <div className="explore-heading">
-            <div>
-              <p className="section-kicker">COLLECTED SOCIAL LIBRARY</p>
-              <h2 id="explore-title">Explore</h2>
-              <p>지금까지 수집된 공개 채널과 동영상을 소셜 포스트처럼 탐색하세요.</p>
-            </div>
-            <div className="explore-heading-actions"><span>{formatCount(explore.videos.length)} posts</span><button className="icon-button" type="button" onClick={() => void refreshExplore()} disabled={isExploreLoading} aria-label="Explore 라이브러리 새로고침"><ArrowPathIcon aria-hidden="true" /></button></div>
-          </div>
+        <section className="explore-section" id="explore" aria-label="Explore" tabIndex={-1}>
           {exploreError && <p className="inline-error" role="status">{exploreError}</p>}
           <div className="explore-search" role="search">
             <MagnifyingGlassIcon aria-hidden="true" />
@@ -1005,13 +1001,12 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
             ) : (
             <>
               <div className="explore-channel-strip" aria-label="수집된 채널">
-                <button className={exploreChannelId === null ? "channel-filter channel-filter-active" : "channel-filter"} type="button" onClick={() => { setExploreChannelId(null); setExploreVisibleCount(12); }}><span>All</span><b>{formatCount(explore.videos.length)}</b></button>
                 {explore.channels.map((channel) => {
                   const coverVideo = explore.videos.find((video) => video.channelId === channel.youtubeChannelId);
                   const selected = channel.youtubeChannelId === exploreChannelId;
                   const avatarUrl = channel.thumbnailUrl ?? (coverVideo ? youtubeThumbnail(coverVideo.youtubeVideoId) : undefined);
                   return (
-                    <button className={selected ? "explore-channel-avatar-button explore-channel-avatar-button-selected" : "explore-channel-avatar-button"} type="button" key={channel.youtubeChannelId} onClick={() => { setExploreChannelId(channel.youtubeChannelId); setExploreVisibleCount(12); }} aria-pressed={selected} aria-label={`${channel.title ?? channel.handle ?? channel.youtubeChannelId} 채널 개요 보기`} title={channel.title ?? channel.handle ?? channel.youtubeChannelId}>
+                    <button className={selected ? "explore-channel-avatar-button explore-channel-avatar-button-selected" : "explore-channel-avatar-button"} type="button" key={channel.youtubeChannelId} onClick={() => { setExploreChannelId((current) => current === channel.youtubeChannelId ? null : channel.youtubeChannelId); setExploreVisibleCount(12); }} aria-pressed={selected} aria-label={`${channel.title ?? channel.handle ?? channel.youtubeChannelId} 채널 개요 보기`} title={channel.title ?? channel.handle ?? channel.youtubeChannelId}>
                       {avatarUrl ? <img src={avatarUrl} alt="" /> : <span className="explore-avatar">{(channel.title ?? channel.handle ?? "Y").slice(0, 1).toUpperCase()}</span>}
                     </button>
                   );
@@ -1037,12 +1032,11 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
                   </dl>
                 </section>
               )}
-              <div className="explore-video-heading"><div><p className="section-kicker">LATEST SOCIAL POSTS</p><h3>{exploreChannelId ? explore.channels.find((channel) => channel.youtubeChannelId === exploreChannelId)?.title ?? "채널 동영상" : "동영상 갤러리"}</h3></div><label className="explore-sort"><ArrowsUpDownIcon aria-hidden="true" /><span className="visually-hidden">동영상 정렬</span><select value={exploreSort} onChange={(event) => { setExploreSort(event.target.value as ExploreSort); setExploreVisibleCount(12); }}><option value="recent">최근 수집</option><option value="views">조회수</option><option value="comments">댓글 수</option></select></label></div>
               <div className="explore-video-grid" aria-label="수집된 동영상">
                 {visibleExploreVideos.map((video, index) => <button className={index === 0 ? "explore-video-card explore-video-card-featured" : "explore-video-card"} type="button" key={video.id} onClick={(event) => openVideoDrawer(video, event.currentTarget)}><img src={youtubeThumbnail(video.youtubeVideoId)} alt="" loading={index < 6 ? "eager" : "lazy"} /><span className="explore-video-shade" aria-hidden="true" /><span className="explore-video-play"><PlayIcon aria-hidden="true" /></span><span className="explore-video-date">{formatShortDate(video.publishedAt)}</span><strong>{video.title ?? video.youtubeVideoId}</strong><footer><span>조회 {formatCount(video.viewCount)}</span><span>댓글 {formatCount(video.commentCount)}</span></footer></button>)}
                 {exploreVideos.length === 0 && <div className="explore-empty">조건에 맞는 저장 동영상이 없습니다.</div>}
               </div>
-              {exploreVideos.length > visibleExploreVideos.length && <button className="explore-load-more" type="button" onClick={() => setExploreVisibleCount((count) => count + 12)}>동영상 더 보기 <ChevronRightIcon aria-hidden="true" /></button>}
+              {exploreVideos.length > visibleExploreVideos.length && <div className="explore-load-more-sentinel" ref={exploreLoadMoreRef} aria-hidden="true" />}
             </>
             )
           )}
