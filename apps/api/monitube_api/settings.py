@@ -14,6 +14,7 @@ class Settings:
     youtube_api_key: str | None
     youtube_api_keys: tuple[str, ...]
     youtube_api_key_encryption_key: str | None
+    youtube_key_registration_token: str | None
     youtube_api_base_url: str
     youtube_api_timeout_seconds: float
     youtube_api_secret_ref: str
@@ -67,6 +68,7 @@ class Settings:
             youtube_api_key=keys[0] if keys else None,
             youtube_api_keys=keys,
             youtube_api_key_encryption_key=optional("YOUTUBE_API_KEY_ENCRYPTION_KEY"),
+            youtube_key_registration_token=optional("YOUTUBE_KEY_REGISTRATION_TOKEN"),
             youtube_api_base_url=(values.get("YOUTUBE_API_BASE_URL", "").strip() or "https://www.googleapis.com/youtube/v3").rstrip("/"),
             youtube_api_timeout_seconds=positive_float("YOUTUBE_API_TIMEOUT_SECONDS", 20.0),
             youtube_api_secret_ref=values.get("YOUTUBE_API_KEY_SECRET_REF", "env:YOUTUBE_API_KEY").strip() or "env:YOUTUBE_API_KEY",

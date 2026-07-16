@@ -19,6 +19,22 @@ class HealthResponse(ApiModel):
     service: Literal["monitube-api"] = "monitube-api"
 
 
+class RuntimeKeyRegistration(ApiModel):
+    apiKeys: list[str] = Field(min_length=1, max_length=32)
+
+    @model_validator(mode="after")
+    def validate_keys(self) -> "RuntimeKeyRegistration":
+        keys = tuple(dict.fromkeys(key.strip() for key in self.apiKeys if key.strip()))
+        if not keys or any(len(key) < 20 or len(key) > 256 for key in keys):
+            raise ValueError("Provide one to 32 valid API keys")
+        self.apiKeys = list(keys)
+        return self
+
+
+class RuntimeKeyRegistrationResponse(ApiModel):
+    accepted: int = Field(ge=1)
+
+
 class ChannelResolutionRequest(ApiModel):
     input: str = Field(min_length=1, max_length=2_048)
 

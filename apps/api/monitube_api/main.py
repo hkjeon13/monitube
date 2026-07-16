@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import os
+import secrets
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, FastAPI, Header, Query, Request, Response, status
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
@@ -21,6 +22,8 @@ from .contracts import (
     CollectionRequestResponse,
     ExploreResponse,
     HealthResponse,
+    RuntimeKeyRegistration,
+    RuntimeKeyRegistrationResponse,
     JobCreate,
     JobStatus,
     SourceResultsResponse,
@@ -52,6 +55,7 @@ def create_app(repository: CollectionRepository | None = None, settings: Setting
     else:
         runtime_config_id = None
     app.state.collection_service = CollectionService(repository, runtime_config_id=runtime_config_id)
+    app.state.runtime_config_id = runtime_config_id
     app.state.settings = configured_settings
     cors_origins = [
         origin.strip()
@@ -93,6 +97,24 @@ def create_app(repository: CollectionRepository | None = None, settings: Setting
     @app.get("/health", response_model=HealthResponse, tags=["health"])
     def health() -> HealthResponse:
         return HealthResponse()
+
+    @app.post("/register/key", response_model=RuntimeKeyRegistrationResponse, status_code=status.HTTP_201_CREATED, tags=["runtime"])
+    def register_runtime_keys(
+        payload: RuntimeKeyRegistration,
+        authorization: str | None = Header(default=None),
+    ) -> RuntimeKeyRegistrationResponse:
+        token = configured_settings.youtube_key_registration_token
+        expected = f"Bearer {token}" if token else ""
+        if not token or not authorization or not secrets.compare_digest(authorization, expected):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+        if not configured_settings.youtube_api_key_encryption_key or runtime_config_id is None or not hasattr(repository, "sync_runtime_keys"):
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Key registration is unavailable")
+        repository.sync_runtime_keys(
+            runtime_config_id=runtime_config_id,
+            api_keys=tuple(payload.apiKeys),
+            encryption_key=configured_settings.youtube_api_key_encryption_key,
+        )
+        return RuntimeKeyRegistrationResponse(accepted=len(payload.apiKeys))
 
     router = APIRouter(prefix="/v1")
 
