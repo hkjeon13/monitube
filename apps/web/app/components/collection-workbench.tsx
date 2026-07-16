@@ -13,9 +13,11 @@ import {
   InformationCircleIcon,
   MagnifyingGlassIcon,
   PlayIcon,
+  PauseIcon,
   PlusIcon,
   QueueListIcon,
   SparklesIcon,
+  StopIcon,
   Squares2X2Icon,
   XMarkIcon,
 } from "@heroicons/react/24/outline";
@@ -805,7 +807,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
                   </button>
                   <footer>
                     <span>{source.lastCompletedAt ? `완료 ${formatShortDate(source.lastCompletedAt)}` : "수집 이력 없음"}</span>
-                    {canToggleRefresh && <button className={pinned ? "source-refresh-button source-refresh-button-stop" : "source-refresh-button"} type="button" disabled={pinningTargetId === source.targetId} onClick={() => source.targetId && void togglePin(source.targetId, pinned)}>{pinned ? "자동 수집 중지" : "자동 수집 재개"}</button>}
+                    {canToggleRefresh && <button className={pinned ? "source-refresh-button source-refresh-button-running" : "source-refresh-button source-refresh-button-stopped"} type="button" disabled={pinningTargetId === source.targetId} onClick={() => source.targetId && void togglePin(source.targetId, pinned)} aria-label={pinned ? "자동 수집 일시 중지" : "자동 수집 재개"} title={pinned ? "자동 수집 일시 중지" : "자동 수집 재개"}>{pinned ? <PauseIcon aria-hidden="true" /> : <StopIcon aria-hidden="true" />}</button>}
                   </footer>
                 </article>
               );

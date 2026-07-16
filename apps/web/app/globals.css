@@ -138,9 +138,12 @@ svg { display: block; width: 1.125rem; height: 1.125rem; stroke-width: 1.7; }
 .source-page-select > strong { color: #344139; font-size: 0.8125rem; }
 .source-page-select > small { color: var(--muted); font-size: 0.625rem; line-height: 1.4; }
 .source-page-card footer { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; padding-top: 0.625rem; border-top: 0.0625rem solid var(--line); color: #928e85; font-size: 0.5625rem; font-weight: 700; }
-.source-refresh-button { flex: 0 0 auto; min-height: 1.875rem; padding: 0 0.625rem; border: 0.0625rem solid #cfd7cf; border-radius: 0.5rem; color: #5b6b5e; background: #f6faf6; font-size: 0.625rem; font-weight: 800; }
-.source-refresh-button-stop { border-color: var(--moss); color: #fff; background: var(--moss); }
+.source-refresh-button { display: grid; width: 2rem; height: 2rem; flex: 0 0 auto; place-items: center; border: 0.0625rem solid #cfd7cf; border-radius: 0.5rem; color: #5b6b5e; background: #f6faf6; }
+.source-refresh-button svg { width: 0.875rem; height: 0.875rem; stroke-width: 2.25; }
+.source-refresh-button-running { border-color: var(--moss); color: #fff; background: var(--moss); }
+.source-refresh-button-stopped { border-color: #ce5b4d; color: #fff; background: #d85b4c; }
 .source-refresh-button:hover:not(:disabled) { border-color: #db7b49; color: #a94f24; background: var(--orange-soft); }
+.source-refresh-button-stopped:hover:not(:disabled) { border-color: #ad4035; color: #fff; background: #b84236; }
 
 /* The sidebar entries are real routes.  Each route renders only its own
    workspace rather than scrolling within one long dashboard. */
