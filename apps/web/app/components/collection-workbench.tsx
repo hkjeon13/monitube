@@ -39,6 +39,7 @@ import {
   createCollectionRequest,
   getJob,
   getExplore,
+  searchCollected,
   getSourceResults,
   getVideoComments,
   listSources,
@@ -46,6 +47,7 @@ import {
   type CollectedComment,
   type CollectedVideo,
   type CollectionRequestDisposition,
+  type CollectedSearchData,
   type ExploreData,
   type SourceResults,
   type SourceSummary,
@@ -236,6 +238,10 @@ function sourceLabel(source: SourceSummary) {
   const query = source.config.query;
   const value = typeof query === "string" ? query : typeof input === "string" ? input : source.id;
   return `${sourceTypeCopy(source.type)} · ${value}`;
+}
+
+function searchFieldLabel(field: string) {
+  return ({ title: "제목", description: "설명", channel: "채널", handle: "채널 ID", comment: "댓글", videoTitle: "영상 제목" } as Record<string, string>)[field] ?? field;
 }
 
 function sourceCoverage(source?: SourceSummary) {
@@ -434,6 +440,10 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   const [exploreSort, setExploreSort] = useState<ExploreSort>("recent");
   const [exploreChannelId, setExploreChannelId] = useState<string | null>(null);
   const [exploreVisibleCount, setExploreVisibleCount] = useState(12);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<CollectedSearchData | null>(null);
+  const [isSearchLoading, setIsSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const resultsRequest = useRef(0);
   const commentsRequest = useRef(0);
   const collectionTriggerRef = useRef<HTMLElement | null>(null);
@@ -441,6 +451,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   const collectionDrawerRef = useRef<HTMLElement | null>(null);
   const videoDrawerRef = useRef<HTMLElement | null>(null);
   const appliedSourceQueryRef = useRef<string | null>(null);
+  const searchRequest = useRef(0);
 
   const requestBody = useMemo(() => sourceRequest(form), [form]);
   const validationError = useMemo(() => validate(requestBody), [requestBody]);
@@ -472,6 +483,11 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     });
   }, [explore.videos, exploreChannelId, exploreSort]);
   const visibleExploreVideos = exploreVideos.slice(0, exploreVisibleCount);
+  const selectedExploreChannel = useMemo(
+    () => explore.channels.find((channel) => channel.youtubeChannelId === exploreChannelId) ?? null,
+    [explore.channels, exploreChannelId],
+  );
+  const hasSearchQuery = searchQuery.trim().length >= 2;
   const pinsByTargetId = useMemo(
     () => new Map(explore.channels.flatMap((channel) => channel.targetId && channel.pin ? [[channel.targetId, channel.pin] as const] : [])),
     [explore.channels],
@@ -530,6 +546,34 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
       setIsExploreLoading(false);
     }
   }, []);
+
+  useEffect(() => {
+    const query = searchQuery.trim();
+    if (page !== "explore" || query.length < 2) {
+      setSearchResults(null);
+      setSearchError(null);
+      setIsSearchLoading(false);
+      return;
+    }
+    const requestId = ++searchRequest.current;
+    const timer = window.setTimeout(() => {
+      setIsSearchLoading(true);
+      setSearchError(null);
+      void searchCollected(query)
+        .then((result) => {
+          if (requestId === searchRequest.current) setSearchResults(result);
+        })
+        .catch((caught) => {
+          if (requestId === searchRequest.current) {
+            setSearchError(caught instanceof Error ? caught.message : "통합 검색 결과를 불러오지 못했습니다.");
+          }
+        })
+        .finally(() => {
+          if (requestId === searchRequest.current) setIsSearchLoading(false);
+        });
+    }, 280);
+    return () => window.clearTimeout(timer);
+  }, [page, searchQuery]);
 
   const togglePin = useCallback(async (targetId: string, pinned: boolean) => {
     setPinningTargetId(targetId);
@@ -861,27 +905,70 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
             <div className="explore-heading-actions"><span>{formatCount(explore.videos.length)} posts</span><button className="icon-button" type="button" onClick={() => void refreshExplore()} disabled={isExploreLoading} aria-label="Explore 라이브러리 새로고침"><ArrowPathIcon aria-hidden="true" /></button></div>
           </div>
           {exploreError && <p className="inline-error" role="status">{exploreError}</p>}
+          <div className="explore-search" role="search">
+            <MagnifyingGlassIcon aria-hidden="true" />
+            <label className="visually-hidden" htmlFor="collected-search">수집 데이터 통합 검색</label>
+            <input
+              id="collected-search"
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="영상 제목, 채널, 댓글 검색"
+              type="search"
+              autoComplete="off"
+            />
+            {searchQuery && <button type="button" onClick={() => setSearchQuery("")} aria-label="검색어 지우기"><XMarkIcon aria-hidden="true" /></button>}
+          </div>
+          {hasSearchQuery && <p className="explore-search-hint">Jaro–Winkler 유사도 검색으로 오타와 붙여쓴 검색어도 함께 찾습니다.</p>}
+          {searchError && <p className="inline-error" role="status">{searchError}</p>}
           {isExploreLoading && explore.channels.length === 0 ? <p className="explore-loading">수집 라이브러리를 불러오는 중입니다…</p> : (
+            hasSearchQuery ? (
+              <section className="collected-search-results" aria-live="polite" aria-label="통합 검색 결과">
+                {isSearchLoading && !searchResults ? <p className="explore-loading">수집 데이터에서 찾는 중입니다…</p> : (
+                  <>
+                    <div className="search-result-heading"><div><p className="section-kicker">UNIFIED RESULTS</p><h3>“{searchQuery.trim()}” 검색 결과</h3></div><span>{formatCount((searchResults?.videos.length ?? 0) + (searchResults?.comments.length ?? 0))}개</span></div>
+                    <div className="search-result-columns">
+                      <section><h4>동영상</h4>{searchResults?.videos.map((result) => <button className="search-video-result" type="button" key={result.video.id} onClick={(event) => openVideoDrawer(result.video, event.currentTarget)}><img src={youtubeThumbnail(result.video.youtubeVideoId)} alt="" /><span><strong>{result.video.title}</strong><small>{result.matchedFields.map(searchFieldLabel).join(" · ")} · 유사도 {Math.round(result.score * 100)}%</small></span><ChevronRightIcon aria-hidden="true" /></button>)}{!isSearchLoading && (searchResults?.videos.length ?? 0) === 0 && <p className="search-empty">일치하는 동영상이 없습니다.</p>}</section>
+                      <section><h4>댓글</h4>{searchResults?.comments.map((result) => <button className="search-comment-result" type="button" key={result.comment.id} onClick={(event) => openVideoDrawer(result.video, event.currentTarget)}><strong>{result.video.title}</strong><p>{result.comment.text}</p><small>{result.channelTitle ?? "수집 채널"} · {result.matchedFields.map(searchFieldLabel).join(" · ")} · 유사도 {Math.round(result.score * 100)}%</small></button>)}{!isSearchLoading && (searchResults?.comments.length ?? 0) === 0 && <p className="search-empty">일치하는 댓글이 없습니다.</p>}</section>
+                    </div>
+                    {isSearchLoading && <p className="explore-loading">검색 결과를 갱신하는 중입니다…</p>}
+                  </>
+                )}
+              </section>
+            ) : (
             <>
               <div className="explore-channel-strip" aria-label="수집된 채널">
                 <button className={exploreChannelId === null ? "channel-filter channel-filter-active" : "channel-filter"} type="button" onClick={() => { setExploreChannelId(null); setExploreVisibleCount(12); }}><span>All</span><b>{formatCount(explore.videos.length)}</b></button>
                 {explore.channels.map((channel) => {
-                  const pinned = channel.pin?.enabled === true;
-                  const hasTarget = Boolean(channel.targetId);
                   const coverVideo = explore.videos.find((video) => video.channelId === channel.youtubeChannelId);
                   const selected = channel.youtubeChannelId === exploreChannelId;
+                  const avatarUrl = channel.thumbnailUrl ?? (coverVideo ? youtubeThumbnail(coverVideo.youtubeVideoId) : undefined);
                   return (
-                    <div className={selected ? "explore-channel-card explore-channel-card-selected" : pinned ? "explore-channel-card explore-channel-card-pinned" : "explore-channel-card"} key={channel.youtubeChannelId}>
-                      <button className="explore-channel-select" type="button" onClick={() => { setExploreChannelId(channel.youtubeChannelId); setExploreVisibleCount(12); }} aria-pressed={selected}>
-                        {coverVideo ? <img src={youtubeThumbnail(coverVideo.youtubeVideoId)} alt="" /> : <span className="explore-avatar">{(channel.title ?? channel.handle ?? "Y").slice(0, 1).toUpperCase()}</span>}
-                        <span><strong>{channel.title ?? channel.handle ?? channel.youtubeChannelId}</strong><small>{channel.handle ? `@${channel.handle.replace(/^@/, "")}` : `${formatCount(channel.videoCount)} videos`}</small></span>
-                      </button>
-                      {hasTarget && <button className={pinned ? "refresh-button refresh-button-stop" : "refresh-button"} type="button" disabled={pinningTargetId === channel.targetId} onClick={() => channel.targetId && void togglePin(channel.targetId, pinned)} aria-pressed={pinned} aria-label={pinned ? `${channel.title ?? channel.youtubeChannelId} 자동 갱신 중지` : `${channel.title ?? channel.youtubeChannelId} 자동 갱신 재개`}>{pinned ? "중지" : "재개"}</button>}
-                    </div>
+                    <button className={selected ? "explore-channel-avatar-button explore-channel-avatar-button-selected" : "explore-channel-avatar-button"} type="button" key={channel.youtubeChannelId} onClick={() => { setExploreChannelId(channel.youtubeChannelId); setExploreVisibleCount(12); }} aria-pressed={selected} aria-label={`${channel.title ?? channel.handle ?? channel.youtubeChannelId} 채널 개요 보기`} title={channel.title ?? channel.handle ?? channel.youtubeChannelId}>
+                      {avatarUrl ? <img src={avatarUrl} alt="" /> : <span className="explore-avatar">{(channel.title ?? channel.handle ?? "Y").slice(0, 1).toUpperCase()}</span>}
+                    </button>
                   );
                 })}
                 {explore.channels.length === 0 && <div className="explore-empty">아직 수집된 채널이 없습니다. 첫 수집을 시작하면 이곳에 자동으로 모입니다.</div>}
               </div>
+              {selectedExploreChannel && (
+                <section className="explore-channel-overview" aria-labelledby="channel-overview-title">
+                  <div className="channel-overview-avatar">
+                    {selectedExploreChannel.thumbnailUrl ? <img src={selectedExploreChannel.thumbnailUrl} alt="" /> : <span>{(selectedExploreChannel.title ?? selectedExploreChannel.handle ?? "Y").slice(0, 1).toUpperCase()}</span>}
+                  </div>
+                  <div className="channel-overview-copy">
+                    <p className="section-kicker">CHANNEL OVERVIEW</p>
+                    <h3 id="channel-overview-title">{selectedExploreChannel.title ?? selectedExploreChannel.handle ?? selectedExploreChannel.youtubeChannelId}</h3>
+                    <p className="channel-overview-id">{selectedExploreChannel.handle ? `@${selectedExploreChannel.handle.replace(/^@/, "")} · ` : ""}{selectedExploreChannel.youtubeChannelId}</p>
+                    {selectedExploreChannel.description && <p className="channel-overview-description">{selectedExploreChannel.description}</p>}
+                  </div>
+                  <dl className="channel-overview-stats">
+                    <div><dt>구독자</dt><dd>{selectedExploreChannel.hiddenSubscriberCount ? "비공개" : formatCount(selectedExploreChannel.subscriberCount)}</dd></div>
+                    <div><dt>채널 영상</dt><dd>{formatCount(selectedExploreChannel.youtubeVideoCount ?? selectedExploreChannel.videoCount)}</dd></div>
+                    <div><dt>저장 영상</dt><dd>{formatCount(selectedExploreChannel.videoCount)}</dd></div>
+                    <div><dt>수집 댓글</dt><dd>{formatCount(selectedExploreChannel.commentCount)}</dd></div>
+                  </dl>
+                </section>
+              )}
               <div className="explore-video-heading"><div><p className="section-kicker">LATEST SOCIAL POSTS</p><h3>{exploreChannelId ? explore.channels.find((channel) => channel.youtubeChannelId === exploreChannelId)?.title ?? "채널 동영상" : "동영상 갤러리"}</h3></div><label className="explore-sort"><ArrowsUpDownIcon aria-hidden="true" /><span className="visually-hidden">동영상 정렬</span><select value={exploreSort} onChange={(event) => { setExploreSort(event.target.value as ExploreSort); setExploreVisibleCount(12); }}><option value="recent">최근 수집</option><option value="views">조회수</option><option value="comments">댓글 수</option></select></label></div>
               <div className="explore-video-grid" aria-label="수집된 동영상">
                 {visibleExploreVideos.map((video, index) => <button className={index === 0 ? "explore-video-card explore-video-card-featured" : "explore-video-card"} type="button" key={video.id} onClick={(event) => openVideoDrawer(video, event.currentTarget)}><img src={youtubeThumbnail(video.youtubeVideoId)} alt="" loading={index < 6 ? "eager" : "lazy"} /><span className="explore-video-shade" aria-hidden="true" /><span className="explore-video-play"><PlayIcon aria-hidden="true" /></span><span className="explore-video-date">{formatShortDate(video.publishedAt)}</span><strong>{video.title ?? video.youtubeVideoId}</strong><footer><span>조회 {formatCount(video.viewCount)}</span><span>댓글 {formatCount(video.commentCount)}</span></footer></button>)}
@@ -889,6 +976,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
               </div>
               {exploreVideos.length > visibleExploreVideos.length && <button className="explore-load-more" type="button" onClick={() => setExploreVisibleCount((count) => count + 12)}>동영상 더 보기 <ChevronRightIcon aria-hidden="true" /></button>}
             </>
+            )
           )}
         </section>
 

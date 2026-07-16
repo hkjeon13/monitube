@@ -23,6 +23,7 @@ from .domain import (
     new_id,
     utcnow,
 )
+from .fuzzy_search import rank_text_fields
 
 
 class RepositoryError(RuntimeError):
@@ -87,6 +88,8 @@ class CollectionRequestRepository(Protocol):
     def dispatch_due_pins(self, *, runtime_config_id: str | None = None, limit: int = 10) -> int: ...
 
     def list_explore(self, *, limit: int = 60) -> dict[str, Any]: ...
+
+    def search_collected(self, *, query: str, limit: int = 20) -> dict[str, Any]: ...
 
 
 class CollectionRepository(SourceRepository, JobRepository, CollectionRequestRepository, Protocol):
@@ -848,7 +851,12 @@ class InMemoryRepository(CollectionRepository):
                 pin = self._pins.get(target.id) if target else None
                 channels.append({
                     "youtubeChannelId": channel_id, "handle": channel.get("handle"), "title": channel.get("title"),
-                    "description": channel.get("description"), "videoCount": len(channel_videos),
+                    "description": channel.get("description"), "thumbnailUrl": channel.get("thumbnail_url"),
+                    "subscriberCount": (channel.get("statistics") or {}).get("subscriberCount"),
+                    "viewCount": (channel.get("statistics") or {}).get("viewCount"),
+                    "youtubeVideoCount": (channel.get("statistics") or {}).get("videoCount"),
+                    "hiddenSubscriberCount": (channel.get("statistics") or {}).get("hiddenSubscriberCount"),
+                    "videoCount": len(channel_videos),
                     "commentCount": sum(1 for comment in self._comments.values() if comment.youtube_video_id in ids),
                     "lastFetchedAt": max((video.source_fetched_at for video in channel_videos), default=channel.get("source_fetched_at")),
                     "targetId": target.id if target else None, "pin": deepcopy(pin) if pin else None,
@@ -856,6 +864,42 @@ class InMemoryRepository(CollectionRepository):
             channels.sort(key=lambda item: item["lastFetchedAt"] or utcnow(), reverse=True)
             videos = sorted(self._videos.values(), key=lambda item: item.source_fetched_at, reverse=True)[:limit]
             return {"channels": channels, "videos": videos}
+
+    def search_collected(self, *, query: str, limit: int = 20) -> dict[str, Any]:
+        with self._lock:
+            video_results: list[dict[str, Any]] = []
+            comment_results: list[dict[str, Any]] = []
+            for video in self._videos.values():
+                channel = self._channels.get(video.youtube_channel_id or "", {})
+                score, matched_fields = rank_text_fields(query, {
+                    "title": video.title,
+                    "description": video.description,
+                    "channel": channel.get("title"),
+                    "handle": channel.get("handle"),
+                })
+                if matched_fields:
+                    video_results.append({"video": video, "score": score, "matched_fields": matched_fields})
+
+            for comment in self._comments.values():
+                video = self._videos.get(comment.youtube_video_id)
+                if not video:
+                    continue
+                channel = self._channels.get(video.youtube_channel_id or "", {})
+                score, matched_fields = rank_text_fields(query, {
+                    "comment": comment.text_display,
+                    "videoTitle": video.title,
+                    "channel": channel.get("title"),
+                    "handle": channel.get("handle"),
+                })
+                if matched_fields:
+                    comment_results.append({
+                        "comment": comment, "video": video, "channel_title": channel.get("title"),
+                        "score": score, "matched_fields": matched_fields,
+                    })
+
+            video_results.sort(key=lambda item: (item["score"], item["video"].source_fetched_at), reverse=True)
+            comment_results.sort(key=lambda item: (item["score"], item["comment"].source_fetched_at), reverse=True)
+            return {"videos": video_results[:limit], "comments": comment_results[:limit]}
 
     def _source_video_records(self, source_id: str) -> list[VideoRecord]:
         source = self._sources.get(source_id)

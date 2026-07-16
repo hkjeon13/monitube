@@ -21,6 +21,7 @@ except ImportError:  # pragma: no cover - exercised only in minimal local instal
             self.value = value
 
 from .analysis import build_summary
+from .fuzzy_search import rank_text_fields
 from .domain import (
     CollectionRequestRecord,
     CollectionSubmission,
@@ -36,6 +37,13 @@ from .domain import (
     utcnow,
 )
 from .repositories import CollectionRepository, InvalidStateTransitionError, NotFoundError, RepositoryError, _ALLOWED_TRANSITIONS
+
+
+def _optional_nonnegative_int(value: Any) -> int | None:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return None
 
 
 class PostgresRepository(CollectionRepository):
@@ -947,22 +955,42 @@ class PostgresRepository(CollectionRepository):
         return self.transition_job(job_id, current.state, **changes)
 
     def upsert_channel(self, channel: dict[str, Any]) -> dict[str, Any]:
+        statistics = dict(channel.get("statistics") or {})
+        payload = {**channel, "thumbnail_url": channel.get("thumbnail_url")}
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
-                INSERT INTO channels (youtube_channel_id, handle, title, description, uploads_playlist_id, source_fetched_at)
-                VALUES (%(youtube_channel_id)s, %(handle)s, %(title)s, %(description)s, %(uploads_playlist_id)s, %(source_fetched_at)s)
+                INSERT INTO channels (youtube_channel_id, handle, title, description, thumbnail_url, uploads_playlist_id, source_fetched_at)
+                VALUES (%(youtube_channel_id)s, %(handle)s, %(title)s, %(description)s, %(thumbnail_url)s, %(uploads_playlist_id)s, %(source_fetched_at)s)
                 ON CONFLICT (youtube_channel_id) DO UPDATE SET
                   handle = COALESCE(EXCLUDED.handle, channels.handle),
                   title = COALESCE(EXCLUDED.title, channels.title),
                   description = COALESCE(EXCLUDED.description, channels.description),
+                  thumbnail_url = COALESCE(EXCLUDED.thumbnail_url, channels.thumbnail_url),
                   uploads_playlist_id = COALESCE(EXCLUDED.uploads_playlist_id, channels.uploads_playlist_id),
                   source_fetched_at = EXCLUDED.source_fetched_at
                 RETURNING id::text, youtube_channel_id
                 """,
-                channel,
+                payload,
             )
-            return dict(cursor.fetchone())
+            stored = dict(cursor.fetchone())
+            cursor.execute(
+                """
+                INSERT INTO channel_snapshots (channel_id, fetched_at, subscriber_count, view_count, video_count, hidden_subscriber_count)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (channel_id, fetched_at) DO UPDATE SET
+                  subscriber_count = EXCLUDED.subscriber_count, view_count = EXCLUDED.view_count,
+                  video_count = EXCLUDED.video_count, hidden_subscriber_count = EXCLUDED.hidden_subscriber_count
+                """,
+                (
+                    stored["id"], channel["source_fetched_at"],
+                    _optional_nonnegative_int(statistics.get("subscriberCount")),
+                    _optional_nonnegative_int(statistics.get("viewCount")),
+                    _optional_nonnegative_int(statistics.get("videoCount")),
+                    bool(statistics.get("hiddenSubscriberCount")) if statistics.get("hiddenSubscriberCount") is not None else None,
+                ),
+            )
+            return stored
 
     def upsert_video(self, video: VideoRecord) -> VideoRecord:
         with self._connection() as connection, connection.cursor() as cursor:
@@ -1313,15 +1341,18 @@ class PostgresRepository(CollectionRepository):
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT c.youtube_channel_id, c.handle, c.title, c.description,
+                SELECT c.youtube_channel_id, c.handle, c.title, c.description, c.thumbnail_url,
                        COALESCE(video_counts.video_count, 0)::integer AS video_count,
                        COALESCE(comment_counts.comment_count, 0)::integer AS comment_count,
+                       channel_stats.subscriber_count, channel_stats.view_count,
+                       channel_stats.video_count AS youtube_video_count, channel_stats.hidden_subscriber_count,
                        GREATEST(c.source_fetched_at, video_counts.last_fetched_at) AS last_fetched_at,
                        target.id::text AS target_id, pin.enabled AS pin_enabled, pin.interval_minutes AS pin_interval_minutes,
                        pin.next_run_at AS pin_next_run_at, pin.last_dispatched_at AS pin_last_dispatched_at
                 FROM channels c
                 LEFT JOIN LATERAL (SELECT count(*) AS video_count, max(source_fetched_at) AS last_fetched_at FROM videos WHERE channel_id = c.id) video_counts ON TRUE
                 LEFT JOIN LATERAL (SELECT count(*) AS comment_count FROM comments cm JOIN videos v ON v.id = cm.video_id WHERE v.channel_id = c.id) comment_counts ON TRUE
+                LEFT JOIN LATERAL (SELECT subscriber_count, view_count, video_count, hidden_subscriber_count FROM channel_snapshots WHERE channel_id = c.id ORDER BY fetched_at DESC LIMIT 1) channel_stats ON TRUE
                 LEFT JOIN collection_targets target ON target.resolved_channel_id = c.id
                 LEFT JOIN collection_target_pins pin ON pin.target_id = target.id
                 ORDER BY GREATEST(c.source_fetched_at, video_counts.last_fetched_at) DESC NULLS LAST, c.title
@@ -1332,7 +1363,7 @@ class PostgresRepository(CollectionRepository):
                 pin = None
                 if row.get("pin_enabled") is not None:
                     pin = {"target_id": str(row["target_id"]), "enabled": bool(row["pin_enabled"]), "interval_minutes": int(row["pin_interval_minutes"]), "next_run_at": row["pin_next_run_at"], "last_dispatched_at": row["pin_last_dispatched_at"]}
-                channels.append({"youtubeChannelId": row["youtube_channel_id"], "handle": row["handle"], "title": row["title"], "description": row["description"], "videoCount": int(row["video_count"]), "commentCount": int(row["comment_count"]), "lastFetchedAt": row["last_fetched_at"], "targetId": str(row["target_id"]) if row.get("target_id") else None, "pin": pin})
+                channels.append({"youtubeChannelId": row["youtube_channel_id"], "handle": row["handle"], "title": row["title"], "description": row["description"], "thumbnailUrl": row["thumbnail_url"], "subscriberCount": row["subscriber_count"], "viewCount": row["view_count"], "youtubeVideoCount": row["youtube_video_count"], "hiddenSubscriberCount": row["hidden_subscriber_count"], "videoCount": int(row["video_count"]), "commentCount": int(row["comment_count"]), "lastFetchedAt": row["last_fetched_at"], "targetId": str(row["target_id"]) if row.get("target_id") else None, "pin": pin})
             cursor.execute(
                 """
                 SELECT v.id::text, v.youtube_video_id, c.youtube_channel_id, v.title, v.description, v.published_at,
@@ -1345,3 +1376,86 @@ class PostgresRepository(CollectionRepository):
                 (limit,),
             )
             return {"channels": channels, "videos": [self._video(row) for row in cursor.fetchall()]}
+
+    def search_collected(self, *, query: str, limit: int = 20) -> dict[str, Any]:
+        """Search persisted public data with a Jaro-Winkler tolerance layer.
+
+        Search scoring deliberately runs in the application so results are
+        consistent for Korean text as well as Latin scripts, without depending on
+        a database-specific fuzzy-search extension.
+        """
+
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT v.id::text, v.youtube_video_id, c.youtube_channel_id, c.title AS channel_title,
+                       c.handle AS channel_handle, v.title, v.description, v.published_at,
+                       v.duration_seconds, v.privacy_status, v.made_for_kids, v.source_fetched_at,
+                       jsonb_build_object('viewCount', COALESCE(stats.view_count, 0), 'likeCount', COALESCE(stats.like_count, 0), 'commentCount', COALESCE(stats.comment_count, 0)) AS statistics
+                FROM videos v
+                LEFT JOIN channels c ON c.id = v.channel_id
+                LEFT JOIN LATERAL (
+                  SELECT view_count, like_count, comment_count FROM video_stat_snapshots
+                  WHERE video_id = v.id ORDER BY fetched_at DESC LIMIT 1
+                ) stats ON TRUE
+                """
+            )
+            video_results: list[dict[str, Any]] = []
+            for row in cursor.fetchall():
+                score, matched_fields = rank_text_fields(query, {
+                    "title": row.get("title"), "description": row.get("description"),
+                    "channel": row.get("channel_title"), "handle": row.get("channel_handle"),
+                })
+                if matched_fields:
+                    video_results.append({"video": self._video(row), "score": score, "matched_fields": matched_fields})
+
+            cursor.execute(
+                """
+                SELECT cm.id::text AS comment_id, cm.youtube_comment_id, cm.youtube_parent_comment_id,
+                       cm.youtube_thread_id, cm.text_display, cm.like_count, cm.published_at AS comment_published_at,
+                       cm.updated_at AS comment_updated_at, cm.source_fetched_at AS comment_fetched_at,
+                       v.id::text AS video_db_id, v.youtube_video_id, c.youtube_channel_id,
+                       c.title AS channel_title, c.handle AS channel_handle, v.title, v.description,
+                       v.published_at, v.duration_seconds, v.privacy_status, v.made_for_kids,
+                       v.source_fetched_at,
+                       jsonb_build_object('viewCount', COALESCE(stats.view_count, 0), 'likeCount', COALESCE(stats.like_count, 0), 'commentCount', COALESCE(stats.comment_count, 0)) AS statistics
+                FROM comments cm
+                JOIN videos v ON v.id = cm.video_id
+                LEFT JOIN channels c ON c.id = v.channel_id
+                LEFT JOIN LATERAL (
+                  SELECT view_count, like_count, comment_count FROM video_stat_snapshots
+                  WHERE video_id = v.id ORDER BY fetched_at DESC LIMIT 1
+                ) stats ON TRUE
+                """
+            )
+            comment_results: list[dict[str, Any]] = []
+            for row in cursor.fetchall():
+                score, matched_fields = rank_text_fields(query, {
+                    "comment": row.get("text_display"), "videoTitle": row.get("title"),
+                    "channel": row.get("channel_title"), "handle": row.get("channel_handle"),
+                })
+                if not matched_fields:
+                    continue
+                comment = self._comment({
+                    "id": row["comment_id"], "youtube_comment_id": row["youtube_comment_id"],
+                    "youtube_video_id": row["youtube_video_id"], "youtube_parent_comment_id": row.get("youtube_parent_comment_id"),
+                    "youtube_thread_id": row.get("youtube_thread_id"), "text_display": row.get("text_display"),
+                    "like_count": row.get("like_count"), "published_at": row.get("comment_published_at"),
+                    "updated_at": row.get("comment_updated_at"), "source_fetched_at": row.get("comment_fetched_at"),
+                })
+                video = self._video({
+                    "id": row["video_db_id"], "youtube_video_id": row["youtube_video_id"],
+                    "youtube_channel_id": row.get("youtube_channel_id"), "title": row.get("title"),
+                    "description": row.get("description"), "published_at": row.get("published_at"),
+                    "duration_seconds": row.get("duration_seconds"), "privacy_status": row.get("privacy_status"),
+                    "made_for_kids": row.get("made_for_kids"), "source_fetched_at": row.get("source_fetched_at"),
+                    "statistics": row.get("statistics"),
+                })
+                comment_results.append({
+                    "comment": comment, "video": video, "channel_title": row.get("channel_title"),
+                    "score": score, "matched_fields": matched_fields,
+                })
+
+            video_results.sort(key=lambda item: (item["score"], item["video"].source_fetched_at), reverse=True)
+            comment_results.sort(key=lambda item: (item["score"], item["comment"].source_fetched_at), reverse=True)
+            return {"videos": video_results[:limit], "comments": comment_results[:limit]}

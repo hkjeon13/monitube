@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, FastAPI, Header, Request, Response, status
+from fastapi import APIRouter, Depends, FastAPI, Header, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
@@ -24,6 +24,7 @@ from .contracts import (
     JobCreate,
     JobStatus,
     SourceResultsResponse,
+    UnifiedSearchResponse,
     TargetPin,
     TargetPinUpdate,
     VideoCommentsResponse,
@@ -137,6 +138,14 @@ def create_app(repository: CollectionRepository | None = None, settings: Setting
     @router.get("/explore", response_model=ExploreResponse, tags=["explore"])
     def explore(service: Service) -> ExploreResponse:
         return service.explore()
+
+    @router.get("/search", response_model=UnifiedSearchResponse, tags=["search"])
+    def search_collected(
+        service: Service,
+        q: str = Query(min_length=2, max_length=200),
+        limit: int = Query(default=20, ge=1, le=50),
+    ) -> UnifiedSearchResponse:
+        return service.search_collected(q, limit=limit)
 
     @router.put("/collection-targets/{target_id}/pin", response_model=TargetPin, tags=["pins"])
     def set_target_pin(target_id: str, payload: TargetPinUpdate, service: Service) -> TargetPin:

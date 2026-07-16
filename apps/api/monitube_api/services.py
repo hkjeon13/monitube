@@ -19,6 +19,8 @@ from .contracts import (
     CollectionRequestCreate,
     CollectionRequestResponse,
     ExploreResponse,
+    SearchCommentResult,
+    SearchVideoResult,
     TargetPin,
     TargetPinUpdate,
     JobCreate,
@@ -28,6 +30,7 @@ from .contracts import (
     KeywordCollectionSource,
     PartialError,
     SourceResultsResponse,
+    UnifiedSearchResponse,
     SourceConfig,
     VideoCommentsResponse,
     VideoStatistics,
@@ -310,6 +313,27 @@ class CollectionService:
             pin = channel.pop("pin", None)
             channels.append({**channel, "pin": self._pin_contract(pin) if pin else None})
         return ExploreResponse(channels=channels, videos=[_video_contract(video) for video in result["videos"]])
+
+    def search_collected(self, query: str, *, limit: int = 20) -> UnifiedSearchResponse:
+        result = self.repository.search_collected(query=query, limit=limit)
+        return UnifiedSearchResponse(
+            query=query,
+            videos=[
+                SearchVideoResult(
+                    video=_video_contract(item["video"]), score=item["score"],
+                    matchedFields=item["matched_fields"],
+                )
+                for item in result["videos"]
+            ],
+            comments=[
+                SearchCommentResult(
+                    comment=_comment_contract(item["comment"]), video=_video_contract(item["video"]),
+                    channelTitle=item.get("channel_title"), score=item["score"],
+                    matchedFields=item["matched_fields"],
+                )
+                for item in result["comments"]
+            ],
+        )
 
     def change_job_state(self, job_id: str, request: JobStateChange) -> JobStatus:
         changes = request.model_dump(exclude={"state"}, exclude_none=True)

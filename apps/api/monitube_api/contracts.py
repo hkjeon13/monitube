@@ -155,6 +155,11 @@ class ExploreChannel(ApiModel):
     handle: str | None = None
     title: str | None = None
     description: str | None = None
+    thumbnailUrl: str | None = None
+    subscriberCount: int | None = Field(default=None, ge=0)
+    viewCount: int | None = Field(default=None, ge=0)
+    youtubeVideoCount: int | None = Field(default=None, ge=0)
+    hiddenSubscriberCount: bool | None = None
     videoCount: int = Field(ge=0)
     commentCount: int = Field(ge=0)
     lastFetchedAt: datetime | None = None
@@ -165,6 +170,26 @@ class ExploreChannel(ApiModel):
 class ExploreResponse(ApiModel):
     channels: list[ExploreChannel] = Field(default_factory=list)
     videos: list["CollectedVideo"] = Field(default_factory=list)
+
+
+class SearchVideoResult(ApiModel):
+    video: "CollectedVideo"
+    score: float = Field(ge=0, le=1)
+    matchedFields: list[str] = Field(default_factory=list)
+
+
+class SearchCommentResult(ApiModel):
+    comment: "CollectedComment"
+    video: "CollectedVideo"
+    channelTitle: str | None = None
+    score: float = Field(ge=0, le=1)
+    matchedFields: list[str] = Field(default_factory=list)
+
+
+class UnifiedSearchResponse(ApiModel):
+    query: str
+    videos: list[SearchVideoResult] = Field(default_factory=list)
+    comments: list[SearchCommentResult] = Field(default_factory=list)
 
 
 class ChannelCollectionSource(CollectionSourceBase):

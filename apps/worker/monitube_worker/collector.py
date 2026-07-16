@@ -156,6 +156,7 @@ class YouTubeCollector:
         item = items[0]
         snippet = item.get("snippet") or {}
         content_details = item.get("contentDetails") or {}
+        statistics = item.get("statistics") or {}
         uploads = ((content_details.get("relatedPlaylists") or {}).get("uploads"))
         self.repository.upsert_channel(
             {
@@ -163,7 +164,14 @@ class YouTubeCollector:
                 "handle": snippet.get("customUrl"),
                 "title": snippet.get("title"),
                 "description": snippet.get("description"),
+                "thumbnail_url": ((snippet.get("thumbnails") or {}).get("high") or (snippet.get("thumbnails") or {}).get("medium") or (snippet.get("thumbnails") or {}).get("default") or {}).get("url"),
                 "uploads_playlist_id": uploads,
+                "statistics": {
+                    "subscriberCount": as_int(statistics.get("subscriberCount")),
+                    "viewCount": as_int(statistics.get("viewCount")),
+                    "videoCount": as_int(statistics.get("videoCount")),
+                    "hiddenSubscriberCount": bool(statistics.get("hiddenSubscriberCount", False)),
+                },
                 "source_fetched_at": utcnow(),
             }
         )

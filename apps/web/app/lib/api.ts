@@ -100,6 +100,11 @@ export interface ExploreChannel {
   handle?: string;
   title?: string;
   description?: string;
+  thumbnailUrl?: string;
+  subscriberCount?: number;
+  viewCount?: number;
+  youtubeVideoCount?: number;
+  hiddenSubscriberCount?: boolean;
   videoCount: number;
   commentCount: number;
   lastFetchedAt?: string;
@@ -110,6 +115,26 @@ export interface ExploreChannel {
 export interface ExploreData {
   channels: ExploreChannel[];
   videos: CollectedVideo[];
+}
+
+export interface CollectedSearchVideo {
+  video: CollectedVideo;
+  score: number;
+  matchedFields: string[];
+}
+
+export interface CollectedSearchComment {
+  comment: CollectedComment;
+  video: CollectedVideo;
+  channelTitle?: string;
+  score: number;
+  matchedFields: string[];
+}
+
+export interface CollectedSearchData {
+  query: string;
+  videos: CollectedSearchVideo[];
+  comments: CollectedSearchComment[];
 }
 
 const defaultApiBaseUrl = "http://localhost:8000";
@@ -147,6 +172,13 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function asArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
+}
+
+function asTextArray(value: unknown): string[] {
+  return asArray(value).flatMap((item) => {
+    const text = asText(item);
+    return text ? [text] : [];
+  });
 }
 
 function asText(value: unknown): string | undefined {
@@ -222,6 +254,11 @@ function normalizeExploreChannel(value: unknown): ExploreChannel | null {
     ...(asText(record.handle) ? { handle: asText(record.handle) } : {}),
     ...(asText(record.title) ? { title: asText(record.title) } : {}),
     ...(asText(record.description) ? { description: asText(record.description) } : {}),
+    ...(asText(record.thumbnailUrl ?? record.thumbnail_url) ? { thumbnailUrl: asText(record.thumbnailUrl ?? record.thumbnail_url) } : {}),
+    ...(asNumber(record.subscriberCount ?? record.subscriber_count) !== undefined ? { subscriberCount: asNumber(record.subscriberCount ?? record.subscriber_count) } : {}),
+    ...(asNumber(record.viewCount ?? record.view_count) !== undefined ? { viewCount: asNumber(record.viewCount ?? record.view_count) } : {}),
+    ...(asNumber(record.youtubeVideoCount ?? record.youtube_video_count) !== undefined ? { youtubeVideoCount: asNumber(record.youtubeVideoCount ?? record.youtube_video_count) } : {}),
+    ...(asBoolean(record.hiddenSubscriberCount ?? record.hidden_subscriber_count) !== undefined ? { hiddenSubscriberCount: asBoolean(record.hiddenSubscriberCount ?? record.hidden_subscriber_count) } : {}),
     ...(asText(record.lastFetchedAt ?? record.last_fetched_at) ? { lastFetchedAt: asText(record.lastFetchedAt ?? record.last_fetched_at) } : {}),
     ...(asText(record.targetId ?? record.target_id) ? { targetId: asText(record.targetId ?? record.target_id) } : {}),
     ...(pin ? { pin } : {}),
@@ -553,6 +590,33 @@ export async function getExplore(): Promise<ExploreData> {
     videos: firstArray(record ?? {}, ["videos"]).flatMap((item) => {
       const video = normalizeVideo(item);
       return video ? [video] : [];
+    }),
+  };
+}
+
+export async function searchCollected(query: string): Promise<CollectedSearchData> {
+  const response = await request<unknown>(`/v1/search?q=${encodeURIComponent(query)}&limit=20`, { method: "GET" });
+  const record = asRecord(response);
+  return {
+    query: asText(record?.query) ?? query,
+    videos: firstArray(record ?? {}, ["videos"]).flatMap((item) => {
+      const itemRecord = asRecord(item);
+      const video = normalizeVideo(itemRecord?.video);
+      const score = asNumber(itemRecord?.score);
+      if (!video || score === undefined) return [];
+      return [{ video, score, matchedFields: asTextArray(firstArray(itemRecord ?? {}, ["matchedFields", "matched_fields"])) }];
+    }),
+    comments: firstArray(record ?? {}, ["comments"]).flatMap((item) => {
+      const itemRecord = asRecord(item);
+      const comment = normalizeComment(itemRecord?.comment);
+      const video = normalizeVideo(itemRecord?.video);
+      const score = asNumber(itemRecord?.score);
+      if (!comment || !video || score === undefined) return [];
+      return [{
+        comment, video, score,
+        matchedFields: asTextArray(firstArray(itemRecord ?? {}, ["matchedFields", "matched_fields"])),
+        ...(asText(itemRecord?.channelTitle ?? itemRecord?.channel_title) ? { channelTitle: asText(itemRecord?.channelTitle ?? itemRecord?.channel_title) } : {}),
+      }];
     }),
   };
 }
