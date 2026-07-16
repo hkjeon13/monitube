@@ -351,9 +351,11 @@ class InMemoryRepository(CollectionRepository):
         desired: dict[str, Any] = {
             "complete": False,
             "includeComments": bool(config.get("includeComments", False)),
+            "collectAllComments": bool(config.get("includeComments", False) and config.get("collectAllComments", False)),
             "maxCommentPagesPerVideo": int(config.get("maxCommentPagesPerVideo") or 1),
         }
         if source_type is SourceType.CHANNEL:
+            desired["collectAllVideos"] = bool(config.get("collectAllVideos", False))
             desired["maxVideos"] = int(config.get("maxVideos") or 50)
         elif source_type is SourceType.KEYWORD:
             desired["maxPagesPerRun"] = int(config.get("maxPagesPerRun") or 1)
@@ -369,10 +371,14 @@ class InMemoryRepository(CollectionRepository):
         for key, value in incoming.items():
             merged.setdefault(key, deepcopy(value))
         merged["includeComments"] = bool(current.get("includeComments", False) or incoming.get("includeComments", False))
+        merged["collectAllComments"] = bool(
+            current.get("collectAllComments", False) or incoming.get("collectAllComments", False)
+        )
         merged["maxCommentPagesPerVideo"] = max(
             int(current.get("maxCommentPagesPerVideo") or 1), int(incoming.get("maxCommentPagesPerVideo") or 1)
         )
         if source_type is SourceType.CHANNEL:
+            merged["collectAllVideos"] = bool(current.get("collectAllVideos", False) or incoming.get("collectAllVideos", False))
             merged["maxVideos"] = max(int(current.get("maxVideos") or 1), int(incoming.get("maxVideos") or 1))
         elif source_type is SourceType.KEYWORD:
             merged["maxPagesPerRun"] = max(int(current.get("maxPagesPerRun") or 1), int(incoming.get("maxPagesPerRun") or 1))
@@ -383,6 +389,10 @@ class InMemoryRepository(CollectionRepository):
         if not coverage.get("complete"):
             return False
         if desired.get("includeComments") and not coverage.get("includeComments"):
+            return False
+        if desired.get("collectAllComments") and not coverage.get("collectAllComments"):
+            return False
+        if desired.get("collectAllVideos") and not coverage.get("collectAllVideos"):
             return False
         for key in ("maxVideos", "maxPagesPerRun"):
             if key in desired and int(coverage.get(key) or 0) < int(desired[key]):
@@ -398,9 +408,11 @@ class InMemoryRepository(CollectionRepository):
         coverage = {
             "complete": False,
             "includeComments": bool(job.include_comments),
+            "collectAllComments": bool(job.include_comments and source_config.get("collectAllComments")),
             "maxCommentPagesPerVideo": int(job.max_comments_per_video or source_config.get("maxCommentPagesPerVideo") or 1),
         }
         if source_type is SourceType.CHANNEL:
+            coverage["collectAllVideos"] = bool(source_config.get("collectAllVideos"))
             coverage["maxVideos"] = int(job.max_videos or source_config.get("maxVideos") or 50)
         elif source_type is SourceType.KEYWORD:
             coverage["maxPagesPerRun"] = int(source_config.get("maxPagesPerRun") or 1)

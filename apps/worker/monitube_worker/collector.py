@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 import re
 from typing import Any, Iterable, Mapping
-from zoneinfo import ZoneInfo
 
 from monitube_api.channel_resolution import resolve_channel_input
 from monitube_api.domain import CommentRecord, JobRecord, JobState, SourceType, VideoRecord, new_id, utcnow
@@ -47,12 +46,16 @@ def as_int(value: Any) -> int:
         return 0
 
 
-def seconds_until_pacific_reset(now: datetime | None = None) -> int:
-    """Conservative delay until the next YouTube daily quota reset boundary."""
+def quota_retry_delay_seconds(checkpoint: Mapping[str, Any]) -> int:
+    """Back off quota-paused work at 1h, 2h, then 3h intervals.
 
-    local_now = (now or utcnow()).astimezone(ZoneInfo("America/Los_Angeles"))
-    next_midnight = (local_now + timedelta(days=1)).replace(hour=0, minute=1, second=0, microsecond=0)
-    return max(60, int((next_midnight - local_now).total_seconds()))
+    Quota credits can become available when another managed credential rotates or
+    its window resets.  Retrying at a bounded cadence makes that recovery
+    automatic without making users wait for a guessed daily-reset boundary.
+    """
+
+    prior_attempts = as_int(checkpoint.get("quotaRetryAttempt"))
+    return min(10_800, 3_600 * (prior_attempts + 1))
 
 
 class YouTubeCollector:
@@ -65,12 +68,15 @@ class YouTubeCollector:
         self._active_checkpoint: dict[str, Any] = {}
 
     def _checkpoint(self, job: JobRecord, *, stage: str, scope_key: str, page_token: str | None, batch_cursor: int = 0) -> None:
+        quota_retry_attempt = as_int(self._active_checkpoint.get("quotaRetryAttempt"))
         self._active_checkpoint = {
             "stage": stage,
             "scopeKey": scope_key,
             "pageToken": page_token,
             "batchCursor": batch_cursor,
         }
+        if quota_retry_attempt:
+            self._active_checkpoint["quotaRetryAttempt"] = quota_retry_attempt
         self.repository.checkpoint_job(job.id, self._active_checkpoint)
 
     @staticmethod
@@ -111,8 +117,14 @@ class YouTubeCollector:
         if self._active_checkpoint:
             self.repository.checkpoint_job(job.id, self._active_checkpoint)
         if classification.category is YoutubeErrorCategory.QUOTA_EXHAUSTED:
+            checkpoint = dict(self._active_checkpoint or job.checkpoint)
+            checkpoint["quotaRetryAttempt"] = as_int(checkpoint.get("quotaRetryAttempt")) + 1
+            self._active_checkpoint = checkpoint
+            self.repository.checkpoint_job(job.id, checkpoint)
             raise QuotaExhaustedError(
-                str(exc), bucket=classification.quota_bucket or exc.bucket, resume_after_seconds=seconds_until_pacific_reset()
+                str(exc),
+                bucket=classification.quota_bucket or exc.bucket,
+                resume_after_seconds=quota_retry_delay_seconds(job.checkpoint),
             ) from exc
         if classification.retryable:
             raise RetryableCollectionError(str(exc), retry_after_seconds=60) from exc
@@ -170,20 +182,21 @@ class YouTubeCollector:
         playlist_id = ((channel.get("contentDetails") or {}).get("relatedPlaylists") or {}).get("uploads")
         if not playlist_id:
             return []
-        limit = job.max_videos or as_int(source_config.get("maxVideos")) or 50
+        collect_all = bool(source_config.get("collectAllVideos"))
+        limit = None if collect_all else job.max_videos or as_int(source_config.get("maxVideos")) or 50
         ids: list[str] = []
         # Discovery pages are idempotently replayed after a quota pause. The page
         # checkpoint alone cannot reconstruct IDs from earlier pages, so resuming its
         # cursor would silently omit them before they are linked to this source.
         page_token: str | None = None
         page_count = 0
-        while len(ids) < limit:
+        while limit is None or len(ids) < limit:
             payload = self._call(
                 job,
                 "playlistItems",
                 part="snippet,contentDetails",
                 playlistId=playlist_id,
-                maxResults=min(50, limit - len(ids)),
+                maxResults=50 if limit is None else min(50, limit - len(ids)),
                 pageToken=page_token,
             )
             page_count += 1
@@ -191,7 +204,7 @@ class YouTubeCollector:
                 video_id = (item.get("contentDetails") or {}).get("videoId") or (item.get("snippet") or {}).get("resourceId", {}).get("videoId")
                 if video_id and video_id not in ids:
                     ids.append(video_id)
-                    if len(ids) >= limit:
+                    if limit is not None and len(ids) >= limit:
                         break
             page_token = payload.get("nextPageToken")
             self._checkpoint(job, stage="channel_playlist", scope_key=str(playlist_id), page_token=page_token, batch_cursor=page_count)
@@ -294,10 +307,12 @@ class YouTubeCollector:
             source_fetched_at=utcnow(),
         )
 
-    def _collect_comments(self, job: JobRecord, video: VideoRecord, max_pages: int) -> int:
+    def _collect_comments(self, job: JobRecord, video: VideoRecord, max_pages: int | None) -> int:
         page_token, completed_pages = self._resume_cursor(job, stage="comments", scope_key=video.youtube_video_id)
         count = 0
-        for page in range(completed_pages + 1, max_pages + 1):
+        page = completed_pages
+        while max_pages is None or page < max_pages:
+            page += 1
             try:
                 payload = self._call(
                     job,
@@ -353,7 +368,9 @@ class YouTubeCollector:
 
             include_comments = bool(job.include_comments or source.config.get("includeComments"))
             if include_comments:
-                max_pages = job.max_comments_per_video or as_int(source.config.get("maxCommentPagesPerVideo")) or 1
+                max_pages = None if source.config.get("collectAllComments") else (
+                    job.max_comments_per_video or as_int(source.config.get("maxCommentPagesPerVideo")) or 1
+                )
                 collected_comments = 0
                 for index, video in enumerate(videos, start=1):
                     collected_comments += self._collect_comments(job, video, max_pages)

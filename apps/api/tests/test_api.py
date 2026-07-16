@@ -130,6 +130,34 @@ def test_collection_requests_share_one_target_job_and_honor_idempotency() -> Non
     assert len(client.get("/v1/sources").json()) == 1
 
 
+def test_all_content_channel_request_widens_existing_target_without_preflight() -> None:
+    repository = InMemoryRepository()
+    client = TestClient(create_app(repository=repository))
+    limited = client.post(
+        "/v1/collection-requests",
+        json={"type": "channel", "config": {"input": "@GoogleDevelopers", "maxVideos": 10, "includeComments": False}},
+    ).json()
+
+    all_content = client.post(
+        "/v1/collection-requests",
+        json={
+            "type": "channel",
+            "config": {
+                "input": "@GoogleDevelopers",
+                "includeComments": True,
+                "collectAllVideos": True,
+                "collectAllComments": True,
+            },
+        },
+    )
+
+    assert all_content.status_code == 201
+    assert all_content.json()["targetId"] == limited["targetId"]
+    source = all_content.json()["source"]
+    assert source["config"]["collectAllVideos"] is True
+    assert source["config"]["collectAllComments"] is True
+
+
 def test_running_target_queues_one_successor_then_serves_cached_results() -> None:
     repository = InMemoryRepository()
     client = TestClient(create_app(repository=repository))

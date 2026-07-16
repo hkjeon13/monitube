@@ -28,7 +28,6 @@ import type {
   JobStatus,
   KeywordSourceConfig,
   QuotaBucket,
-  QuotaEstimate,
   VideoSourceConfig,
 } from "@monitube/contracts";
 import type { MouseEvent, ReactNode } from "react";
@@ -50,7 +49,6 @@ import {
   type SourceSummary,
 } from "../lib/api";
 
-type EstimateMode = "local" | null;
 type ViewMetric = "views" | "likes" | "comments";
 type ExploreSort = "recent" | "views" | "comments";
 export type WorkspacePage = "overview" | "explore" | "sources" | "jobs" | "insights";
@@ -64,10 +62,8 @@ type FormState = {
   relevanceLanguage: string;
   regionCode: string;
   order: KeywordSourceConfig["order"];
-  maxVideos: number;
   maxPagesPerRun: number;
   includeComments: boolean;
-  maxCommentPagesPerVideo: number;
 };
 
 const initialForm: FormState = {
@@ -80,10 +76,8 @@ const initialForm: FormState = {
   relevanceLanguage: "ko",
   regionCode: "KR",
   order: "date",
-  maxVideos: 50,
   maxPagesPerRun: 3,
   includeComments: true,
-  maxCommentPagesPerVideo: 1,
 };
 
 const bucketLabels: Record<QuotaBucket, string> = {
@@ -173,8 +167,8 @@ function sourceRequest(form: FormState): CreateCollectionSourceRequest {
     const config: ChannelSourceConfig = {
       input: form.channelInput.trim(),
       includeComments: form.includeComments,
-      maxVideos: clampPositive(form.maxVideos, 50),
-      maxCommentPagesPerVideo: clampPositive(form.maxCommentPagesPerVideo, 1),
+      collectAllVideos: true,
+      collectAllComments: form.includeComments,
     };
     return { type: "channel", config };
   }
@@ -183,7 +177,7 @@ function sourceRequest(form: FormState): CreateCollectionSourceRequest {
     const config: VideoSourceConfig = {
       input: form.videoInput.trim(),
       includeComments: form.includeComments,
-      maxCommentPagesPerVideo: clampPositive(form.maxCommentPagesPerVideo, 1),
+      collectAllComments: form.includeComments,
     };
     return { type: "video", config };
   }
@@ -199,7 +193,7 @@ function sourceRequest(form: FormState): CreateCollectionSourceRequest {
     order: form.order,
     maxPagesPerRun: clampPositive(form.maxPagesPerRun, 1),
     includeComments: form.includeComments,
-    maxCommentPagesPerVideo: clampPositive(form.maxCommentPagesPerVideo, 1),
+    collectAllComments: form.includeComments,
   };
   return { type: "keyword", config };
 }
@@ -215,44 +209,6 @@ function validate(requestBody: CreateCollectionSourceRequest) {
     return "YouTube 동영상 URL 또는 동영상 ID를 입력하세요.";
   }
   return null;
-}
-
-function localEstimate(requestBody: CreateCollectionSourceRequest): QuotaEstimate[] {
-  const upperBoundVideos =
-    requestBody.type === "channel"
-      ? (requestBody.config as ChannelSourceConfig).maxVideos
-      : requestBody.type === "keyword"
-        ? (requestBody.config as KeywordSourceConfig).maxPagesPerRun * 50
-        : 1;
-  const comments = requestBody.config.includeComments
-    ? upperBoundVideos * requestBody.config.maxCommentPagesPerVideo
-    : 0;
-  const core =
-    requestBody.type === "channel"
-      ? 1 + Math.ceil(upperBoundVideos / 50) * 2 + comments
-      : requestBody.type === "keyword"
-        ? (requestBody.config as KeywordSourceConfig).maxPagesPerRun + comments
-        : 1 + comments;
-  const resetAt = "서버 quota 상태를 확인하면 reset 시각이 표시됩니다.";
-
-  return [
-    ...(requestBody.type === "keyword"
-      ? [{
-          bucket: "search_queries" as const,
-          estimatedCalls: (requestBody.config as KeywordSourceConfig).maxPagesPerRun,
-          estimatedUnits: (requestBody.config as KeywordSourceConfig).maxPagesPerRun,
-          limit: 100,
-          resetAt,
-        }]
-      : []),
-    {
-      bucket: "core" as const,
-      estimatedCalls: core,
-      estimatedUnits: core,
-      limit: 10_000,
-      resetAt,
-    },
-  ];
 }
 
 function statusCopy(job: JobStatus) {
@@ -292,14 +248,21 @@ function sourceCoverage(source?: SourceSummary) {
     1,
   );
   if (source.type === "channel") {
+    if (coverage.collectAllVideos === true || config.collectAllVideos === true) {
+      return comments
+        ? "채널의 전체 공개 동영상 · 전체 공개 댓글 수집"
+        : "채널의 전체 공개 동영상 수집";
+    }
     const videos = clampPositive(Number(coverage.maxVideos ?? coverage.requestedMaxVideos ?? config.maxVideos), 50);
     return `영상 최대 ${formatCount(videos)}개 · ${comments ? `댓글 ${formatCount(commentPages)}페이지` : "댓글 미수집"}`;
   }
   if (source.type === "keyword") {
     const pages = clampPositive(Number(coverage.maxPagesPerRun ?? coverage.requestedMaxPagesPerRun ?? config.maxPagesPerRun), 1);
-    return `검색 ${formatCount(pages)}페이지 · ${comments ? `댓글 ${formatCount(commentPages)}페이지` : "댓글 미수집"}`;
+    return `검색 ${formatCount(pages)}페이지 · ${comments ? (coverage.collectAllComments === true || config.collectAllComments === true ? "전체 공개 댓글" : `댓글 ${formatCount(commentPages)}페이지`) : "댓글 미수집"}`;
   }
-  return comments ? `공개 댓글 ${formatCount(commentPages)}페이지` : "동영상 메타데이터";
+  return comments
+    ? (coverage.collectAllComments === true || config.collectAllComments === true ? "전체 공개 댓글" : `공개 댓글 ${formatCount(commentPages)}페이지`)
+    : "동영상 메타데이터";
 }
 
 function normalizedSourceIdentity(source: SourceSummary) {
@@ -322,10 +285,10 @@ function normalizedSourceIdentity(source: SourceSummary) {
 
 function sourceCoverageScore(source: SourceSummary) {
   const config = source.config;
-  const maxVideos = clampPositive(Number(config.maxVideos), 1);
+  const maxVideos = config.collectAllVideos === true ? Number.MAX_SAFE_INTEGER : clampPositive(Number(config.maxVideos), 1);
   const maxPages = clampPositive(Number(config.maxPagesPerRun), 1);
   const commentPages = config.includeComments === true
-    ? clampPositive(Number(config.maxCommentPagesPerVideo), 1)
+    ? config.collectAllComments === true ? Number.MAX_SAFE_INTEGER : clampPositive(Number(config.maxCommentPagesPerVideo), 1)
     : 0;
   return maxVideos * 10_000 + maxPages * 1_000 + commentPages * 10;
 }
@@ -442,12 +405,8 @@ function MetricCard({
 
 export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePage }) {
   const [form, setForm] = useState<FormState>(initialForm);
-  const [estimates, setEstimates] = useState<QuotaEstimate[]>([]);
-  const [estimateWarnings, setEstimateWarnings] = useState<string[]>([]);
-  const [estimateMode, setEstimateMode] = useState<EstimateMode>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [isEstimating, setIsEstimating] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
   const [job, setJob] = useState<JobStatus | null>(null);
   const [jobSourceId, setJobSourceId] = useState<string | null>(null);
@@ -480,7 +439,6 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
 
   const requestBody = useMemo(() => sourceRequest(form), [form]);
   const validationError = useMemo(() => validate(requestBody), [requestBody]);
-  const sourceName = form.sourceType === "channel" ? "채널" : form.sourceType === "keyword" ? "키워드 검색" : "동영상";
   const activeSource = sourceResults?.source ?? sources.find((source) => source.id === activeSourceId);
   const activeJob = job && jobSourceId === activeSourceId ? job : sourceResults?.latestJob;
   const videos = sourceResults?.videos ?? [];
@@ -512,8 +470,6 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
 
   const update = <K extends keyof FormState>(key: K, value: FormState[K]) => {
     setForm((current) => ({ ...current, [key]: value }));
-    setEstimates([]);
-    setEstimateMode(null);
     setError(null);
   };
 
@@ -714,32 +670,11 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     };
   }, [closeCollectionDrawer, closeVideoDrawer, isCollectionOpen, selectedVideo]);
 
-  const loadEstimate = useCallback(async () => {
-    if (validationError) {
-      setError(validationError);
-      return;
-    }
-    setIsEstimating(true);
-    setError(null);
-    setNotice(null);
-    setEstimates(localEstimate(requestBody));
-    setEstimateWarnings([
-      "예상치는 보수적 계산입니다. 실제 예약과 재개 시각은 서버가 관리합니다.",
-    ]);
-    setEstimateMode("local");
-    setIsEstimating(false);
-  }, [requestBody, validationError]);
-
   const launchJob = useCallback(async () => {
     if (validationError) {
       setError(validationError);
       return;
     }
-    if (!estimateMode) {
-      setError("먼저 수집 범위의 quota 예상치를 확인하세요.");
-      return;
-    }
-
     setIsStarting(true);
     setError(null);
     setNotice(null);
@@ -763,7 +698,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     } finally {
       setIsStarting(false);
     }
-  }, [closeCollectionDrawer, estimateMode, requestBody, validationError]);
+  }, [closeCollectionDrawer, requestBody, validationError]);
 
   const navigation = [
     { id: "overview" as const, label: "Overview", href: "/", Icon: HomeIcon },
@@ -1162,11 +1097,11 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
           <div className="drawer-backdrop" aria-hidden="true" onClick={closeCollectionDrawer} />
           <aside ref={collectionDrawerRef} className="collection-drawer" role="dialog" aria-modal="true" aria-labelledby="collection-drawer-title" tabIndex={-1}>
             <div className="drawer-heading">
-              <div><p className="section-kicker">COLLECTION TARGET</p><h2 id="collection-drawer-title">수집 대상 추가</h2><p>같은 대상은 하나로 관리하고, 필요한 범위만 확장합니다.</p></div>
+              <div><p className="section-kicker">COLLECTION TARGET</p><h2 id="collection-drawer-title">수집 대상 추가</h2><p>같은 대상은 하나로 관리하고, 수집 결과를 함께 최신화합니다.</p></div>
               <button className="icon-button" type="button" aria-label="수집 대상 추가 창 닫기" data-drawer-initial-focus onClick={closeCollectionDrawer}><XMarkIcon aria-hidden="true" /></button>
             </div>
 
-            <form className="collection-form" onSubmit={(event) => { event.preventDefault(); void loadEstimate(); }}>
+            <form className="collection-form" onSubmit={(event) => { event.preventDefault(); void launchJob(); }}>
               <fieldset className="source-type-group">
                 <legend>수집 대상</legend>
                 <div>
@@ -1210,31 +1145,15 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
               )}
 
               <section className="drawer-scope" aria-labelledby="scope-title">
-                <div><p className="section-kicker">SCOPE</p><h3 id="scope-title">수집 범위</h3><p>실행 전 예상치를 확인하고, 서버가 실제 한도를 다시 검증합니다.</p></div>
+                <div><p className="section-kicker">SCOPE</p><h3 id="scope-title">수집 범위</h3><p>{form.sourceType === "channel" ? "채널은 현재 공개된 전체 업로드를 수집합니다." : "선택한 대상의 공개 메타데이터를 수집합니다."} quota가 소진되면 1~3시간 간격으로 자동 재시도합니다.</p></div>
                 <div className="scope-controls">
-                  {form.sourceType === "channel" && <label className="drawer-field compact-drawer-field"><span>최대 동영상 수</span><input type="number" min="1" max="5000" value={form.maxVideos} onChange={(event) => update("maxVideos", Number(event.target.value))} /></label>}
-                  <label className="toggle-field"><input type="checkbox" checked={form.includeComments} onChange={(event) => update("includeComments", event.target.checked)} /><span className="toggle-visual" aria-hidden="true" /><span><strong>공개 댓글 수집</strong><small>댓글이 비활성화된 영상은 부분 경고로 남습니다.</small></span></label>
-                  {form.includeComments && <label className="drawer-field compact-drawer-field"><span>동영상당 댓글 페이지</span><input type="number" min="1" max="100" value={form.maxCommentPagesPerVideo} onChange={(event) => update("maxCommentPagesPerVideo", Number(event.target.value))} /></label>}
+                  <label className="toggle-field"><input type="checkbox" checked={form.includeComments} onChange={(event) => update("includeComments", event.target.checked)} /><span className="toggle-visual" aria-hidden="true" /><span><strong>공개 댓글 전체 수집</strong><small>댓글이 비활성화된 영상은 부분 경고로 남습니다.</small></span></label>
                 </div>
               </section>
 
-              {estimates.length > 0 && (
-                <section className="estimate-panel" aria-labelledby="estimate-title">
-                  <div className="estimate-heading"><div><p className="section-kicker">PREFLIGHT</p><h3 id="estimate-title">보수적 예상치</h3></div><InformationCircleIcon aria-hidden="true" /></div>
-                  <div className="estimate-list">
-                    {estimates.map((estimate) => <div key={estimate.bucket}><div><strong>{bucketLabels[estimate.bucket]}</strong><span>{estimate.bucket === "search_queries" ? `${estimate.estimatedCalls} calls 예상` : `${estimate.estimatedUnits} units 예상`}</span></div><strong>{formatCount(estimate.limit)}<small>일일 한도</small></strong></div>)}
-                  </div>
-                  {estimateWarnings.map((warning) => <p className="estimate-note" key={warning}>{warning}</p>)}
-                </section>
-              )}
-
               <div className="drawer-footer-action">
                 <button className="secondary-action" type="button" onClick={closeCollectionDrawer}>취소</button>
-                {estimateMode ? (
-                  <button className="primary-action drawer-start-action" type="button" disabled={isStarting} onClick={() => void launchJob()}>{isStarting ? "요청을 연결하는 중…" : "수집 요청 보내기"}<ChevronRightIcon aria-hidden="true" /></button>
-                ) : (
-                  <button className="primary-action" type="submit" disabled={isEstimating}>{isEstimating ? "예상치 계산 중…" : `${sourceName} 예상치 확인`}<ChevronRightIcon aria-hidden="true" /></button>
-                )}
+                <button className="primary-action drawer-start-action" type="submit" disabled={isStarting}>{isStarting ? "요청을 연결하는 중…" : "수집 요청 보내기"}<ChevronRightIcon aria-hidden="true" /></button>
               </div>
             </form>
           </aside>

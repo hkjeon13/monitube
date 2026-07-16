@@ -19,8 +19,12 @@ export type QuotaBucket = "search_queries" | "core";
 export interface ChannelSourceConfig {
   input: string;
   includeComments: boolean;
-  maxVideos: number;
-  maxCommentPagesPerVideo: number;
+  /** Collect every currently discoverable upload, instead of a numeric cap. */
+  collectAllVideos?: boolean;
+  /** Fetch every available page of public comments for each selected video. */
+  collectAllComments?: boolean;
+  maxVideos?: number;
+  maxCommentPagesPerVideo?: number;
 }
 
 export interface KeywordSourceConfig {
@@ -32,14 +36,16 @@ export interface KeywordSourceConfig {
   order: "date" | "relevance" | "viewCount";
   maxPagesPerRun: number;
   includeComments: boolean;
-  maxCommentPagesPerVideo: number;
+  collectAllComments?: boolean;
+  maxCommentPagesPerVideo?: number;
 }
 
 export interface VideoSourceConfig {
   /** YouTube watch URL, youtu.be URL, or 11-character video ID. */
   input: string;
   includeComments: boolean;
-  maxCommentPagesPerVideo: number;
+  collectAllComments?: boolean;
+  maxCommentPagesPerVideo?: number;
 }
 
 export interface CreateCollectionSourceRequest {

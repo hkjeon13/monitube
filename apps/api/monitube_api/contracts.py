@@ -47,6 +47,10 @@ class VideoResolutionResponse(ApiModel):
 class ChannelSourceConfig(ApiModel):
     input: str = Field(min_length=1, max_length=2_048)
     includeComments: bool = False
+    # New channel requests use the all-content flags.  The numeric fields remain
+    # accepted for older API clients and stored requests.
+    collectAllVideos: bool = False
+    collectAllComments: bool = False
     maxVideos: int = Field(default=50, ge=1, le=5_000)
     maxCommentPagesPerVideo: int = Field(default=1, ge=1, le=100)
 
@@ -60,6 +64,7 @@ class KeywordSourceConfig(ApiModel):
     order: Literal["date", "relevance", "viewCount"] = "date"
     maxPagesPerRun: int = Field(default=1, ge=1, le=100)
     includeComments: bool = False
+    collectAllComments: bool = False
     maxCommentPagesPerVideo: int = Field(default=1, ge=1, le=100)
 
     @model_validator(mode="after")
@@ -74,6 +79,7 @@ class VideoSourceConfig(ApiModel):
 
     input: str = Field(min_length=1, max_length=2_048)
     includeComments: bool = False
+    collectAllComments: bool = False
     maxCommentPagesPerVideo: int = Field(default=1, ge=1, le=100)
 
 

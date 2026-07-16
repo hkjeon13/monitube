@@ -2,7 +2,7 @@ from datetime import timedelta
 
 from monitube_api.domain import JobState, QuotaBucket, SourceType, utcnow
 from monitube_api.repositories import InMemoryRepository
-from monitube_worker.collector import YouTubeCollector
+from monitube_worker.collector import YouTubeCollector, quota_retry_delay_seconds
 from monitube_worker.runner import JobRunner
 from monitube_worker.youtube_data import YouTubeApiError
 
@@ -88,6 +88,7 @@ def test_quota_error_logs_checkpoint_and_due_job_resumes_from_same_cursor() -> N
 
     assert waiting.state is JobState.WAITING_QUOTA
     assert waiting.checkpoint["pageToken"] == "resume-page"
+    assert waiting.checkpoint["quotaRetryAttempt"] == 1
     assert waiting.resume_is_automatic is True
     assert repository._request_logs[-1]["endpoint"] == "search"  # verifies durable-boundary logging in the fallback repository
     assert repository._request_logs[-1]["bucket"] == "search_queries"
@@ -115,6 +116,59 @@ def test_quota_error_logs_checkpoint_and_due_job_resumes_from_same_cursor() -> N
         "maxResults": 50,
         "pageToken": None,
     })
+
+
+def test_quota_retry_delay_is_bounded_between_one_and_three_hours() -> None:
+    assert quota_retry_delay_seconds({}) == 3_600
+    assert quota_retry_delay_seconds({"quotaRetryAttempt": 1}) == 7_200
+    assert quota_retry_delay_seconds({"quotaRetryAttempt": 2}) == 10_800
+    assert quota_retry_delay_seconds({"quotaRetryAttempt": 99}) == 10_800
+
+
+class FullChannelClient:
+    def __init__(self) -> None:
+        self.playlist_calls = 0
+        self.comment_calls = 0
+
+    @staticmethod
+    def bucket_for(_endpoint: str) -> QuotaBucket:
+        return QuotaBucket.CORE
+
+    def request(self, endpoint: str, _params: dict[str, object]):
+        if endpoint == "channels":
+            return {"items": [{"id": "UCabcdefghijklmnopqrstuv", "snippet": {"title": "Example"}, "contentDetails": {"relatedPlaylists": {"uploads": "UUexample"}}}]}
+        if endpoint == "playlistItems":
+            self.playlist_calls += 1
+            video_id = "dQw4w9WgXcQ" if self.playlist_calls == 1 else "M7lc1UVf-VE"
+            return {"items": [{"contentDetails": {"videoId": video_id}}], **({"nextPageToken": "second"} if self.playlist_calls == 1 else {})}
+        if endpoint == "videos":
+            return {"items": []}
+        if endpoint == "commentThreads":
+            self.comment_calls += 1
+            return {"items": [], **({"nextPageToken": "second"} if self.comment_calls == 1 else {})}
+        raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+
+def test_channel_all_content_flags_continue_past_legacy_numeric_limits() -> None:
+    repository = InMemoryRepository()
+    source = repository.create_source(
+        source_type=SourceType.CHANNEL,
+        config={
+            "input": "@example",
+            "includeComments": True,
+            "collectAllVideos": True,
+            "collectAllComments": True,
+            "maxVideos": 1,
+            "maxCommentPagesPerVideo": 1,
+        },
+    )
+    job = repository.create_job(source_id=source.id, include_comments=True, max_videos=1, max_comments_per_video=1)
+    client = FullChannelClient()
+
+    completed = JobRunner(repository, YouTubeCollector(repository, client)).run(job.id)
+
+    assert completed.state is JobState.COMPLETED
+    assert client.playlist_calls == 2
 
 
 def test_expired_running_lease_is_reclaimed_and_active_owner_can_renew() -> None:
