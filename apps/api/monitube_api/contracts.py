@@ -403,6 +403,10 @@ class AuthorCommentResult(ApiModel):
 class CommentDetailResponse(ApiModel):
     comment: CollectedComment
     video: CollectedVideo
+    # Replies belong to the selected comment's thread.  They are intentionally
+    # separate from ``authorComments`` because a reply can be written by any
+    # viewer, not only the selected comment's author.
+    replies: list[CollectedComment] = Field(default_factory=list)
     authorComments: list[AuthorCommentResult] = Field(default_factory=list)
 
 

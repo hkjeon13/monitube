@@ -69,7 +69,7 @@ def test_source_results_and_video_comments_are_queryable() -> None:
     assert comments.json()["comments"][0]["text"] == "Great FastAPI video"
 
 
-def test_comment_detail_includes_other_comments_from_the_same_author() -> None:
+def test_comment_detail_includes_replies_and_other_comments_from_the_same_author() -> None:
     repository = InMemoryRepository()
     client, _, worker_source_id = _subscribed_video_source(repository, "dQw4w9WgXcQ")
     video = repository.upsert_video(
@@ -91,10 +91,41 @@ def test_comment_detail_includes_other_comments_from_the_same_author() -> None:
                 source_fetched_at=datetime(2025, 1, 4, tzinfo=UTC),
             )
         )
+    repository.upsert_comment(
+        CommentRecord(
+            id="row-reply-2", youtube_comment_id="reply-2", youtube_video_id=video.youtube_video_id,
+            youtube_parent_comment_id="comment-1", youtube_thread_id="comment-1", text_display="작성자가 아닌 답글",
+            author_channel_id="UCreplier", author_display_name="답글 작성자", like_count=1,
+            published_at=datetime(2025, 1, 5, tzinfo=UTC), updated_at=None,
+            source_fetched_at=datetime(2025, 1, 5, tzinfo=UTC),
+        )
+    )
+    repository.upsert_comment(
+        CommentRecord(
+            id="row-reply-1", youtube_comment_id="reply-1", youtube_video_id=video.youtube_video_id,
+            youtube_parent_comment_id="comment-1", youtube_thread_id="comment-1", text_display="첫 번째 답글",
+            author_channel_id="UCauthor", author_display_name="작성자", like_count=0,
+            published_at=datetime(2025, 1, 4, 12, tzinfo=UTC), updated_at=None,
+            source_fetched_at=datetime(2025, 1, 4, 12, tzinfo=UTC),
+        )
+    )
+    repository.upsert_comment(
+        CommentRecord(
+            id="row-unrelated-reply", youtube_comment_id="unrelated-reply", youtube_video_id=video.youtube_video_id,
+            youtube_parent_comment_id="comment-2", youtube_thread_id="comment-2", text_display="다른 댓글의 답글",
+            author_channel_id="UCother", author_display_name="다른 답글 작성자", like_count=0,
+            published_at=datetime(2025, 1, 6, tzinfo=UTC), updated_at=None,
+            source_fetched_at=datetime(2025, 1, 6, tzinfo=UTC),
+        )
+    )
     detail = client.get("/v1/comments/comment-1")
 
     assert detail.status_code == 200
     assert detail.json()["comment"]["authorChannelId"] == "UCauthor"
+    assert [reply["id"] for reply in detail.json()["replies"]] == ["reply-1", "reply-2"]
+    assert detail.json()["replies"][0]["parentCommentId"] == "comment-1"
+    # A self-reply is shown only in the dedicated reply thread, not duplicated
+    # among the author's other comments.
     assert [item["comment"]["id"] for item in detail.json()["authorComments"]] == ["comment-2"]
 
 

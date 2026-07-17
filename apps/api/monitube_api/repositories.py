@@ -1237,10 +1237,24 @@ class InMemoryRepository(CollectionRepository):
             video = self._videos.get(comment.youtube_video_id)
             if not video:
                 raise NotFoundError(f"Video '{comment.youtube_video_id}' was not found")
+            replies = [
+                item
+                for item in self._comments.values()
+                if item.youtube_parent_comment_id == comment.youtube_comment_id
+                and (visible_video_ids is None or item.youtube_video_id in visible_video_ids)
+            ]
+            # Render a thread in conversation order.  ``source_fetched_at`` is
+            # a deterministic fallback for older records without a publish date.
+            replies.sort(key=lambda item: (item.published_at or item.source_fetched_at, item.youtube_comment_id))
+            reply_ids = {item.youtube_comment_id for item in replies}
             author_comments = []
             if comment.author_channel_id:
                 for item in self._comments.values():
-                    if item.youtube_comment_id == comment.youtube_comment_id or item.author_channel_id != comment.author_channel_id:
+                    if (
+                        item.youtube_comment_id == comment.youtube_comment_id
+                        or item.youtube_comment_id in reply_ids
+                        or item.author_channel_id != comment.author_channel_id
+                    ):
                         continue
                     if visible_video_ids is not None and item.youtube_video_id not in visible_video_ids:
                         continue
@@ -1249,7 +1263,12 @@ class InMemoryRepository(CollectionRepository):
                         channel = self._channels.get(related_video.youtube_channel_id or "", {})
                         author_comments.append({"comment": item, "video": related_video, "channel_title": channel.get("title")})
             author_comments.sort(key=lambda item: item["comment"].published_at or utcnow(), reverse=True)
-            return {"comment": comment, "video": video, "author_comments": author_comments[:50]}
+            return {
+                "comment": comment,
+                "video": video,
+                "replies": replies,
+                "author_comments": author_comments[:50],
+            }
 
     def existing_comment_ids(self, youtube_comment_ids: Iterable[str]) -> set[str]:
         with self._lock:

@@ -525,6 +525,8 @@ svg { display: block; width: 1.125rem; height: 1.125rem; stroke-width: 1.7; }
 .comment-detail-video strong { overflow: hidden; font-size: 0.8125rem; text-overflow: ellipsis; white-space: nowrap; }
 .comment-detail-video span { overflow: hidden; color: var(--muted); font-family: var(--font-mono); font-size: 0.625rem; text-overflow: ellipsis; white-space: nowrap; }
 .comment-detail-video svg { grid-row: span 2; grid-column: 2; align-self: center; width: 1rem; height: 1rem; color: #849087; }
+.comment-replies { margin-top: 1.75rem; }
+.comment-reply-item strong { display: block; margin: 0 0 0.4375rem; color: #68746c; font-size: 0.6875rem; }
 .comment-author-comments { margin-top: 1.75rem; }
 .comment-author-item { padding: 0; overflow: hidden; }
 .comment-author-item > button { display: block; width: 100%; padding: 0.875rem; color: inherit; background: transparent; text-align: left; }

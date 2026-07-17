@@ -1968,6 +1968,32 @@ class PostgresRepository(CollectionRepository):
                 raise NotFoundError(f"Comment '{comment_id}' was not found")
             comment = self._comment(row)
             video = self._video({**row, "id": row["video_db_id"], "published_at": row.get("video_published_at"), "source_fetched_at": row.get("video_fetched_at")})
+            # ``youtube_parent_comment_id`` is the canonical YouTube relation
+            # for a reply.  Use it instead of relying only on the optional
+            # internal ``parent_id`` link so replies stored before their parent
+            # are still available in the detail view.
+            cursor.execute(
+                """
+                SELECT cm.id::text, cm.youtube_comment_id, v.youtube_video_id, cm.youtube_parent_comment_id,
+                       cm.youtube_thread_id, cm.author_channel_id, cm.author_display_name, cm.text_display,
+                       cm.like_count, cm.published_at, cm.updated_at, cm.source_fetched_at
+                FROM comments cm
+                JOIN videos v ON v.id = cm.video_id
+                WHERE cm.youtube_parent_comment_id = %s
+                  AND (
+                    %s::uuid IS NULL
+                    OR EXISTS (
+                      SELECT 1
+                      FROM collection_target_videos membership
+                      JOIN collection_subscriptions subscription ON subscription.target_id = membership.target_id
+                      WHERE membership.video_id = v.id AND subscription.user_id = %s::uuid
+                    )
+                  )
+                ORDER BY cm.published_at ASC NULLS LAST, cm.source_fetched_at ASC, cm.youtube_comment_id
+                """,
+                (comment.youtube_comment_id, owner_id, owner_id),
+            )
+            replies = [self._comment(reply) for reply in cursor.fetchall()]
             author_comments: list[dict[str, Any]] = []
             if comment.author_channel_id:
                 cursor.execute(
@@ -1983,7 +2009,11 @@ class PostgresRepository(CollectionRepository):
                     JOIN videos v ON v.id = cm.video_id
                     LEFT JOIN channels c ON c.id = v.channel_id
                     LEFT JOIN LATERAL (SELECT view_count, like_count, comment_count FROM video_stat_snapshots WHERE video_id = v.id ORDER BY fetched_at DESC LIMIT 1) stats ON TRUE
-                    WHERE cm.author_channel_id = %s AND cm.youtube_comment_id <> %s
+                    WHERE cm.author_channel_id = %s
+                      AND cm.youtube_comment_id <> %s
+                      -- Direct replies are already rendered in the dedicated
+                      -- reply section above; do not list a self-reply twice.
+                      AND cm.youtube_parent_comment_id IS DISTINCT FROM %s
                       AND (
                         %s::uuid IS NULL
                         OR EXISTS (
@@ -1995,7 +2025,7 @@ class PostgresRepository(CollectionRepository):
                       )
                     ORDER BY cm.published_at DESC NULLS LAST, cm.source_fetched_at DESC
                     LIMIT 50
-                    """, (comment.author_channel_id, comment_id, owner_id, owner_id),
+                    """, (comment.author_channel_id, comment_id, comment_id, owner_id, owner_id),
                 )
                 for related in cursor.fetchall():
                     author_comments.append({
@@ -2003,7 +2033,12 @@ class PostgresRepository(CollectionRepository):
                         "video": self._video({**related, "id": related["video_db_id"], "published_at": related.get("video_published_at"), "source_fetched_at": related.get("video_fetched_at")}),
                         "channel_title": related.get("channel_title"),
                     })
-            return {"comment": comment, "video": video, "author_comments": author_comments}
+            return {
+                "comment": comment,
+                "video": video,
+                "replies": replies,
+                "author_comments": author_comments,
+            }
 
     def set_target_pin(self, *, target_id: str, enabled: bool, interval_minutes: int) -> dict[str, Any]:
         with self._connection() as connection, connection.cursor() as cursor:

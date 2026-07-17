@@ -94,6 +94,7 @@ export interface PagedComments {
 export interface CommentDetailData {
   comment: CollectedComment;
   video: CollectedVideo;
+  replies: CollectedComment[];
   authorComments: Array<{
     comment: CollectedComment;
     video: CollectedVideo;
@@ -682,6 +683,11 @@ export async function getCommentDetail(commentId: string): Promise<CommentDetail
   return {
     comment,
     video,
+    replies: firstArray(record, ["replies", "replyComments", "reply_comments"]).flatMap((item) => {
+      const itemRecord = asRecord(item);
+      const reply = normalizeComment(itemRecord?.comment ?? item);
+      return reply && reply.id !== comment.id ? [reply] : [];
+    }),
     authorComments: firstArray(record, ["authorComments", "author_comments"]).flatMap((item) => {
       const itemRecord = asRecord(item);
       const relatedComment = normalizeComment(itemRecord?.comment);

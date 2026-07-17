@@ -343,6 +343,7 @@ class CollectionService:
         result = self.repository.get_comment_detail(comment_id, owner_id=owner_id)
         return CommentDetailResponse(
             comment=_comment_contract(result["comment"]), video=_video_contract(result["video"]),
+            replies=[_comment_contract(reply) for reply in result.get("replies", [])],
             authorComments=[AuthorCommentResult(
                 comment=_comment_contract(item["comment"]), video=_video_contract(item["video"]),
                 channelTitle=item.get("channel_title"),
