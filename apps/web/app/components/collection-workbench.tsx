@@ -899,6 +899,10 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     { id: "sources" as const, label: "Sources", href: "/sources", Icon: FolderIcon },
     { id: "keywords" as const, label: "Keywords", href: "/keywords", Icon: MagnifyingGlassIcon },
   ];
+  const breadcrumbPage = page === "overview" ? "Channels" : page === "explore" ? "Explore" : page === "sources" ? "Sources" : page === "keywords" ? "Keywords" : page === "jobs" ? "Jobs" : "Insights";
+  const breadcrumbDetail = page === "overview" && selectedExploreChannel
+    ? selectedExploreChannel.title ?? selectedExploreChannel.handle ?? selectedExploreChannel.youtubeChannelId
+    : null;
 
   return (
     <div className={`app-shell page-${page}`}>
@@ -926,6 +930,15 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
       </aside>
 
       <main className="dashboard-main">
+        <nav className="dashboard-breadcrumb" aria-label="현재 위치">
+          <Link href="/" aria-label="Monitube 홈">Monitube</Link>
+          <ChevronRightIcon aria-hidden="true" />
+          {breadcrumbDetail ? <Link href="/channels">{breadcrumbPage}</Link> : <span aria-current="page">{breadcrumbPage}</span>}
+          {breadcrumbDetail && <>
+            <ChevronRightIcon aria-hidden="true" />
+            <span aria-current="page" title={breadcrumbDetail}>{breadcrumbDetail}</span>
+          </>}
+        </nav>
         {page !== "explore" && page !== "sources" && page !== "keywords" && <header className="dashboard-topbar" id="source-selector" tabIndex={-1}>
           <label className="source-select">
             <span className="visually-hidden">수집 대상 선택</span>
