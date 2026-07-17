@@ -29,6 +29,7 @@ from .contracts import (
     JobStateChange,
     JobStatus,
     KeywordCollectionSource,
+    KeywordSourceConfig,
     PartialError,
     SourceResultsResponse,
     UnifiedSearchResponse,
