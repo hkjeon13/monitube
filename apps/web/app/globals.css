@@ -450,7 +450,7 @@ svg { display: block; width: 1.125rem; height: 1.125rem; stroke-width: 1.7; }
 .collection-form { display: grid; gap: 1.4375rem; padding: 1.5625rem 0 1rem; }
 .source-type-group { margin: 0; padding: 0; border: 0; }
 .source-type-group legend { margin-bottom: 0.625rem; color: var(--ink-soft); font-size: 0.75rem; font-weight: 800; }
-.source-type-group > div { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.5rem; }
+.source-type-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.5rem; }
 .source-type-choice { display: flex; min-width: 0; align-items: center; gap: 0.5rem; min-height: 4.0625rem; padding: 0.625rem; border: 0.0625rem solid var(--line); border-radius: 0.625rem; color: #6f766f; background: var(--surface); text-align: left; }
 .source-type-choice:hover { border-color: #d6d0c4; }
 .source-type-choice-active { border-color: #eab292; color: #9b4927; background: var(--orange-soft); box-shadow: inset 0 0 0 0.0625rem #f0c5ac; }
@@ -683,7 +683,7 @@ svg { display: block; width: 1.125rem; height: 1.125rem; stroke-width: 1.7; }
 
 @media (max-width: 26.875rem) {
   .brand-lockup { margin-right: 0.375rem; }
-  .source-type-group > div { grid-template-columns: 1fr; }
+  .source-type-tabs { grid-template-columns: 1fr; }
   .source-type-choice { min-height: 3.0625rem; }
   .drawer-field-grid { grid-template-columns: 1fr; }
   .metric-card-head { gap: 0.375rem; }

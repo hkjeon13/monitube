@@ -108,7 +108,6 @@ const stageLabels: Record<string, string> = {
 const sourceTypeChoices = [
   { type: "channel" as const, label: "채널", detail: "업로드 동영상 기준", Icon: FolderIcon },
   { type: "keyword" as const, label: "키워드", detail: "검색 run별 발견 결과", Icon: MagnifyingGlassIcon },
-  { type: "video" as const, label: "동영상", detail: "URL 또는 ID 직접 선택", Icon: PlayIcon },
 ];
 
 function clampPositive(value: number, fallback: number) {
@@ -976,7 +975,6 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     { id: "explore" as const, label: "Explore", href: "/", Icon: Squares2X2Icon },
     { id: "overview" as const, label: "Channels", href: "/channels", Icon: HomeIcon },
     { id: "sources" as const, label: "Sources", href: "/sources", Icon: FolderIcon },
-    { id: "keywords" as const, label: "Keywords", href: "/keywords", Icon: MagnifyingGlassIcon },
   ];
   const breadcrumbPage = page === "overview" ? "Channels" : page === "explore" ? "Explore" : page === "sources" ? "Sources" : page === "keywords" ? "Keywords" : page === "jobs" ? "Jobs" : "Insights";
   const breadcrumbDetail = page === "overview" && selectedExploreChannel
@@ -1487,14 +1485,15 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
             <form className="collection-form" onSubmit={(event) => { event.preventDefault(); void launchJob(); }}>
               <fieldset className="source-type-group">
                 <legend>수집 대상</legend>
-                <div>
+                <div className="source-type-tabs" role="tablist" aria-label="수집 대상 유형">
                   {sourceTypeChoices.map(({ type, label, detail, Icon }) => (
                     <button
                       key={type}
                       type="button"
                       className={form.sourceType === type ? "source-type-choice source-type-choice-active" : "source-type-choice"}
                       onClick={() => update("sourceType", type)}
-                      aria-pressed={form.sourceType === type}
+                      role="tab"
+                      aria-selected={form.sourceType === type}
                     >
                       <Icon aria-hidden="true" />
                       <span><strong>{label}</strong><small>{detail}</small></span>
@@ -1508,12 +1507,6 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
                   <span>채널 URL, @handle 또는 채널 ID</span>
                   <input value={form.channelInput} onChange={(event) => update("channelInput", event.target.value)} placeholder="예: @GoogleDevelopers" autoComplete="off" />
                   <small>채널 전체 업로드는 업로드 재생목록을 기준으로 수집합니다.</small>
-                </label>
-              ) : form.sourceType === "video" ? (
-                <label className="drawer-field drawer-field-wide">
-                  <span>YouTube 동영상 URL 또는 ID</span>
-                  <input value={form.videoInput} onChange={(event) => update("videoInput", event.target.value)} placeholder="예: https://www.youtube.com/watch?v=..." autoComplete="off" />
-                  <small>youtube.com/watch, youtu.be URL 또는 11자리 동영상 ID를 사용할 수 있습니다.</small>
                 </label>
               ) : (
                 <div className="drawer-field-grid">
