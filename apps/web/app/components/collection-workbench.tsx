@@ -585,6 +585,14 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     () => explore.channels.find((channel) => channel.youtubeChannelId === exploreChannelId) ?? null,
     [explore.channels, exploreChannelId],
   );
+  const sourceRegisteredChannels = useMemo(() => {
+    const targetIds = new Set(
+      sources
+        .filter((source) => source.type === "channel" && source.targetId)
+        .map((source) => source.targetId),
+    );
+    return explore.channels.filter((channel) => channel.targetId && targetIds.has(channel.targetId));
+  }, [explore.channels, sources]);
   const displayedSources = page === "keywords" ? sources.filter((source) => source.type === "keyword") : sources;
   const hasSearchQuery = submittedSearchQuery.length >= 2;
   const pinsByTargetId = useMemo(
@@ -1112,7 +1120,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
 
         <section className="channel-details-page" aria-label="채널 상세">
           <div className="explore-channel-strip" aria-label="수집된 채널">
-            {explore.channels.map((channel) => {
+            {sourceRegisteredChannels.map((channel) => {
               const coverVideo = explore.videos.find((video) => video.channelId === channel.youtubeChannelId);
               const selected = channel.youtubeChannelId === exploreChannelId;
               const avatarUrl = channel.thumbnailUrl ?? (coverVideo ? youtubeThumbnail(coverVideo.youtubeVideoId) : undefined);
