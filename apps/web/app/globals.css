@@ -292,6 +292,9 @@ svg { display: block; width: 1.125rem; height: 1.125rem; stroke-width: 1.7; }
 .kpi-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.9375rem; }
 .metric-card { min-height: 9.4375rem; padding: 1.125rem 1.1875rem; border: 0.0625rem solid var(--line); border-radius: 0.9375rem; background: var(--surface); box-shadow: 0 0.375rem 1.25rem rgba(43, 39, 29, 0.025); }
 .metric-card-accent { border-color: #f4d3c3; background: #fff8f3; }
+.metric-card-failure { border-color: #edc2be; background: #fff8f7; }
+.metric-card-failure > strong { color: var(--danger); }
+.metric-card-failure > small { display: -webkit-box; overflow: hidden; color: #9b4a45; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .metric-card-head { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; color: var(--muted); font-size: 0.6875rem; font-weight: 800; }
 .metric-icon { display: grid; width: 1.6875rem; height: 1.6875rem; place-items: center; border-radius: 0.5625rem; color: var(--orange); background: var(--orange-soft); }
 .metric-card:nth-child(2) .metric-icon { color: var(--moss); background: var(--moss-soft); }

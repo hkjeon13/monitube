@@ -428,21 +428,31 @@ function SourceCollectionState({ source }: { source: SourceSummary }) {
   );
 }
 
+function jobFailureReason(job?: JobStatus | null) {
+  if (!job || job.state !== "failed") return null;
+  return job.pauseReason
+    ?? job.partialErrors.find((error) => error.message)?.message
+    ?? job.partialErrors[0]?.code
+    ?? "실패 사유가 기록되지 않았습니다.";
+}
+
 function MetricCard({
   label,
   value,
   detail,
   icon,
   accent = false,
+  failure = false,
 }: {
   label: string;
   value: string;
   detail: string;
   icon: ReactNode;
   accent?: boolean;
+  failure?: boolean;
 }) {
   return (
-    <article className={accent ? "metric-card metric-card-accent" : "metric-card"}>
+    <article className={`${accent ? "metric-card metric-card-accent" : "metric-card"}${failure ? " metric-card-failure" : ""}`}>
       <div className="metric-card-head">
         <span>{label}</span>
         <span className="metric-icon" aria-hidden="true">{icon}</span>
@@ -519,6 +529,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   const progressPercent = activeJob?.progress.total
     ? Math.min(100, Math.round((activeJob.progress.completed / activeJob.progress.total) * 100))
     : 0;
+  const failureReason = jobFailureReason(activeJob);
   const exploreVideos = useMemo(() => {
     const scoped = exploreChannelId ? explore.videos.filter((video) => video.channelId === exploreChannelId) : explore.videos;
     return [...scoped].sort((left, right) => new Date(right.publishedAt ?? right.fetchedAt ?? 0).getTime() - new Date(left.publishedAt ?? left.fetchedAt ?? 0).getTime());
@@ -1146,10 +1157,11 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
               />
               <MetricCard
                 label="수집 상태"
-                value={activeJob?.progress.total ? `${progressPercent}%` : activeJob ? statusCopy(activeJob) : "대기"}
-                detail={activeJob ? stageLabels[activeJob.currentStage] ?? activeJob.currentStage : "아직 실행 기록 없음"}
+                value={failureReason ? "실패" : activeJob?.progress.total ? `${progressPercent}%` : activeJob ? statusCopy(activeJob) : "대기"}
+                detail={failureReason ? `실패 사유: ${failureReason}` : activeJob ? stageLabels[activeJob.currentStage] ?? activeJob.currentStage : "아직 실행 기록 없음"}
                 icon={<QueueListIcon />}
                 accent={Boolean(activeJob && !isTerminalJob(activeJob))}
+                failure={Boolean(failureReason)}
               />
             </section>
 
