@@ -70,6 +70,7 @@ class YouTubeCollector:
     def _checkpoint(self, job: JobRecord, *, stage: str, scope_key: str, page_token: str | None, batch_cursor: int = 0) -> None:
         quota_retry_attempt = as_int(self._active_checkpoint.get("quotaRetryAttempt"))
         phase_progress = self._active_checkpoint.get("phaseProgress")
+        keyword_expected_total = as_int(self._active_checkpoint.get("keywordExpectedTotal"))
         self._active_checkpoint = {
             "stage": stage,
             "scopeKey": scope_key,
@@ -80,6 +81,8 @@ class YouTubeCollector:
             self._active_checkpoint["phaseProgress"] = phase_progress
         if quota_retry_attempt:
             self._active_checkpoint["quotaRetryAttempt"] = quota_retry_attempt
+        if keyword_expected_total:
+            self._active_checkpoint["keywordExpectedTotal"] = keyword_expected_total
         self.repository.checkpoint_job(job.id, self._active_checkpoint)
 
     def _set_phase_progress(
@@ -290,6 +293,8 @@ class YouTubeCollector:
         # A bare page cursor cannot reproduce previous search result IDs safely.
         page_token: str | None = None
         page = 0
+        expected_total = as_int(job.checkpoint.get("keywordExpectedTotal"))
+        stored_total = self.repository.count_source_videos(job.source_id)
         while True:
             page += 1
             payload = self._call(
@@ -306,6 +311,10 @@ class YouTubeCollector:
                 maxResults=50,
                 pageToken=page_token,
             )
+            response_total = as_int((payload.get("pageInfo") or {}).get("totalResults"))
+            if response_total:
+                expected_total = max(expected_total, response_total)
+                self._active_checkpoint["keywordExpectedTotal"] = expected_total
             page_ids: list[str] = []
             for item in payload.get("items", []):
                 video_id = (item.get("id") or {}).get("videoId")
@@ -315,8 +324,17 @@ class YouTubeCollector:
                     ids.append(video_id)
             page_token = payload.get("nextPageToken")
             self._checkpoint(job, stage="keyword_search", scope_key=str(source_config["query"]), page_token=page_token, batch_cursor=page)
+            # A successful but empty page is the provider's natural end of the
+            # result set. Errors take the exception/retry path instead.
+            if not page_ids:
+                break
             known_on_page = self.repository.source_video_ids(job.source_id, page_ids)
-            if source_config.get("order", "date") == "date" and page_ids and len(known_on_page) == len(page_ids):
+            if (
+                source_config.get("order", "date") == "date"
+                and page_ids
+                and len(known_on_page) == len(page_ids)
+                and stored_total >= expected_total
+            ):
                 break
             if not page_token:
                 break

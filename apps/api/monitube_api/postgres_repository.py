@@ -1241,6 +1241,11 @@ class PostgresRepository(CollectionRepository):
             )
             return {str(row["youtube_video_id"]) for row in cursor.fetchall()}
 
+    def count_source_videos(self, source_id: str) -> int:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT count(*)::integer AS video_count FROM source_videos WHERE source_id = %s", (source_id,))
+            return int(cursor.fetchone()["video_count"])
+
     def upsert_comment(self, comment: CommentRecord) -> CommentRecord:
         comment = replace(
             comment,

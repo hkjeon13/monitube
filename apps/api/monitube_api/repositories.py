@@ -126,6 +126,8 @@ class CollectionRepository(SourceRepository, JobRepository, CollectionRequestRep
 
     def source_video_ids(self, source_id: str, youtube_video_ids: Iterable[str]) -> set[str]: ...
 
+    def count_source_videos(self, source_id: str) -> int: ...
+
     def upsert_comment(self, comment: CommentRecord) -> CommentRecord: ...
 
     def existing_comment_ids(self, youtube_comment_ids: Iterable[str]) -> set[str]: ...
@@ -846,6 +848,10 @@ class InMemoryRepository(CollectionRepository):
     def source_video_ids(self, source_id: str, youtube_video_ids: Iterable[str]) -> set[str]:
         with self._lock:
             return set(youtube_video_ids).intersection(self._source_videos.get(source_id, set()))
+
+    def count_source_videos(self, source_id: str) -> int:
+        with self._lock:
+            return len(self._source_videos.get(source_id, set()))
 
     def upsert_comment(self, comment: CommentRecord) -> CommentRecord:
         with self._lock:
