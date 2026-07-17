@@ -922,7 +922,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
       </aside>
 
       <main className="dashboard-main">
-        {page !== "explore" && <header className="dashboard-topbar" id="source-selector" tabIndex={-1}>
+        {page !== "explore" && page !== "sources" && <header className="dashboard-topbar" id="source-selector" tabIndex={-1}>
           <label className="source-select">
             <span className="visually-hidden">수집 대상 선택</span>
             <FolderIcon aria-hidden="true" />
@@ -970,14 +970,19 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
 
         <section className="sources-page" aria-labelledby="sources-page-title">
           <div className="workspace-page-heading"><p className="section-kicker">COLLECTION TARGETS</p><h1 id="sources-page-title">Sources</h1><p>중복 없이 정규화된 수집 대상을 관리하고, 선택한 대상의 수집 범위를 확인합니다.</p></div>
+          <div className="sources-page-actions">
+            <button className="source-add-button" type="button" onClick={openCollectionDrawer} aria-label="수집 대상 추가">
+              <PlusIcon aria-hidden="true" />
+            </button>
+          </div>
           <div className="sources-table-wrap">
           <div className="sources-page-list" aria-label="수집 대상 목록">
             <div className="source-table-header">
               <span>구분</span>
               <span>수집 대상</span>
-              <span>식별값</span>
               <span>수집 상태</span>
-              <span>채널 영상</span>
+              <span>영상 수집률</span>
+              <span>댓글 수집률</span>
               <span className="source-table-actions-header">관리</span>
             </div>
             {sources.map((source) => {
@@ -988,16 +993,26 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
               const targetValue = sourceTargetValue(source);
               const channelName = channel?.title ?? channel?.handle ?? (source.type === "channel" ? "채널 정보 확인 중" : targetValue);
               const channelId = channel?.youtubeChannelId ?? targetValue;
-              const channelVideoCount = channel ? formatCount(channel.youtubeVideoCount ?? channel.videoCount) : "—";
+              const collectedVideoCount = channel?.videoCount;
+              const totalVideoCount = channel?.youtubeVideoCount;
+              const videoCollectionRate = collectedVideoCount !== undefined && totalVideoCount !== undefined && totalVideoCount > 0
+                ? Math.min(100, Math.round((collectedVideoCount / totalVideoCount) * 100))
+                : undefined;
+              const channelVideos = channel ? explore.videos.filter((video) => video.channelId === channel.youtubeChannelId) : [];
+              const collectedCommentCount = channel?.commentCount;
+              const totalCommentCount = channelVideos.reduce((total, video) => total + (video.commentCount ?? 0), 0);
+              const commentCollectionRate = collectedCommentCount !== undefined && totalCommentCount > 0
+                ? Math.min(100, Math.round((collectedCommentCount / totalCommentCount) * 100))
+                : undefined;
               return (
                 <article key={source.id} className={`source-page-card${source.id === activeSourceId ? " source-page-card-active" : ""}${menuOpen ? " source-page-card-menu-open" : ""}`}>
                   <button type="button" className="source-page-select" onClick={() => { setOpenSourceMenuId(null); openSourceWorkspace(source.id); }} aria-label={`${sourceLabel(source)} 작업 공간 열기`}>
                     <span className="source-type-chip">{sourceTypeCopy(source.type)}</span>
-                    <strong>{channelName}</strong>
-                    <small title={channelId}>{channelId}</small>
+                    <strong title={channelId}>{channelName}</strong>
                   </button>
                   <SourceCollectionState source={source} />
-                  <span className="source-channel-video-count">{channelVideoCount}</span>
+                  <span className="source-collection-rate source-video-collection-rate">{videoCollectionRate === undefined ? "—" : `${videoCollectionRate}%`}</span>
+                  <span className="source-collection-rate source-comment-collection-rate">{commentCollectionRate === undefined ? "—" : `${commentCollectionRate}%`}</span>
                   <div className="source-card-actions">
                     <button className="source-more-button" type="button" disabled={deletingSourceId === source.id} onClick={() => setOpenSourceMenuId((current) => current === source.id ? null : source.id)} aria-label={`${sourceLabel(source)} 관리 메뉴`} aria-expanded={menuOpen} aria-haspopup="menu"><EllipsisHorizontalIcon aria-hidden="true" /></button>
                     {menuOpen && <div className="source-action-menu" role="menu" aria-label={`${sourceLabel(source)} 관리`}>
