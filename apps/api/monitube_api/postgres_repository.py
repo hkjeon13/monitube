@@ -1613,12 +1613,15 @@ class PostgresRepository(CollectionRepository):
         a database-specific fuzzy-search extension.
         """
 
-        normalized_query = normalize_search_text(query)
-        first_character = normalized_query[0] if normalized_query else query[0]
-        last_character = normalized_query[-1] if normalized_query else query[-1]
-        exact_pattern = f"%{query}%"
-        first_pattern = f"%{first_character}%"
-        last_pattern = f"%{last_character}%"
+        terms = query.split()
+
+        def escaped_pattern(value: str) -> str:
+            return "%" + value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+        exact_patterns = [escaped_pattern(term) for term in terms]
+        normalized_terms = [normalize_search_text(term) for term in terms]
+        first_patterns = [escaped_pattern(term[0]) for term in normalized_terms if term]
+        last_patterns = [escaped_pattern(term[-1]) for term in normalized_terms if term]
         candidate_limit = 5_000
 
         with self._connection() as connection, connection.cursor() as cursor:
@@ -1634,16 +1637,16 @@ class PostgresRepository(CollectionRepository):
                   SELECT view_count, like_count, comment_count FROM video_stat_snapshots
                   WHERE video_id = v.id ORDER BY fetched_at DESC LIMIT 1
                 ) stats ON TRUE
-                WHERE concat_ws(' ', v.title, v.description, c.title, c.handle) ILIKE %s
+                WHERE concat_ws(' ', v.title, v.description, c.title, c.handle) ILIKE ANY(%s)
                    OR (
-                     concat_ws(' ', v.title, v.description, c.title, c.handle) ILIKE %s
-                     AND concat_ws(' ', v.title, v.description, c.title, c.handle) ILIKE %s
+                     concat_ws(' ', v.title, v.description, c.title, c.handle) ILIKE ANY(%s)
+                     AND concat_ws(' ', v.title, v.description, c.title, c.handle) ILIKE ANY(%s)
                    )
-                ORDER BY CASE WHEN concat_ws(' ', v.title, v.description, c.title, c.handle) ILIKE %s THEN 0 ELSE 1 END,
+                ORDER BY CASE WHEN concat_ws(' ', v.title, v.description, c.title, c.handle) ILIKE ANY(%s) THEN 0 ELSE 1 END,
                          v.source_fetched_at DESC NULLS LAST
                 LIMIT %s
                 """,
-                (exact_pattern, first_pattern, last_pattern, exact_pattern, candidate_limit),
+                (exact_patterns, first_patterns, last_patterns, exact_patterns, candidate_limit),
             )
             video_results: list[dict[str, Any]] = []
             for row in cursor.fetchall():
@@ -1671,16 +1674,16 @@ class PostgresRepository(CollectionRepository):
                   SELECT view_count, like_count, comment_count FROM video_stat_snapshots
                   WHERE video_id = v.id ORDER BY fetched_at DESC LIMIT 1
                 ) stats ON TRUE
-                WHERE cm.text_display ILIKE %s
+                WHERE cm.text_display ILIKE ANY(%s)
                    OR (
-                     cm.text_display ILIKE %s
-                     AND cm.text_display ILIKE %s
+                     cm.text_display ILIKE ANY(%s)
+                     AND cm.text_display ILIKE ANY(%s)
                    )
-                ORDER BY CASE WHEN cm.text_display ILIKE %s THEN 0 ELSE 1 END,
+                ORDER BY CASE WHEN cm.text_display ILIKE ANY(%s) THEN 0 ELSE 1 END,
                          cm.source_fetched_at DESC NULLS LAST
                 LIMIT %s
                 """,
-                (exact_pattern, first_pattern, last_pattern, exact_pattern, candidate_limit),
+                (exact_patterns, first_patterns, last_patterns, exact_patterns, candidate_limit),
             )
             comment_results: list[dict[str, Any]] = []
             for row in cursor.fetchall():

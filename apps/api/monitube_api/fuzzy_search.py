@@ -94,8 +94,24 @@ def text_similarity(query: str, value: str | None) -> float:
 
 
 def rank_text_fields(query: str, fields: Mapping[str, str | None], *, threshold: float = 0.79) -> tuple[float, list[str]]:
-    """Return an aggregate score and all fields whose similarity meets tolerance."""
+    """Return an OR search score, with results covering every term ranked first."""
 
-    scores = {field: text_similarity(query, value) for field, value in fields.items()}
-    matched = [field for field, score in scores.items() if score >= threshold]
-    return (max(scores.values(), default=0.0), matched)
+    terms = re.findall(r"\S+", query) or [query]
+    best_by_term = [0.0] * len(terms)
+    matched: list[str] = []
+    for field, value in fields.items():
+        scores = [text_similarity(term, value) for term in terms]
+        for index, score in enumerate(scores):
+            best_by_term[index] = max(best_by_term[index], score)
+        if any(score >= threshold for score in scores):
+            matched.append(field)
+
+    matched_terms = [score for score in best_by_term if score >= threshold]
+    if not matched_terms:
+        return (0.0, [])
+
+    # A result containing all terms scores above one with only a subset, while
+    # retaining the fuzzy score for ordering among results with equal coverage.
+    coverage = len(matched_terms) / len(terms)
+    score = (sum(best_by_term) / len(terms)) * 0.55 + coverage * 0.45
+    return (score, matched)
