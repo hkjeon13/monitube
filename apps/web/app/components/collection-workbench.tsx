@@ -540,7 +540,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   };
 
   const openSourceWorkspace = useCallback((sourceId: string) => {
-    router.push(`/?source=${encodeURIComponent(sourceId)}`);
+    router.push(`/channels?source=${encodeURIComponent(sourceId)}`);
   }, [router]);
 
   const refreshSources = useCallback(async () => {
