@@ -17,7 +17,12 @@ except ImportError:  # pragma: no cover
     dict_row = None  # type: ignore[assignment]
 
 
-SESSION_DAYS = 14
+SESSION_DAYS = 90
+SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * SESSION_DAYS
+# Renew only once per month at most. The browser cookie itself is re-issued on
+# authenticated requests, so active users retain the session without creating
+# a database write for every API call.
+SESSION_REFRESH_WINDOW_DAYS = 30
 PBKDF2_ITERATIONS = 310_000
 
 
@@ -95,6 +100,21 @@ class AuthStore:
             )
             row = cursor.fetchone()
             return AuthUser(id=str(row["id"]), username=str(row["username"])) if row else None
+
+    def refresh_session(self, token: str | None) -> None:
+        """Extend an active session when it is within its renewal window."""
+        if not token:
+            return
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """UPDATE app_sessions
+                   SET expires_at = now() + (%s * interval '1 day')
+                   WHERE token_hash = %s
+                     AND expires_at > now()
+                     AND expires_at < now() + (%s * interval '1 day')""",
+                (SESSION_DAYS, token_hash, SESSION_REFRESH_WINDOW_DAYS),
+            )
 
     def revoke_session(self, token: str | None) -> None:
         if not token:

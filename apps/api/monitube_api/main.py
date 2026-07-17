@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from .channel_resolution import ChannelInputError
-from .auth import AuthStore, AuthUser
+from .auth import AuthStore, AuthUser, SESSION_MAX_AGE_SECONDS
 from .contracts import (
     AuthUserResponse,
     ChannelResolutionRequest,
@@ -51,7 +51,19 @@ def get_service(request: Request) -> CollectionService:
 Service = Annotated[CollectionService, Depends(get_service)]
 
 
-def get_current_user(request: Request) -> AuthUser:
+def set_session_cookie(response: Response, token: str, settings: Settings) -> None:
+    response.set_cookie(
+        "monitube_session",
+        token,
+        max_age=SESSION_MAX_AGE_SECONDS,
+        httponly=True,
+        samesite="lax",
+        secure=settings.environment != "development",
+        path="/",
+    )
+
+
+def get_current_user(request: Request, response: Response) -> AuthUser:
     """Require a browser session in PostgreSQL deployments.
 
     The in-memory repository remains open for the existing unit-test harness.
@@ -59,9 +71,12 @@ def get_current_user(request: Request) -> AuthUser:
     auth_store: AuthStore | None = request.app.state.auth_store
     if auth_store is None:
         return AuthUser(id="in-memory", username="psyche")
-    user = auth_store.user_for_session(request.cookies.get("monitube_session"))
+    token = request.cookies.get("monitube_session")
+    user = auth_store.user_for_session(token)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="로그인이 필요합니다.")
+    auth_store.refresh_session(token)
+    set_session_cookie(response, token, request.app.state.settings)
     return user
 
 
@@ -156,7 +171,7 @@ def create_app(repository: CollectionRepository | None = None, settings: Setting
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="이미 사용 중인 아이디입니다.") from exc
             raise
         token = app.state.auth_store.create_session(user.id)
-        response.set_cookie("monitube_session", token, max_age=60 * 60 * 24 * 14, httponly=True, samesite="lax", secure=configured_settings.environment != "development", path="/")
+        set_session_cookie(response, token, configured_settings)
         return AuthUserResponse(username=user.username)
 
     @auth_router.post("/login", response_model=AuthUserResponse)
@@ -167,7 +182,7 @@ def create_app(repository: CollectionRepository | None = None, settings: Setting
         if not user:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="아이디 또는 비밀번호가 올바르지 않습니다.")
         token = app.state.auth_store.create_session(user.id)
-        response.set_cookie("monitube_session", token, max_age=60 * 60 * 24 * 14, httponly=True, samesite="lax", secure=configured_settings.environment != "development", path="/")
+        set_session_cookie(response, token, configured_settings)
         return AuthUserResponse(username=user.username)
 
     @auth_router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
