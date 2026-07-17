@@ -641,7 +641,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     setPinningTargetId(targetId);
     try {
       await updateTargetPin(targetId, { enabled: !pinned, intervalMinutes: 360 });
-      await refreshExplore(exploreChannelId);
+      await refreshExplore();
       setNotice(pinned ? "자동 갱신을 멈췄습니다. 저장된 데이터는 유지됩니다." : "핀을 설정했습니다. 6시간마다 신규 영상과 댓글을 확인합니다.");
     } catch (caught) {
       setExploreError(caught instanceof Error ? caught.message : "핀 상태를 변경하지 못했습니다.");
@@ -661,7 +661,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
         setActiveSourceId("");
         setSourceResults(null);
       }
-      await Promise.all([refreshSources(), refreshExplore(exploreChannelId)]);
+      await Promise.all([refreshSources(), refreshExplore()]);
       setNotice("수집 대상과 자동 갱신을 삭제했습니다. 저장된 공개 데이터는 유지됩니다.");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "수집 대상을 삭제하지 못했습니다.");
@@ -739,8 +739,16 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   }, [requestedSourceId, sources]);
 
   useEffect(() => {
-    void refreshExplore(exploreChannelId);
-  }, [exploreChannelId, refreshExplore]);
+    void refreshExplore();
+  }, [refreshExplore]);
+
+  useEffect(() => {
+    if (!activeSource?.targetId) return;
+    const activeChannel = explore.channels.find((channel) => channel.targetId === activeSource.targetId);
+    if (activeChannel && activeChannel.youtubeChannelId !== exploreChannelId) {
+      setExploreChannelId(activeChannel.youtubeChannelId);
+    }
+  }, [activeSource?.targetId, explore.channels, exploreChannelId]);
 
   useEffect(() => {
     if (!exploreChannelId) {
@@ -788,7 +796,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
         setJob(nextJob);
         setJobSourceId(sourceId);
         await refreshResults(sourceId);
-        if (isTerminalJob(nextJob)) void refreshExplore(exploreChannelId);
+        if (isTerminalJob(nextJob)) void refreshExplore();
       } catch {
         // Keep the last valid state visible through a transient polling failure.
       }
