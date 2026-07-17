@@ -745,12 +745,12 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   }, [refreshExplore]);
 
   useEffect(() => {
-    if (!activeSource?.targetId) return;
+    if (page !== "overview" || !activeSource?.targetId) return;
     const activeChannel = explore.channels.find((channel) => channel.targetId === activeSource.targetId);
     if (activeChannel && activeChannel.youtubeChannelId !== exploreChannelId) {
       setExploreChannelId(activeChannel.youtubeChannelId);
     }
-  }, [activeSource?.targetId, explore.channels, exploreChannelId]);
+  }, [activeSource?.targetId, explore.channels, exploreChannelId, page]);
 
   useEffect(() => {
     if (!exploreChannelId) {
@@ -1106,7 +1106,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
                   const selected = channel.youtubeChannelId === exploreChannelId;
                   const avatarUrl = channel.thumbnailUrl ?? (coverVideo ? youtubeThumbnail(coverVideo.youtubeVideoId) : undefined);
                   return (
-                    <button className={selected ? "explore-channel-avatar-button explore-channel-avatar-button-selected" : "explore-channel-avatar-button"} type="button" key={channel.youtubeChannelId} onClick={() => { setExploreChannelId((current) => current === channel.youtubeChannelId ? null : channel.youtubeChannelId); setExploreVisibleCount(12); }} aria-pressed={selected} aria-label={`${channel.title ?? channel.handle ?? channel.youtubeChannelId} 채널 개요 보기`} title={channel.title ?? channel.handle ?? channel.youtubeChannelId}>
+                    <button className={selected ? "explore-channel-avatar-button explore-channel-avatar-button-selected" : "explore-channel-avatar-button"} type="button" key={channel.youtubeChannelId} onClick={() => { const nextChannelId = selected ? null : channel.youtubeChannelId; setExploreChannelId(nextChannelId); setExploreVisibleCount(12); void refreshExplore(nextChannelId); }} aria-pressed={selected} aria-label={`${channel.title ?? channel.handle ?? channel.youtubeChannelId} 채널 개요 보기`} title={channel.title ?? channel.handle ?? channel.youtubeChannelId}>
                       {avatarUrl ? <img src={avatarUrl} alt="" /> : <span className="explore-avatar">{(channel.title ?? channel.handle ?? "Y").slice(0, 1).toUpperCase()}</span>}
                     </button>
                   );
