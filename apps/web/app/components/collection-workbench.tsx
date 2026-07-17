@@ -1156,7 +1156,6 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
             />
             <button className="explore-search-submit" type="submit" aria-label="검색" disabled={searchQuery.trim().length < 2 || isSearchLoading}><MagnifyingGlassIcon aria-hidden="true" /></button>
           </form>
-          {hasSearchQuery && <p className="explore-search-hint">Jaro–Winkler 유사도 검색으로 오타와 붙여쓴 검색어도 함께 찾습니다.</p>}
           {searchError && <p className="inline-error" role="status">{searchError}</p>}
           {isExploreLoading && explore.channels.length === 0 ? <p className="explore-loading">수집 라이브러리를 불러오는 중입니다…</p> : (
             hasSearchQuery ? (
