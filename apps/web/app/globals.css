@@ -601,7 +601,7 @@ svg { display: block; width: 1.125rem; height: 1.125rem; stroke-width: 1.7; }
   .workspace-page-heading > p:last-child { margin-top: 0.625rem; font-size: 0.75rem; line-height: 1.48; }
   .sources-table-wrap { overflow-x: visible; }
   .sources-page-list { min-width: 0; grid-template-columns: 1fr; gap: 0; }
-  .sources-page-actions { margin: -2.875rem 0 1rem; }
+  .sources-page-actions { margin: 0 0 1rem; }
   .source-add-button { width: var(--touch-target); height: var(--touch-target); }
   .source-table-header,
   .source-page-card { grid-template-columns: 2.5rem minmax(0, 1fr) 3.25rem 3.25rem 3.25rem 2.25rem; column-gap: 0.25rem; }
