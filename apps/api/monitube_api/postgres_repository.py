@@ -1654,12 +1654,12 @@ class PostgresRepository(CollectionRepository):
                   SELECT view_count, like_count, comment_count FROM video_stat_snapshots
                   WHERE video_id = v.id ORDER BY fetched_at DESC LIMIT 1
                 ) stats ON TRUE
-                WHERE concat_ws(' ', cm.text_display, v.title, v.description, c.title, c.handle) ILIKE %s
+                WHERE cm.text_display ILIKE %s
                    OR (
-                     concat_ws(' ', cm.text_display, v.title, v.description, c.title, c.handle) ILIKE %s
-                     AND concat_ws(' ', cm.text_display, v.title, v.description, c.title, c.handle) ILIKE %s
+                     cm.text_display ILIKE %s
+                     AND cm.text_display ILIKE %s
                    )
-                ORDER BY CASE WHEN concat_ws(' ', cm.text_display, v.title, v.description, c.title, c.handle) ILIKE %s THEN 0 ELSE 1 END,
+                ORDER BY CASE WHEN cm.text_display ILIKE %s THEN 0 ELSE 1 END,
                          cm.source_fetched_at DESC NULLS LAST
                 LIMIT %s
                 """,
@@ -1667,10 +1667,7 @@ class PostgresRepository(CollectionRepository):
             )
             comment_results: list[dict[str, Any]] = []
             for row in cursor.fetchall():
-                score, matched_fields = rank_text_fields(query, {
-                    "comment": row.get("text_display"), "videoTitle": row.get("title"),
-                    "channel": row.get("channel_title"), "handle": row.get("channel_handle"),
-                })
+                score, matched_fields = rank_text_fields(query, {"comment": row.get("text_display")})
                 if not matched_fields:
                     continue
                 comment = self._comment({

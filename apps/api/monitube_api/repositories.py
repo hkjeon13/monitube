@@ -989,12 +989,7 @@ class InMemoryRepository(CollectionRepository):
                 if not video:
                     continue
                 channel = self._channels.get(video.youtube_channel_id or "", {})
-                score, matched_fields = rank_text_fields(query, {
-                    "comment": comment.text_display,
-                    "videoTitle": video.title,
-                    "channel": channel.get("title"),
-                    "handle": channel.get("handle"),
-                })
+                score, matched_fields = rank_text_fields(query, {"comment": comment.text_display})
                 if matched_fields:
                     comment_results.append({
                         "comment": comment, "video": video, "channel_title": channel.get("title"),
