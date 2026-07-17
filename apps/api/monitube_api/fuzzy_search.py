@@ -94,9 +94,17 @@ def text_similarity(query: str, value: str | None) -> float:
 
 
 def rank_text_fields(query: str, fields: Mapping[str, str | None], *, threshold: float = 0.79) -> tuple[float, list[str]]:
-    """Return an OR search score, with results covering every term ranked first."""
+    """Return an AND search score, requiring every whitespace-separated term."""
 
     terms = re.findall(r"\S+", query) or [query]
+    if len(terms) > 1:
+        normalized_values = [normalize_search_text(value) for value in fields.values() if value]
+        if not all(
+            normalized_term and any(normalized_term in normalized_value for normalized_value in normalized_values)
+            for normalized_term in (normalize_search_text(term) for term in terms)
+        ):
+            return (0.0, [])
+
     best_by_term = [0.0] * len(terms)
     matched: list[str] = []
     for field, value in fields.items():
@@ -106,12 +114,8 @@ def rank_text_fields(query: str, fields: Mapping[str, str | None], *, threshold:
         if any(score >= threshold for score in scores):
             matched.append(field)
 
-    matched_terms = [score for score in best_by_term if score >= threshold]
-    if not matched_terms:
+    if any(score < threshold for score in best_by_term):
         return (0.0, [])
 
-    # A result containing all terms scores above one with only a subset, while
-    # retaining the fuzzy score for ordering among results with equal coverage.
-    coverage = len(matched_terms) / len(terms)
-    score = (sum(best_by_term) / len(terms)) * 0.55 + coverage * 0.45
+    score = sum(best_by_term) / len(terms)
     return (score, matched)

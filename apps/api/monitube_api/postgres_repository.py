@@ -1637,12 +1637,12 @@ class PostgresRepository(CollectionRepository):
                   SELECT view_count, like_count, comment_count FROM video_stat_snapshots
                   WHERE video_id = v.id ORDER BY fetched_at DESC LIMIT 1
                 ) stats ON TRUE
-                WHERE concat_ws(' ', v.title, v.description, c.title, c.handle) ILIKE ANY(%s)
+                WHERE concat_ws(' ', v.title, v.description, c.title, c.handle) ILIKE ALL(%s)
                    OR (
-                     concat_ws(' ', v.title, v.description, c.title, c.handle) ILIKE ANY(%s)
-                     AND concat_ws(' ', v.title, v.description, c.title, c.handle) ILIKE ANY(%s)
+                     concat_ws(' ', v.title, v.description, c.title, c.handle) ILIKE ALL(%s)
+                     AND concat_ws(' ', v.title, v.description, c.title, c.handle) ILIKE ALL(%s)
                    )
-                ORDER BY CASE WHEN concat_ws(' ', v.title, v.description, c.title, c.handle) ILIKE ANY(%s) THEN 0 ELSE 1 END,
+                ORDER BY CASE WHEN concat_ws(' ', v.title, v.description, c.title, c.handle) ILIKE ALL(%s) THEN 0 ELSE 1 END,
                          v.source_fetched_at DESC NULLS LAST
                 LIMIT %s
                 """,
@@ -1674,12 +1674,12 @@ class PostgresRepository(CollectionRepository):
                   SELECT view_count, like_count, comment_count FROM video_stat_snapshots
                   WHERE video_id = v.id ORDER BY fetched_at DESC LIMIT 1
                 ) stats ON TRUE
-                WHERE cm.text_display ILIKE ANY(%s)
+                WHERE cm.text_display ILIKE ALL(%s)
                    OR (
-                     cm.text_display ILIKE ANY(%s)
-                     AND cm.text_display ILIKE ANY(%s)
+                     cm.text_display ILIKE ALL(%s)
+                     AND cm.text_display ILIKE ALL(%s)
                    )
-                ORDER BY CASE WHEN cm.text_display ILIKE ANY(%s) THEN 0 ELSE 1 END,
+                ORDER BY CASE WHEN cm.text_display ILIKE ALL(%s) THEN 0 ELSE 1 END,
                          cm.source_fetched_at DESC NULLS LAST
                 LIMIT %s
                 """,
