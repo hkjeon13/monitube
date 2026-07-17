@@ -216,7 +216,6 @@ function sourceRequest(form: FormState): CreateCollectionSourceRequest {
       ? { relevanceLanguage: form.relevanceLanguage.trim().toLowerCase() }
       : {}),
     order: form.order,
-    maxPagesPerRun: 100,
     includeComments: form.includeComments,
     collectAllComments: form.includeComments,
   };
@@ -286,8 +285,7 @@ function sourceCoverage(source?: SourceSummary) {
     return `영상 최대 ${formatCount(videos)}개 · ${comments ? `댓글 ${formatCount(commentPages)}페이지` : "댓글 미수집"}`;
   }
   if (source.type === "keyword") {
-    const pages = clampPositive(Number(coverage.maxPagesPerRun ?? coverage.requestedMaxPagesPerRun ?? config.maxPagesPerRun), 1);
-    return `검색 ${formatCount(pages)}페이지 · ${comments ? (coverage.collectAllComments === true || config.collectAllComments === true ? "전체 공개 댓글" : `댓글 ${formatCount(commentPages)}페이지`) : "댓글 미수집"}`;
+    return `검색 결과 전체 · ${comments ? (coverage.collectAllComments === true || config.collectAllComments === true ? "전체 공개 댓글" : `댓글 ${formatCount(commentPages)}페이지`) : "댓글 미수집"}`;
   }
   return comments
     ? (coverage.collectAllComments === true || config.collectAllComments === true ? "전체 공개 댓글" : `공개 댓글 ${formatCount(commentPages)}페이지`)
@@ -315,7 +313,7 @@ function normalizedSourceIdentity(source: SourceSummary) {
 function sourceCoverageScore(source: SourceSummary) {
   const config = source.config;
   const maxVideos = config.collectAllVideos === true ? Number.MAX_SAFE_INTEGER : clampPositive(Number(config.maxVideos), 1);
-  const maxPages = clampPositive(Number(config.maxPagesPerRun), 1);
+  const maxPages = source.type === "keyword" ? Number.MAX_SAFE_INTEGER : clampPositive(Number(config.maxPagesPerRun), 1);
   const commentPages = config.includeComments === true
     ? config.collectAllComments === true ? Number.MAX_SAFE_INTEGER : clampPositive(Number(config.maxCommentPagesPerVideo), 1)
     : 0;

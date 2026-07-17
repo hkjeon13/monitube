@@ -34,7 +34,8 @@ export interface KeywordSourceConfig {
   regionCode?: string;
   relevanceLanguage?: string;
   order: "date" | "relevance" | "viewCount";
-  maxPagesPerRun: number;
+  /** Legacy compatibility only; keyword collection continues until pagination ends. */
+  maxPagesPerRun?: number;
   includeComments: boolean;
   collectAllComments?: boolean;
   maxCommentPagesPerVideo?: number;

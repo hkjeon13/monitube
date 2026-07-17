@@ -29,7 +29,6 @@ from .contracts import (
     JobStateChange,
     JobStatus,
     KeywordCollectionSource,
-    KeywordSourceConfig,
     PartialError,
     SourceResultsResponse,
     UnifiedSearchResponse,
@@ -167,10 +166,6 @@ class CollectionService:
             return config.model_copy(update={"input": resolve_video_input(config.input).normalized})
         if source_type is SourceType.CHANNEL:
             return config.model_copy(update={"input": resolve_channel_input(config.input).normalized})
-        # Keyword collection is an all-pages operation in the console. Keeping
-        # the limit server-side prevents partial collection from a stale client.
-        if isinstance(config, KeywordSourceConfig):
-            return config.model_copy(update={"maxPagesPerRun": 100})
         return config
 
     @staticmethod

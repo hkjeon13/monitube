@@ -284,13 +284,14 @@ class YouTubeCollector:
         return ids, known_videos, backfill_required
 
     def _keyword_video_ids(self, job: JobRecord, source_config: Mapping[str, Any]) -> list[str]:
-        max_pages = as_int(source_config.get("maxPagesPerRun")) or 1
         ids: list[str] = []
         # A fully known page is an incremental boundary only for latest-first
         # results: every following page is older and has already been collected.
         # A bare page cursor cannot reproduce previous search result IDs safely.
         page_token: str | None = None
-        for page in range(1, max_pages + 1):
+        page = 0
+        while True:
+            page += 1
             payload = self._call(
                 job,
                 "search",
