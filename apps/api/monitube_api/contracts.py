@@ -349,6 +349,8 @@ class CollectedComment(ApiModel):
     publishedAt: datetime | None = None
     updatedAt: datetime | None = None
     fetchedAt: datetime
+    authorChannelId: str | None = None
+    authorName: str | None = None
 
 
 class TopWord(ApiModel):
@@ -383,6 +385,18 @@ class VideoCommentsResponse(ApiModel):
     video: CollectedVideo
     comments: list[CollectedComment] = Field(default_factory=list)
     summary: CommentSummary = Field(default_factory=CommentSummary)
+
+
+class AuthorCommentResult(ApiModel):
+    comment: CollectedComment
+    video: CollectedVideo
+    channelTitle: str | None = None
+
+
+class CommentDetailResponse(ApiModel):
+    comment: CollectedComment
+    video: CollectedVideo
+    authorComments: list[AuthorCommentResult] = Field(default_factory=list)
 
 
 class JobStateChange(ApiModel):

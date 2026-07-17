@@ -13,6 +13,8 @@ from .contracts import (
     AnalysisSummary,
     CollectedComment,
     CollectedVideo,
+    AuthorCommentResult,
+    CommentDetailResponse,
     CommentSummary,
     CollectionSource,
     CollectionSourceCreate,
@@ -126,6 +128,8 @@ def _comment_contract(record: CommentRecord) -> CollectedComment:
         publishedAt=record.published_at,
         updatedAt=record.updated_at,
         fetchedAt=record.source_fetched_at,
+        authorChannelId=record.author_channel_id,
+        authorName=record.author_display_name,
     )
 
 
@@ -312,6 +316,16 @@ class CollectionService:
             video=_video_contract(result["video"]),
             comments=[_comment_contract(comment) for comment in result["comments"]],
             summary=_comment_summary(result["summary"]),
+        )
+
+    def get_comment_detail(self, comment_id: str) -> CommentDetailResponse:
+        result = self.repository.get_comment_detail(comment_id)
+        return CommentDetailResponse(
+            comment=_comment_contract(result["comment"]), video=_video_contract(result["video"]),
+            authorComments=[AuthorCommentResult(
+                comment=_comment_contract(item["comment"]), video=_video_contract(item["video"]),
+                channelTitle=item.get("channel_title"),
+            ) for item in result["author_comments"]],
         )
 
     @staticmethod

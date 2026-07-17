@@ -142,6 +142,8 @@ class CollectionRepository(SourceRepository, JobRepository, CollectionRequestRep
 
     def get_video_comments(self, video_id: str) -> dict[str, Any]: ...
 
+    def get_comment_detail(self, comment_id: str) -> dict[str, Any]: ...
+
 
 _ALLOWED_TRANSITIONS: dict[JobState, frozenset[JobState]] = {
     JobState.QUEUED: frozenset({JobState.RUNNING, JobState.WAITING_RETRY, JobState.WAITING_QUOTA, JobState.CANCELLED}),
@@ -859,6 +861,26 @@ class InMemoryRepository(CollectionRepository):
             stored = replace(comment, id=current.id) if current else comment
             self._comments[comment.youtube_comment_id] = stored
             return stored
+
+    def get_comment_detail(self, comment_id: str) -> dict[str, Any]:
+        with self._lock:
+            comment = self._comments.get(comment_id)
+            if not comment:
+                raise NotFoundError(f"Comment '{comment_id}' was not found")
+            video = self._videos.get(comment.youtube_video_id)
+            if not video:
+                raise NotFoundError(f"Video '{comment.youtube_video_id}' was not found")
+            author_comments = []
+            if comment.author_channel_id:
+                for item in self._comments.values():
+                    if item.youtube_comment_id == comment.youtube_comment_id or item.author_channel_id != comment.author_channel_id:
+                        continue
+                    related_video = self._videos.get(item.youtube_video_id)
+                    if related_video:
+                        channel = self._channels.get(related_video.youtube_channel_id or "", {})
+                        author_comments.append({"comment": item, "video": related_video, "channel_title": channel.get("title")})
+            author_comments.sort(key=lambda item: item["comment"].published_at or utcnow(), reverse=True)
+            return {"comment": comment, "video": video, "author_comments": author_comments[:50]}
 
     def existing_comment_ids(self, youtube_comment_ids: Iterable[str]) -> set[str]:
         with self._lock:

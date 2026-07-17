@@ -197,6 +197,8 @@ class PostgresRepository(CollectionRepository):
             youtube_parent_comment_id=row.get("youtube_parent_comment_id"),
             youtube_thread_id=row.get("youtube_thread_id"),
             text_display=row.get("text_display"),
+            author_channel_id=row.get("author_channel_id"),
+            author_display_name=row.get("author_display_name"),
             like_count=int(row.get("like_count") or 0),
             published_at=row.get("published_at"),
             updated_at=row.get("updated_at"),
@@ -1269,12 +1271,13 @@ class PostgresRepository(CollectionRepository):
                 """
                 INSERT INTO comments (
                   youtube_comment_id, video_id, parent_id, youtube_parent_comment_id, youtube_thread_id,
-                  text_display, text_original, like_count, published_at, updated_at, source_fetched_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                  author_channel_id, author_display_name, text_display, text_original, like_count, published_at, updated_at, source_fetched_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (youtube_comment_id) DO UPDATE SET
                   parent_id = EXCLUDED.parent_id, youtube_parent_comment_id = EXCLUDED.youtube_parent_comment_id,
                   youtube_thread_id = EXCLUDED.youtube_thread_id, text_display = EXCLUDED.text_display,
-                  text_original = EXCLUDED.text_original, like_count = EXCLUDED.like_count,
+                  text_original = EXCLUDED.text_original, author_channel_id = EXCLUDED.author_channel_id,
+                  author_display_name = EXCLUDED.author_display_name, like_count = EXCLUDED.like_count,
                   published_at = EXCLUDED.published_at, updated_at = EXCLUDED.updated_at,
                   source_fetched_at = EXCLUDED.source_fetched_at
                 RETURNING id::text
@@ -1285,6 +1288,8 @@ class PostgresRepository(CollectionRepository):
                     parent_id,
                     comment.youtube_parent_comment_id,
                     comment.youtube_thread_id,
+                    comment.author_channel_id,
+                    comment.author_display_name,
                     comment.text_display,
                     comment.text_display,
                     comment.like_count,
@@ -1384,7 +1389,7 @@ class PostgresRepository(CollectionRepository):
         cursor.execute(
             """
             SELECT cm.id::text, cm.youtube_comment_id, v.youtube_video_id, cm.youtube_parent_comment_id,
-                   cm.youtube_thread_id, cm.text_display, cm.like_count, cm.published_at, cm.updated_at, cm.source_fetched_at
+                   cm.youtube_thread_id, cm.author_channel_id, cm.author_display_name, cm.text_display, cm.like_count, cm.published_at, cm.updated_at, cm.source_fetched_at
             FROM comments cm JOIN videos v ON v.id = cm.video_id
             WHERE v.youtube_video_id = ANY(%s)
             ORDER BY cm.published_at DESC NULLS LAST, cm.youtube_comment_id
@@ -1448,6 +1453,57 @@ class PostgresRepository(CollectionRepository):
             video = self._video(row)
             comments = self._comments(cursor, [video.youtube_video_id])
             return {"video": video, "comments": comments, "summary": build_summary([video], comments)}
+
+    def get_comment_detail(self, comment_id: str) -> dict[str, Any]:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT cm.id::text, cm.youtube_comment_id, cm.youtube_parent_comment_id, cm.youtube_thread_id,
+                       cm.author_channel_id, cm.author_display_name, cm.text_display, cm.like_count,
+                       cm.published_at, cm.updated_at, cm.source_fetched_at,
+                       v.id::text AS video_db_id, v.youtube_video_id, c.youtube_channel_id, c.title AS channel_title, v.title, v.description,
+                       v.published_at AS video_published_at, v.duration_seconds, v.privacy_status, v.made_for_kids,
+                       v.source_fetched_at AS video_fetched_at,
+                       jsonb_build_object('viewCount', COALESCE(stats.view_count, 0), 'likeCount', COALESCE(stats.like_count, 0), 'commentCount', COALESCE(stats.comment_count, 0)) AS statistics
+                FROM comments cm
+                JOIN videos v ON v.id = cm.video_id
+                LEFT JOIN channels c ON c.id = v.channel_id
+                LEFT JOIN LATERAL (SELECT view_count, like_count, comment_count FROM video_stat_snapshots WHERE video_id = v.id ORDER BY fetched_at DESC LIMIT 1) stats ON TRUE
+                WHERE cm.youtube_comment_id = %s
+                """, (comment_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                raise NotFoundError(f"Comment '{comment_id}' was not found")
+            comment = self._comment(row)
+            video = self._video({**row, "id": row["video_db_id"], "published_at": row.get("video_published_at"), "source_fetched_at": row.get("video_fetched_at")})
+            author_comments: list[dict[str, Any]] = []
+            if comment.author_channel_id:
+                cursor.execute(
+                    """
+                    SELECT cm.id::text, cm.youtube_comment_id, cm.youtube_parent_comment_id, cm.youtube_thread_id,
+                           cm.author_channel_id, cm.author_display_name, cm.text_display, cm.like_count,
+                           cm.published_at, cm.updated_at, cm.source_fetched_at,
+                           v.id::text AS video_db_id, v.youtube_video_id, c.youtube_channel_id, c.title AS channel_title, v.title, v.description,
+                           v.published_at AS video_published_at, v.duration_seconds, v.privacy_status, v.made_for_kids,
+                           v.source_fetched_at AS video_fetched_at,
+                           jsonb_build_object('viewCount', COALESCE(stats.view_count, 0), 'likeCount', COALESCE(stats.like_count, 0), 'commentCount', COALESCE(stats.comment_count, 0)) AS statistics
+                    FROM comments cm
+                    JOIN videos v ON v.id = cm.video_id
+                    LEFT JOIN channels c ON c.id = v.channel_id
+                    LEFT JOIN LATERAL (SELECT view_count, like_count, comment_count FROM video_stat_snapshots WHERE video_id = v.id ORDER BY fetched_at DESC LIMIT 1) stats ON TRUE
+                    WHERE cm.author_channel_id = %s AND cm.youtube_comment_id <> %s
+                    ORDER BY cm.published_at DESC NULLS LAST, cm.source_fetched_at DESC
+                    LIMIT 50
+                    """, (comment.author_channel_id, comment_id),
+                )
+                for related in cursor.fetchall():
+                    author_comments.append({
+                        "comment": self._comment(related),
+                        "video": self._video({**related, "id": related["video_db_id"], "published_at": related.get("video_published_at"), "source_fetched_at": related.get("video_fetched_at")}),
+                        "channel_title": related.get("channel_title"),
+                    })
+            return {"comment": comment, "video": video, "author_comments": author_comments}
 
     def set_target_pin(self, *, target_id: str, enabled: bool, interval_minutes: int) -> dict[str, Any]:
         with self._connection() as connection, connection.cursor() as cursor:
@@ -1660,7 +1716,7 @@ class PostgresRepository(CollectionRepository):
             cursor.execute(
                 """
                 SELECT cm.id::text AS comment_id, cm.youtube_comment_id, cm.youtube_parent_comment_id,
-                       cm.youtube_thread_id, cm.text_display, cm.like_count, cm.published_at AS comment_published_at,
+                       cm.youtube_thread_id, cm.author_channel_id, cm.author_display_name, cm.text_display, cm.like_count, cm.published_at AS comment_published_at,
                        cm.updated_at AS comment_updated_at, cm.source_fetched_at AS comment_fetched_at,
                        v.id::text AS video_db_id, v.youtube_video_id, c.youtube_channel_id,
                        c.title AS channel_title, c.handle AS channel_handle, v.title, v.description,
@@ -1693,7 +1749,8 @@ class PostgresRepository(CollectionRepository):
                 comment = self._comment({
                     "id": row["comment_id"], "youtube_comment_id": row["youtube_comment_id"],
                     "youtube_video_id": row["youtube_video_id"], "youtube_parent_comment_id": row.get("youtube_parent_comment_id"),
-                    "youtube_thread_id": row.get("youtube_thread_id"), "text_display": row.get("text_display"),
+                    "youtube_thread_id": row.get("youtube_thread_id"), "author_channel_id": row.get("author_channel_id"),
+                    "author_display_name": row.get("author_display_name"), "text_display": row.get("text_display"),
                     "like_count": row.get("like_count"), "published_at": row.get("comment_published_at"),
                     "updated_at": row.get("comment_updated_at"), "source_fetched_at": row.get("comment_fetched_at"),
                 })

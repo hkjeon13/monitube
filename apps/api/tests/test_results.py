@@ -57,6 +57,35 @@ def test_source_results_and_video_comments_are_queryable() -> None:
     assert comments.json()["comments"][0]["text"] == "Great FastAPI video"
 
 
+def test_comment_detail_includes_other_comments_from_the_same_author() -> None:
+    repository = InMemoryRepository()
+    video = repository.upsert_video(
+        VideoRecord(
+            id="video-row", youtube_video_id="dQw4w9WgXcQ", youtube_channel_id="UCabcdefghijklmnopqrstuv",
+            title="A video", description="Example", published_at=datetime(2025, 1, 2, tzinfo=UTC),
+            duration_seconds=42, privacy_status="public", made_for_kids=False, statistics={},
+            source_fetched_at=datetime(2025, 1, 3, tzinfo=UTC),
+        )
+    )
+    for comment_id, text in (("comment-1", "첫 댓글"), ("comment-2", "다른 댓글")):
+        repository.upsert_comment(
+            CommentRecord(
+                id=f"row-{comment_id}", youtube_comment_id=comment_id, youtube_video_id=video.youtube_video_id,
+                youtube_parent_comment_id=None, youtube_thread_id=comment_id, text_display=text,
+                author_channel_id="UCauthor", author_display_name="작성자", like_count=0,
+                published_at=datetime(2025, 1, 4, tzinfo=UTC), updated_at=None,
+                source_fetched_at=datetime(2025, 1, 4, tzinfo=UTC),
+            )
+        )
+    client = TestClient(create_app(repository=repository))
+
+    detail = client.get("/v1/comments/comment-1")
+
+    assert detail.status_code == 200
+    assert detail.json()["comment"]["authorChannelId"] == "UCauthor"
+    assert [item["comment"]["id"] for item in detail.json()["authorComments"]] == ["comment-2"]
+
+
 def test_unified_search_finds_titles_and_tolerates_a_comment_typo() -> None:
     repository = InMemoryRepository()
     channel_id = "UCabcdefghijklmnopqrstuv"

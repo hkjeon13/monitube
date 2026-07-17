@@ -178,3 +178,5 @@ class CommentRecord:
     published_at: datetime | None
     updated_at: datetime | None
     source_fetched_at: datetime
+    author_channel_id: str | None = None
+    author_display_name: str | None = None

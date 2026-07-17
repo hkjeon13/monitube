@@ -398,6 +398,7 @@ class YouTubeCollector:
 
     def _comment_from_item(self, *, video_id: str, thread_id: str, item: Mapping[str, Any], parent_id: str | None = None) -> CommentRecord:
         snippet = item.get("snippet") or {}
+        author_channel = snippet.get("authorChannelId") or {}
         return CommentRecord(
             id=new_id(),
             youtube_comment_id=str(item["id"]),
@@ -409,6 +410,8 @@ class YouTubeCollector:
             published_at=parse_rfc3339(snippet.get("publishedAt")),
             updated_at=parse_rfc3339(snippet.get("updatedAt")),
             source_fetched_at=utcnow(),
+            author_channel_id=author_channel.get("value") if isinstance(author_channel, Mapping) else None,
+            author_display_name=snippet.get("authorDisplayName"),
         )
 
     def _collect_comments(

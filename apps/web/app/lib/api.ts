@@ -83,11 +83,22 @@ export interface CollectedComment {
   publishedAt?: string;
   likeCount?: number;
   authorName?: string;
+  authorChannelId?: string;
 }
 
 export interface PagedComments {
   comments: CollectedComment[];
   nextCursor?: string;
+}
+
+export interface CommentDetailData {
+  comment: CollectedComment;
+  video: CollectedVideo;
+  authorComments: Array<{
+    comment: CollectedComment;
+    video: CollectedVideo;
+    channelTitle?: string;
+  }>;
 }
 
 export interface TargetPin {
@@ -415,6 +426,9 @@ function normalizeComment(value: unknown): CollectedComment | null {
     ...(asText(record.authorName ?? record.author_name ?? record.authorDisplayName ?? record.author_display_name)
       ? { authorName: asText(record.authorName ?? record.author_name ?? record.authorDisplayName ?? record.author_display_name) }
       : {}),
+    ...(asText(record.authorChannelId ?? record.author_channel_id ?? asRecord(record.authorChannelId ?? record.author_channel_id)?.value)
+      ? { authorChannelId: asText(record.authorChannelId ?? record.author_channel_id ?? asRecord(record.authorChannelId ?? record.author_channel_id)?.value) }
+      : {}),
   };
 }
 
@@ -635,6 +649,27 @@ export async function getVideoComments(videoId: string, cursor?: string): Promis
       return normalized ? [normalized] : [];
     }),
     ...(nextCursor ? { nextCursor } : {}),
+  };
+}
+
+export async function getCommentDetail(commentId: string): Promise<CommentDetailData> {
+  const response = await request<unknown>(`/v1/comments/${encodeURIComponent(commentId)}`, { method: "GET" });
+  const record = asRecord(response) ?? {};
+  const comment = normalizeComment(record.comment);
+  const video = normalizeVideo(record.video);
+  if (!comment || !video) throw new ApiError("댓글 상세 정보를 해석하지 못했습니다.", 500);
+
+  return {
+    comment,
+    video,
+    authorComments: firstArray(record, ["authorComments", "author_comments"]).flatMap((item) => {
+      const itemRecord = asRecord(item);
+      const relatedComment = normalizeComment(itemRecord?.comment);
+      const relatedVideo = normalizeVideo(itemRecord?.video);
+      if (!relatedComment || !relatedVideo) return [];
+      const channelTitle = asText(itemRecord?.channelTitle ?? itemRecord?.channel_title);
+      return [{ comment: relatedComment, video: relatedVideo, ...(channelTitle ? { channelTitle } : {}) }];
+    }),
   };
 }
 

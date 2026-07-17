@@ -35,6 +35,7 @@ from .contracts import (
     TargetPin,
     TargetPinUpdate,
     VideoCommentsResponse,
+    CommentDetailResponse,
     VideoResolutionRequest,
     VideoResolutionResponse,
 )
@@ -329,6 +330,12 @@ def create_app(repository: CollectionRepository | None = None, settings: Setting
         if not owns_collection_data(user):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Video was not found")
         return service.get_video_comments(video_id)
+
+    @router.get("/comments/{comment_id}", response_model=CommentDetailResponse, tags=["results"])
+    def get_comment_detail(comment_id: str, service: Service, user: User) -> CommentDetailResponse:
+        if not owns_collection_data(user):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Comment was not found")
+        return service.get_comment_detail(comment_id)
 
     app.include_router(auth_router)
     app.include_router(router)
