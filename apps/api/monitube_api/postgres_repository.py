@@ -1228,6 +1228,19 @@ class PostgresRepository(CollectionRepository):
                 (youtube_video_id, source_id),
             )
 
+    def source_video_ids(self, source_id: str, youtube_video_ids: Iterable[str]) -> set[str]:
+        ids = list(dict.fromkeys(youtube_video_ids))
+        if not ids:
+            return set()
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT video.youtube_video_id FROM source_videos source_video
+                   JOIN videos video ON video.id = source_video.video_id
+                   WHERE source_video.source_id = %s AND video.youtube_video_id = ANY(%s)""",
+                (source_id, ids),
+            )
+            return {str(row["youtube_video_id"]) for row in cursor.fetchall()}
+
     def upsert_comment(self, comment: CommentRecord) -> CommentRecord:
         comment = replace(
             comment,

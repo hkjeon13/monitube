@@ -124,6 +124,8 @@ class CollectionRepository(SourceRepository, JobRepository, CollectionRequestRep
 
     def link_source_video(self, source_id: str, youtube_video_id: str) -> None: ...
 
+    def source_video_ids(self, source_id: str, youtube_video_ids: Iterable[str]) -> set[str]: ...
+
     def upsert_comment(self, comment: CommentRecord) -> CommentRecord: ...
 
     def existing_comment_ids(self, youtube_comment_ids: Iterable[str]) -> set[str]: ...
@@ -840,6 +842,10 @@ class InMemoryRepository(CollectionRepository):
             self._source_videos.setdefault(source_id, set()).add(youtube_video_id)
             if source.target_id:
                 self._target_videos.setdefault(source.target_id, set()).add(youtube_video_id)
+
+    def source_video_ids(self, source_id: str, youtube_video_ids: Iterable[str]) -> set[str]:
+        with self._lock:
+            return set(youtube_video_ids).intersection(self._source_videos.get(source_id, set()))
 
     def upsert_comment(self, comment: CommentRecord) -> CommentRecord:
         with self._lock:
