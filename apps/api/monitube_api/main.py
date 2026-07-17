@@ -12,7 +12,9 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from .channel_resolution import ChannelInputError
+from .auth import AuthStore, AuthUser
 from .contracts import (
+    AuthUserResponse,
     ChannelResolutionRequest,
     ChannelResolutionResponse,
     ChannelSubscriberSnapshot,
@@ -23,6 +25,7 @@ from .contracts import (
     CollectionRequestResponse,
     ExploreResponse,
     HealthResponse,
+    LoginRequest,
     RuntimeKeyRegistration,
     RuntimeKeyRegistrationResponse,
     JobCreate,
@@ -48,6 +51,23 @@ def get_service(request: Request) -> CollectionService:
 Service = Annotated[CollectionService, Depends(get_service)]
 
 
+def get_current_user(request: Request) -> AuthUser:
+    """Require a browser session in PostgreSQL deployments.
+
+    The in-memory repository remains open for the existing unit-test harness.
+    """
+    auth_store: AuthStore | None = request.app.state.auth_store
+    if auth_store is None:
+        return AuthUser(id="in-memory", username="psyche")
+    user = auth_store.user_for_session(request.cookies.get("monitube_session"))
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="로그인이 필요합니다.")
+    return user
+
+
+User = Annotated[AuthUser, Depends(get_current_user)]
+
+
 def create_app(repository: CollectionRepository | None = None, settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="Monitube API", version="0.1.0")
     configured_settings = settings or Settings.from_environment()
@@ -56,8 +76,10 @@ def create_app(repository: CollectionRepository | None = None, settings: Setting
     else:
         runtime_config_id = None
     app.state.collection_service = CollectionService(repository, runtime_config_id=runtime_config_id)
+    app.state.repository = repository
     app.state.runtime_config_id = runtime_config_id
     app.state.settings = configured_settings
+    app.state.auth_store = AuthStore(configured_settings.database_url) if configured_settings.database_url else None
     cors_origins = [
         origin.strip()
         for origin in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
@@ -66,7 +88,7 @@ def create_app(repository: CollectionRepository | None = None, settings: Setting
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins,
-        allow_credentials=False,
+        allow_credentials=True,
         allow_methods=["GET", "POST", "PATCH", "DELETE"],
         allow_headers=["Content-Type", "Accept", "Idempotency-Key"],
     )
@@ -117,7 +139,55 @@ def create_app(repository: CollectionRepository | None = None, settings: Setting
         )
         return RuntimeKeyRegistrationResponse(accepted=len(payload.apiKeys))
 
-    router = APIRouter(prefix="/v1")
+    auth_router = APIRouter(prefix="/v1/auth", tags=["auth"])
+
+    @auth_router.get("/me", response_model=AuthUserResponse)
+    def current_user(user: User) -> AuthUserResponse:
+        return AuthUserResponse(username=user.username)
+
+    @auth_router.post("/register", response_model=AuthUserResponse, status_code=status.HTTP_201_CREATED)
+    def register(payload: LoginRequest, response: Response) -> AuthUserResponse:
+        if app.state.auth_store is None:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="계정 저장소를 사용할 수 없습니다.")
+        try:
+            user = app.state.auth_store.register(payload.username, payload.password)
+        except Exception as exc:
+            if "unique" in str(exc).lower():
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="이미 사용 중인 아이디입니다.") from exc
+            raise
+        token = app.state.auth_store.create_session(user.id)
+        response.set_cookie("monitube_session", token, max_age=60 * 60 * 24 * 14, httponly=True, samesite="lax", secure=configured_settings.environment != "development", path="/")
+        return AuthUserResponse(username=user.username)
+
+    @auth_router.post("/login", response_model=AuthUserResponse)
+    def login(payload: LoginRequest, response: Response) -> AuthUserResponse:
+        if app.state.auth_store is None:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="계정 저장소를 사용할 수 없습니다.")
+        user = app.state.auth_store.authenticate(payload.username, payload.password)
+        if not user:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="아이디 또는 비밀번호가 올바르지 않습니다.")
+        token = app.state.auth_store.create_session(user.id)
+        response.set_cookie("monitube_session", token, max_age=60 * 60 * 24 * 14, httponly=True, samesite="lax", secure=configured_settings.environment != "development", path="/")
+        return AuthUserResponse(username=user.username)
+
+    @auth_router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+    def logout(request: Request, response: Response) -> Response:
+        if app.state.auth_store is not None:
+            app.state.auth_store.revoke_session(request.cookies.get("monitube_session"))
+        response.delete_cookie("monitube_session", path="/")
+        response.status_code = status.HTTP_204_NO_CONTENT
+        return response
+
+    router = APIRouter(prefix="/v1", dependencies=[Depends(get_current_user)])
+
+    def require_source_owner(source_id: str, user: AuthUser) -> None:
+        owns_source = getattr(repository, "source_owned_by", None)
+        if owns_source and not owns_source(source_id=source_id, owner_id=user.id):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source was not found")
+
+    def owns_collection_data(user: AuthUser) -> bool:
+        has_sources = getattr(repository, "owner_has_sources", None)
+        return bool(has_sources(owner_id=user.id)) if has_sources else True
 
     @router.post("/channel-resolutions", response_model=ChannelResolutionResponse, tags=["channels"])
     def resolve_channel(payload: ChannelResolutionRequest, service: Service) -> ChannelResolutionResponse:
@@ -136,8 +206,8 @@ def create_app(repository: CollectionRepository | None = None, settings: Setting
         status_code=status.HTTP_201_CREATED,
         tags=["sources"],
     )
-    def create_source(payload: CollectionSourceCreate, service: Service) -> CollectionSource:
-        return service.create_source(payload)
+    def create_source(payload: CollectionSourceCreate, service: Service, user: User) -> CollectionSource:
+        return service.create_source(payload, owner_id=user.id)
 
     @router.post(
         "/collection-requests",
@@ -148,33 +218,45 @@ def create_app(repository: CollectionRepository | None = None, settings: Setting
     def submit_collection_request(
         payload: CollectionRequestCreate,
         service: Service,
-        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", max_length=255),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", max_length=255), user: User = None,
     ) -> CollectionRequestResponse:
         """Create or join a shared target collection job in one atomic command."""
 
-        return service.submit_collection_request(payload, idempotency_key=idempotency_key)
+        submission = service.submit_collection_request(payload, idempotency_key=idempotency_key)
+        assign_owner = getattr(repository, "assign_source_owner", None)
+        if assign_owner:
+            assign_owner(source_id=submission.source.id, owner_id=user.id)
+        return submission
 
     @router.get("/sources", response_model=list[CollectionSource], tags=["sources"])
-    def list_sources(service: Service) -> list[CollectionSource]:
-        return service.list_sources()
+    def list_sources(service: Service, user: User) -> list[CollectionSource]:
+        return service.list_sources(owner_id=user.id)
 
     @router.get("/explore", response_model=ExploreResponse, tags=["explore"])
     def explore(
-        service: Service,
+        service: Service, user: User,
         channel_id: str | None = Query(default=None, alias="channelId", min_length=1, max_length=64),
     ) -> ExploreResponse:
+        if not owns_collection_data(user):
+            # Explore is populated by source results. An account that has not
+            # claimed or collected any source has no data to render yet.
+            return ExploreResponse(channels=[], videos=[])
         return service.explore(channel_id=channel_id)
 
     @router.get("/channels/{youtube_channel_id}/subscriber-history", response_model=list[ChannelSubscriberSnapshot], tags=["explore"])
-    def channel_subscriber_history(youtube_channel_id: str, service: Service) -> list[ChannelSubscriberSnapshot]:
+    def channel_subscriber_history(youtube_channel_id: str, service: Service, user: User) -> list[ChannelSubscriberSnapshot]:
+        if not owns_collection_data(user):
+            return []
         return service.channel_subscriber_history(youtube_channel_id)
 
     @router.get("/search", response_model=UnifiedSearchResponse, tags=["search"])
     def search_collected(
         service: Service,
         q: str = Query(min_length=2, max_length=200),
-        limit: int = Query(default=20, ge=1, le=50),
+        limit: int = Query(default=20, ge=1, le=50), user: User = None,
     ) -> UnifiedSearchResponse:
+        if not owns_collection_data(user):
+            return UnifiedSearchResponse(query=q, videos=[], comments=[])
         return service.search_collected(q, limit=limit)
 
     @router.put("/collection-targets/{target_id}/pin", response_model=TargetPin, tags=["pins"])
@@ -186,23 +268,28 @@ def create_app(repository: CollectionRepository | None = None, settings: Setting
         return service.get_target_pin(target_id)
 
     @router.get("/sources/{source_id}", response_model=CollectionSource, tags=["sources"])
-    def get_source(source_id: str, service: Service) -> CollectionSource:
+    def get_source(source_id: str, service: Service, user: User) -> CollectionSource:
+        require_source_owner(source_id, user)
         return service.get_source(source_id)
 
     @router.get("/sources/{source_id}/results", response_model=SourceResultsResponse, tags=["results"])
-    def get_source_results(source_id: str, service: Service) -> SourceResultsResponse:
+    def get_source_results(source_id: str, service: Service, user: User) -> SourceResultsResponse:
+        require_source_owner(source_id, user)
         return service.get_source_results(source_id)
 
     @router.get("/sources/{source_id}/jobs", response_model=list[JobStatus], tags=["jobs"])
-    def list_source_jobs(source_id: str, service: Service, limit: int = Query(default=20, ge=1, le=50)) -> list[JobStatus]:
+    def list_source_jobs(source_id: str, service: Service, user: User, limit: int = Query(default=20, ge=1, le=50)) -> list[JobStatus]:
+        require_source_owner(source_id, user)
         return service.list_source_jobs(source_id, limit=limit)
 
     @router.patch("/sources/{source_id}", response_model=CollectionSource, tags=["sources"])
-    def update_source(source_id: str, payload: CollectionSourceUpdate, service: Service) -> CollectionSource:
+    def update_source(source_id: str, payload: CollectionSourceUpdate, service: Service, user: User) -> CollectionSource:
+        require_source_owner(source_id, user)
         return service.update_source(source_id, payload)
 
     @router.delete("/sources/{source_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["sources"])
-    def delete_source(source_id: str, service: Service) -> Response:
+    def delete_source(source_id: str, service: Service, user: User) -> Response:
+        require_source_owner(source_id, user)
         service.delete_source(source_id)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -212,17 +299,23 @@ def create_app(repository: CollectionRepository | None = None, settings: Setting
         status_code=status.HTTP_201_CREATED,
         tags=["jobs"],
     )
-    def create_job(source_id: str, payload: JobCreate, service: Service) -> JobStatus:
+    def create_job(source_id: str, payload: JobCreate, service: Service, user: User) -> JobStatus:
+        require_source_owner(source_id, user)
         return service.create_job(source_id, payload)
 
     @router.get("/jobs/{job_id}", response_model=JobStatus, tags=["jobs"])
-    def get_job(job_id: str, service: Service) -> JobStatus:
+    def get_job(job_id: str, service: Service, user: User) -> JobStatus:
+        if not owns_collection_data(user):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job was not found")
         return service.get_job(job_id)
 
     @router.get("/videos/{video_id}/comments", response_model=VideoCommentsResponse, tags=["results"])
-    def get_video_comments(video_id: str, service: Service) -> VideoCommentsResponse:
+    def get_video_comments(video_id: str, service: Service, user: User) -> VideoCommentsResponse:
+        if not owns_collection_data(user):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Video was not found")
         return service.get_video_comments(video_id)
 
+    app.include_router(auth_router)
     app.include_router(router)
     return app
 

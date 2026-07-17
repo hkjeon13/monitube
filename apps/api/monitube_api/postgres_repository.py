@@ -280,15 +280,15 @@ class PostgresRepository(CollectionRepository):
         )
         return cursor.fetchone()
 
-    def create_source(self, *, source_type: SourceType, config: dict[str, Any]) -> SourceRecord:
+    def create_source(self, *, source_type: SourceType, config: dict[str, Any], owner_id: str | None = None) -> SourceRecord:
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
-                INSERT INTO collection_sources (type, config)
-                VALUES (%s, %s)
+                INSERT INTO collection_sources (type, config, owner_id)
+                VALUES (%s, %s, %s)
                 RETURNING id::text
                 """,
-                (source_type.value, Json(config)),
+                (source_type.value, Json(config), owner_id),
             )
             row = self._select_source(cursor, str(cursor.fetchone()["id"]))
             assert row is not None
@@ -301,7 +301,7 @@ class PostgresRepository(CollectionRepository):
                 raise NotFoundError(f"Source '{source_id}' was not found")
             return self._source(row)
 
-    def list_sources(self) -> list[SourceRecord]:
+    def list_sources(self, *, owner_id: str | None = None) -> list[SourceRecord]:
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -317,7 +317,8 @@ class PostgresRepository(CollectionRepository):
                   ORDER BY job.created_at DESC
                   LIMIT 1
                 ) latest_job ON TRUE
-                WHERE cs.target_id IS NULL
+                WHERE (%s::uuid IS NULL OR cs.owner_id = %s::uuid)
+                  AND (cs.target_id IS NULL
                    OR cs.id = (
                      SELECT cr.source_id
                      FROM collection_requests cr
@@ -329,11 +330,32 @@ class PostgresRepository(CollectionRepository):
                               COALESCE((primary_source.config ->> 'maxCommentPagesPerVideo')::integer, 0) DESC,
                               cr.created_at, cr.id
                      LIMIT 1
-                   )
+                   ))
                 ORDER BY cs.created_at
-                """
+                """,
+                (owner_id, owner_id),
             )
             return [self._source(row) for row in cursor.fetchall()]
+
+    def source_owned_by(self, *, source_id: str, owner_id: str) -> bool:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT 1 FROM collection_sources WHERE id = %s AND owner_id = %s", (source_id, owner_id))
+            return cursor.fetchone() is not None
+
+    def owner_has_sources(self, *, owner_id: str) -> bool:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT 1 FROM collection_sources WHERE owner_id = %s LIMIT 1", (owner_id,))
+            return cursor.fetchone() is not None
+
+    def assign_source_owner(self, *, source_id: str, owner_id: str) -> None:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute("UPDATE collection_sources SET owner_id = %s WHERE id = %s AND owner_id IS NULL", (owner_id, source_id))
+            cursor.execute(
+                """UPDATE collection_targets target SET owner_id = %s
+                   FROM collection_sources source
+                   WHERE source.id = %s AND source.target_id = target.id AND target.owner_id IS NULL""",
+                (owner_id, source_id),
+            )
 
     def update_source(self, source_id: str, **changes: Any) -> SourceRecord:
         allowed = {"enabled", "config", "next_run_at"}

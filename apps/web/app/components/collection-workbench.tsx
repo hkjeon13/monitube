@@ -30,13 +30,14 @@ import type {
   QuotaBucket,
   VideoSourceConfig,
 } from "@monitube/contracts";
-import type { MouseEvent, ReactNode } from "react";
+import type { FormEvent, MouseEvent, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   createCollectionRequest,
   deleteSource,
   getChannelSubscriberHistory,
+  getCurrentUser,
   getJob,
   listSourceJobs,
   getExplore,
@@ -44,6 +45,8 @@ import {
   getSourceResults,
   getVideoComments,
   listSources,
+  login,
+  register,
   updateTargetPin,
   type CollectedComment,
   type CollectedVideo,
@@ -461,9 +464,32 @@ function MetricCard({
   );
 }
 
+function LoginScreen({ onAuthenticated }: { onAuthenticated: (username: string) => void }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [mode, setMode] = useState<"login" | "register">("login");
+  const [error, setError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setIsSubmitting(true);
+    setError(null);
+    try {
+      const user = mode === "login" ? await login(username, password) : await register(username, password);
+      onAuthenticated(user.username);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "로그인할 수 없습니다.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+  return <main className="login-page"><section className="login-card"><div className="brand-lockup"><span className="brand-mark"><PlayIcon /></span><span>monitube</span></div><p className="section-kicker">PRIVATE COLLECTION WORKSPACE</p><h1>{mode === "login" ? "로그인" : "계정 만들기"}</h1><p>아이디와 비밀번호만 저장합니다. 수집 데이터는 로그인한 계정별로 분리됩니다.</p><form onSubmit={submit}><label>아이디<input value={username} onChange={(event) => setUsername(event.target.value)} minLength={3} maxLength={32} pattern="[A-Za-z0-9_-]+" autoComplete="username" required /></label><label>비밀번호<input value={password} onChange={(event) => setPassword(event.target.value)} minLength={8} maxLength={256} type="password" autoComplete={mode === "login" ? "current-password" : "new-password"} required /></label>{error && <p className="inline-error">{error}</p>}<button className="primary-action" type="submit" disabled={isSubmitting}>{isSubmitting ? "확인 중…" : mode === "login" ? "로그인" : "계정 생성"}</button></form><button className="login-mode-switch" type="button" onClick={() => { setMode((current) => current === "login" ? "register" : "login"); setError(null); }}>{mode === "login" ? "새 계정 만들기" : "이미 계정이 있습니다"}</button></section></main>;
+}
+
 export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePage }) {
   const router = useRouter();
   const [requestedSourceId, setRequestedSourceId] = useState<string | null>(null);
+  const [authUser, setAuthUser] = useState<string | null | undefined>(undefined);
   const [form, setForm] = useState<FormState>(initialForm);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -505,6 +531,10 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   const exploreLoadMoreRef = useRef<HTMLDivElement | null>(null);
   const appliedSourceQueryRef = useRef<string | null>(null);
   const searchRequest = useRef(0);
+
+  useEffect(() => {
+    void getCurrentUser().then((user) => setAuthUser(user?.username ?? null)).catch(() => setAuthUser(null));
+  }, []);
 
   const requestBody = useMemo(() => sourceRequest(form), [form]);
   const validationError = useMemo(() => validate(requestBody), [requestBody]);
@@ -723,8 +753,8 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   }, []);
 
   useEffect(() => {
-    void refreshSources();
-  }, [refreshSources]);
+    if (authUser) void refreshSources();
+  }, [authUser, refreshSources]);
 
   useEffect(() => {
     const hasRunningSource = sources.some((source) => source.latestJob && !isTerminalJob(source.latestJob));
@@ -741,8 +771,8 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   }, [requestedSourceId, sources]);
 
   useEffect(() => {
-    void refreshExplore();
-  }, [refreshExplore]);
+    if (authUser) void refreshExplore();
+  }, [authUser, refreshExplore]);
 
   useEffect(() => {
     if (page !== "overview" || !activeSource?.targetId) return;
@@ -903,6 +933,9 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   const breadcrumbDetail = page === "overview" && selectedExploreChannel
     ? selectedExploreChannel.title ?? selectedExploreChannel.handle ?? selectedExploreChannel.youtubeChannelId
     : null;
+
+  if (authUser === undefined) return <main className="login-page"><p className="explore-loading">세션을 확인하는 중입니다…</p></main>;
+  if (!authUser) return <LoginScreen onAuthenticated={setAuthUser} />;
 
   return (
     <div className={`app-shell page-${page}`}>

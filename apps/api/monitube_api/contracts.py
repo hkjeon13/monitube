@@ -19,6 +19,15 @@ class HealthResponse(ApiModel):
     service: Literal["monitube-api"] = "monitube-api"
 
 
+class LoginRequest(ApiModel):
+    username: str = Field(min_length=3, max_length=32, pattern=r"^[A-Za-z0-9_-]+$")
+    password: str = Field(min_length=8, max_length=256)
+
+
+class AuthUserResponse(ApiModel):
+    username: str
+
+
 class RuntimeKeyRegistration(ApiModel):
     apiKeys: list[str] = Field(min_length=1, max_length=32)
 

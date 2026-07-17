@@ -40,11 +40,11 @@ class InvalidStateTransitionError(RepositoryError):
 
 
 class SourceRepository(Protocol):
-    def create_source(self, *, source_type: SourceType, config: dict[str, Any]) -> SourceRecord: ...
+    def create_source(self, *, source_type: SourceType, config: dict[str, Any], owner_id: str | None = None) -> SourceRecord: ...
 
     def get_source(self, source_id: str) -> SourceRecord: ...
 
-    def list_sources(self) -> list[SourceRecord]: ...
+    def list_sources(self, *, owner_id: str | None = None) -> list[SourceRecord]: ...
 
     def update_source(self, source_id: str, **changes: Any) -> SourceRecord: ...
 
@@ -273,7 +273,7 @@ class InMemoryRepository(CollectionRepository):
     def record_runtime_key_state(self, *, runtime_config_id: str | None, key_fingerprint: str, error_reason: str | None = None) -> None:
         return None
 
-    def create_source(self, *, source_type: SourceType, config: dict[str, Any]) -> SourceRecord:
+    def create_source(self, *, source_type: SourceType, config: dict[str, Any], owner_id: str | None = None) -> SourceRecord:
         with self._lock:
             now = utcnow()
             record = SourceRecord(
@@ -290,7 +290,7 @@ class InMemoryRepository(CollectionRepository):
             except KeyError as exc:
                 raise NotFoundError(f"Source '{source_id}' was not found") from exc
 
-    def list_sources(self) -> list[SourceRecord]:
+    def list_sources(self, *, owner_id: str | None = None) -> list[SourceRecord]:
         with self._lock:
             records = sorted(self._sources.values(), key=lambda item: item.created_at)
             # A target may retain several legacy source rows for audit history.  The

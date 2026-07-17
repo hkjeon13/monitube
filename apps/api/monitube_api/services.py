@@ -219,12 +219,13 @@ class CollectionService:
             job=_job_contract(submission.job) if submission.job else None,
         )
 
-    def create_source(self, request: CollectionSourceCreate) -> CollectionSource:
+    def create_source(self, request: CollectionSourceCreate, *, owner_id: str | None = None) -> CollectionSource:
         config = self._canonical_config(request.type, request.config)
         return _source_contract(
             self.repository.create_source(
                 source_type=request.type,
                 config=config.model_dump(mode="json", exclude_none=True),
+                owner_id=owner_id,
             )
         )
 
@@ -253,8 +254,8 @@ class CollectionService:
             )
         return self._submission_contract(submission)
 
-    def list_sources(self) -> list[CollectionSource]:
-        return [_source_contract(record) for record in self.repository.list_sources()]
+    def list_sources(self, *, owner_id: str | None = None) -> list[CollectionSource]:
+        return [_source_contract(record) for record in self.repository.list_sources(owner_id=owner_id)]
 
     def get_source(self, source_id: str) -> CollectionSource:
         return _source_contract(self.repository.get_source(source_id))
