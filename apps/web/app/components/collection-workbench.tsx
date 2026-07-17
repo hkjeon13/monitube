@@ -56,7 +56,7 @@ import {
 } from "../lib/api";
 
 type ViewMetric = "views" | "likes" | "comments";
-export type WorkspacePage = "overview" | "explore" | "sources" | "jobs" | "insights";
+export type WorkspacePage = "overview" | "explore" | "sources" | "keywords" | "jobs" | "insights";
 type FormState = {
   sourceType: CollectionSourceType;
   channelInput: string;
@@ -549,6 +549,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     () => explore.channels.find((channel) => channel.youtubeChannelId === exploreChannelId) ?? null,
     [explore.channels, exploreChannelId],
   );
+  const displayedSources = page === "keywords" ? sources.filter((source) => source.type === "keyword") : sources;
   const hasSearchQuery = searchQuery.trim().length >= 2;
   const pinsByTargetId = useMemo(
     () => new Map(explore.channels.flatMap((channel) => channel.targetId && channel.pin ? [[channel.targetId, channel.pin] as const] : [])),
@@ -706,8 +707,9 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     restoreFocus(videoTriggerRef.current);
   }, [restoreFocus]);
 
-  const openCollectionDrawer = (event: MouseEvent<HTMLButtonElement>) => {
+  const openCollectionDrawer = (event: MouseEvent<HTMLButtonElement>, sourceType?: CollectionSourceType) => {
     collectionTriggerRef.current = event.currentTarget;
+    if (sourceType) setForm((current) => ({ ...current, sourceType }));
     setIsCollectionOpen(true);
   };
 
@@ -895,6 +897,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     { id: "explore" as const, label: "Explore", href: "/", Icon: Squares2X2Icon },
     { id: "overview" as const, label: "Channels", href: "/channels", Icon: HomeIcon },
     { id: "sources" as const, label: "Sources", href: "/sources", Icon: FolderIcon },
+    { id: "keywords" as const, label: "Keywords", href: "/keywords", Icon: MagnifyingGlassIcon },
   ];
 
   return (
@@ -920,17 +923,10 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
           ))}
         </nav>
 
-        <div className="sidebar-status">
-          <span className="sidebar-status-dot" aria-hidden="true" />
-          <div>
-            <strong>Server managed</strong>
-            <small>수집 credential은 안전하게 관리됩니다.</small>
-          </div>
-        </div>
       </aside>
 
       <main className="dashboard-main">
-        {page !== "explore" && page !== "sources" && <header className="dashboard-topbar" id="source-selector" tabIndex={-1}>
+        {page !== "explore" && page !== "sources" && page !== "keywords" && <header className="dashboard-topbar" id="source-selector" tabIndex={-1}>
           <label className="source-select">
             <span className="visually-hidden">수집 대상 선택</span>
             <FolderIcon aria-hidden="true" />
@@ -977,9 +973,9 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
         </header>}
 
         <section className="sources-page" aria-labelledby="sources-page-title">
-          <div className="workspace-page-heading"><p className="section-kicker">COLLECTION TARGETS</p><h1 id="sources-page-title">Sources</h1><p>중복 없이 정규화된 수집 대상을 관리하고, 선택한 대상의 수집 범위를 확인합니다.</p></div>
+          <div className="workspace-page-heading"><p className="section-kicker">{page === "keywords" ? "KEYWORD COLLECTION" : "COLLECTION TARGETS"}</p><h1 id="sources-page-title">{page === "keywords" ? "Keywords" : "Sources"}</h1><p>{page === "keywords" ? "등록한 키워드의 수집 범위와 최신 상태를 관리합니다." : "중복 없이 정규화된 수집 대상을 관리하고, 선택한 대상의 수집 범위를 확인합니다."}</p></div>
           <div className="sources-page-actions">
-            <button className="source-add-button" type="button" onClick={openCollectionDrawer} aria-label="수집 대상 추가">
+            <button className="source-add-button" type="button" onClick={(event) => openCollectionDrawer(event, page === "keywords" ? "keyword" : undefined)} aria-label={page === "keywords" ? "키워드 등록" : "수집 대상 추가"}>
               <PlusIcon aria-hidden="true" />
             </button>
           </div>
@@ -993,7 +989,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
               <span>댓글 수집률</span>
               <span className="source-table-actions-header">관리</span>
             </div>
-            {sources.map((source) => {
+            {displayedSources.map((source) => {
               const canToggleRefresh = source.type === "channel" && Boolean(source.targetId);
               const pinned = source.targetId ? pinsByTargetId.get(source.targetId)?.enabled !== false : false;
               const menuOpen = openSourceMenuId === source.id;
@@ -1022,7 +1018,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
                 </article>
               );
             })}
-            {sources.length === 0 && <div className="explore-empty">아직 등록된 수집 대상이 없습니다.</div>}
+            {displayedSources.length === 0 && <div className="explore-empty">{page === "keywords" ? "아직 등록된 키워드가 없습니다." : "아직 등록된 수집 대상이 없습니다."}</div>}
           </div>
           </div>
         </section>

@@ -174,6 +174,8 @@ svg { display: block; width: 1.125rem; height: 1.125rem; stroke-width: 1.7; }
 .page-explore .explore-channel-strip, .page-explore .explore-channel-overview { display: none; }
 .page-sources .overview-intro, .page-sources .explore-section, .page-sources .dashboard-content, .page-sources .empty-overview { display: none; }
 .page-sources .sources-page { display: block; }
+.page-keywords .overview-intro, .page-keywords .explore-section, .page-keywords .dashboard-content, .page-keywords .empty-overview { display: none; }
+.page-keywords .sources-page { display: block; }
 .page-jobs .overview-intro, .page-jobs .explore-section, .page-jobs .sources-page, .page-jobs .empty-overview { display: none; }
 .page-jobs .kpi-grid, .page-jobs .top-videos-panel, .page-jobs .word-panel, .page-jobs .recent-videos-panel { display: none; }
 .page-jobs .collection-health-panel { grid-column: 1 / -1; }
