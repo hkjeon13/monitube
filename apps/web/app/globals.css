@@ -132,27 +132,26 @@ svg { display: block; width: 1.125rem; height: 1.125rem; stroke-width: 1.7; }
 .sources-table-wrap { overflow-x: auto; padding-bottom: 0.25rem; }
 .sources-page-list { display: grid; min-width: 45rem; grid-template-columns: 1fr; gap: 0; border-top: 0.0625rem solid var(--line); }
 .source-table-header,
-.source-page-card { display: grid; grid-template-columns: 4rem minmax(7.5rem, 1.25fr) minmax(8rem, 1.45fr) 3.75rem minmax(4.75rem, 0.7fr) minmax(4.75rem, 0.7fr) 2.75rem; align-items: center; column-gap: 0.625rem; }
+.source-page-card { display: grid; grid-template-columns: 4rem minmax(7.5rem, 1.25fr) minmax(10rem, 1.5fr) 4.5rem 4.5rem 2.75rem; align-items: center; column-gap: 0.625rem; }
 .source-table-header { min-height: 2rem; padding: 0 0.75rem; border-bottom: 0.0625rem solid var(--line-strong); color: #888a81; font-size: 0.5625rem; font-weight: 800; letter-spacing: 0.045em; text-transform: uppercase; }
 .source-table-actions-header { text-align: center; }
 .source-page-card { position: relative; z-index: 0; min-width: 0; min-height: 3.25rem; padding: 0.4375rem 0.75rem; border-bottom: 0.0625rem solid var(--line); color: var(--ink); background: transparent; text-align: left; transition: background 160ms ease; }
 .source-page-card:hover, .source-page-card:focus-within { z-index: 10; background: rgba(255, 253, 249, 0.72); }
 .source-page-card-menu-open { z-index: 20; }
 .source-page-card-active { background: #fff7f1; box-shadow: inset 0.1875rem 0 0 var(--orange); }
-.source-page-select { display: grid; grid-column: 1 / 4; grid-template-columns: 4rem minmax(7.5rem, 1.25fr) minmax(8rem, 1.45fr); align-items: center; column-gap: 0.625rem; min-width: 0; padding: 0; color: inherit; background: transparent; text-align: left; }
+.source-page-select { display: grid; grid-column: 1 / 4; grid-template-columns: 4rem minmax(7.5rem, 1.25fr) minmax(10rem, 1.5fr); align-items: center; column-gap: 0.625rem; min-width: 0; padding: 0; color: inherit; background: transparent; text-align: left; }
 .source-page-select .source-type-chip { width: fit-content; min-height: 1.375rem; padding: 0 0.4375rem; font-size: 0.5625rem; }
 .source-page-select > strong { min-width: 0; overflow: hidden; color: #344139; font-size: 0.6875rem; font-weight: 800; text-overflow: ellipsis; white-space: nowrap; }
 .source-page-select > small { min-width: 0; overflow: hidden; color: #777d74; font-size: 0.625rem; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .source-card-actions { position: relative; display: flex; flex: 0 0 auto; align-items: center; }
 .source-progress { display: block; min-width: 0; overflow: hidden; color: #777971; font-size: 0.625rem; font-weight: 750; text-overflow: ellipsis; white-space: nowrap; }
 .source-page-card > .source-progress:nth-of-type(1) { grid-column: 4; }
-.source-page-card > .source-progress:nth-of-type(2) { grid-column: 5; }
-.source-page-card > .source-progress:nth-of-type(3) { grid-column: 6; }
+.source-channel-video-count { grid-column: 5; min-width: 0; color: #777971; font-size: 0.625rem; font-weight: 750; white-space: nowrap; }
 .source-progress-idle { color: #98958c; font-weight: 650; }
 .source-progress-state { width: fit-content; max-width: 100%; padding: 0.21875rem 0.375rem; border-radius: 6.1875rem; color: #5c7764; background: #edf4ed; }
 .source-progress-state-failed, .source-progress-state-cancelled { color: #a54840; background: #fff0ed; }
 .source-progress-state-running, .source-progress-state-waiting_quota, .source-progress-state-waiting_retry { color: #a66123; background: #fff3df; }
-.source-card-actions { grid-column: 7; justify-self: end; }
+.source-card-actions { grid-column: 6; justify-self: end; }
 .source-more-button { display: grid; width: 2rem; height: 2rem; place-items: center; padding: 0; border: 0.0625rem solid var(--line); border-radius: 0.5625rem; color: #6e756b; background: #fffefa; }
 .source-more-button svg { width: 1.125rem; height: 1.125rem; }
 .source-more-button:hover:not(:disabled), .source-more-button[aria-expanded="true"] { border-color: #c8d8c9; color: var(--moss); background: #eff6ef; }

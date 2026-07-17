@@ -411,34 +411,20 @@ function sourceTargetValue(source: SourceSummary) {
   return typeof query === "string" ? query : typeof input === "string" ? input : source.canonicalKey ?? "—";
 }
 
-function SourceProgress({ source }: { source: SourceSummary }) {
+function sourceCollectionState(source: SourceSummary) {
   const job = source.latestJob;
-  if (!job) return (
-    <>
-      <span className="source-progress source-progress-state source-progress-idle">기록 없음</span>
-      <span className="source-progress source-progress-idle">—</span>
-      <span className="source-progress source-progress-idle">—</span>
-    </>
-  );
+  if (!job) return { label: "정지", tone: "idle" };
+  if (job.state === "failed") return { label: "실패", tone: "failed" };
+  if (job.state === "running" || job.state === "queued" || job.state === "waiting_quota" || job.state === "waiting_retry") {
+    return { label: "진행 중", tone: "running" };
+  }
+  return { label: "정지", tone: "idle" };
+}
 
-  const commentsRequested = source.config.includeComments === true || source.coverage?.includeComments === true;
-  const phase = (prefix: string, progress: JobStatus["progress"] | undefined, disabled = false) => {
-    if (disabled) return `${prefix} 미수집`;
-    if (!progress) return `${prefix} —`;
-    const total = progress.total;
-    const copy = total === undefined ? "—" : total === 0 ? "0" : `${formatCount(progress.completed)}/${formatCount(total)}`;
-    return `${prefix} ${copy}`;
-  };
-
-  const fullyCovered = job.state === "completed" && source.coverage?.complete === true;
-  const status = fullyCovered ? "완료" : job.state === "completed" ? "종료" : statusCopy(job).replace("수집 ", "");
-
+function SourceCollectionState({ source }: { source: SourceSummary }) {
+  const state = sourceCollectionState(source);
   return (
-    <>
-      <span className={`source-progress source-progress-state source-progress-state-${job.state}`}>{status}</span>
-      <span className="source-progress">{phase("영상", job.videoProgress).replace("영상 ", "")}</span>
-      <span className="source-progress">{commentsRequested ? phase("댓글", job.commentProgress).replace("댓글 ", "") : "미수집"}</span>
-    </>
+    <span className={`source-progress source-progress-state source-progress-state-${state.tone}`}>{state.label}</span>
   );
 }
 
@@ -966,12 +952,11 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
           <div className="sources-table-wrap">
           <div className="sources-page-list" aria-label="수집 대상 목록">
             <div className="source-table-header">
-              <span>배지</span>
+              <span>구분</span>
               <span>채널명</span>
-              <span>채널 ID · 대상</span>
-              <span>상태</span>
-              <span>영상 수집</span>
-              <span>댓글 수집</span>
+              <span>채널 ID</span>
+              <span>수집 상태</span>
+              <span>채널 영상</span>
               <span className="source-table-actions-header">관리</span>
             </div>
             {sources.map((source) => {
@@ -980,14 +965,17 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
               const menuOpen = openSourceMenuId === source.id;
               const channel = source.targetId ? explore.channels.find((item) => item.targetId === source.targetId) : undefined;
               const channelName = channel?.title ?? channel?.handle ?? (source.type === "channel" ? "채널 정보 확인 중" : sourceTypeCopy(source.type));
+              const channelId = channel?.youtubeChannelId ?? sourceTargetValue(source);
+              const channelVideoCount = channel ? formatCount(channel.youtubeVideoCount ?? channel.videoCount) : "—";
               return (
                 <article key={source.id} className={`source-page-card${source.id === activeSourceId ? " source-page-card-active" : ""}${menuOpen ? " source-page-card-menu-open" : ""}`}>
                   <button type="button" className="source-page-select" onClick={() => { setOpenSourceMenuId(null); openSourceWorkspace(source.id); }} aria-label={`${sourceLabel(source)} 작업 공간 열기`}>
                     <span className="source-type-chip">{sourceTypeCopy(source.type)}</span>
                     <strong>{channelName}</strong>
-                    <small title={sourceTargetValue(source)}>{sourceTargetValue(source)}</small>
+                    <small title={channelId}>{channelId}</small>
                   </button>
-                  <SourceProgress source={source} />
+                  <SourceCollectionState source={source} />
+                  <span className="source-channel-video-count">{channelVideoCount}</span>
                   <div className="source-card-actions">
                     <button className="source-more-button" type="button" disabled={deletingSourceId === source.id} onClick={() => setOpenSourceMenuId((current) => current === source.id ? null : source.id)} aria-label={`${sourceLabel(source)} 관리 메뉴`} aria-expanded={menuOpen} aria-haspopup="menu"><EllipsisHorizontalIcon aria-hidden="true" /></button>
                     {menuOpen && <div className="source-action-menu" role="menu" aria-label={`${sourceLabel(source)} 관리`}>
