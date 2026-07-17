@@ -550,15 +550,25 @@ svg { display: block; width: 1.125rem; height: 1.125rem; stroke-width: 1.7; }
   .workspace-page-heading { padding: 1.5rem 0 1rem; }
   .workspace-page-heading h1 { font-size: 2.25rem; line-height: 1.02; }
   .workspace-page-heading > p:last-child { margin-top: 0.625rem; font-size: 0.75rem; line-height: 1.48; }
-  .sources-page-list { grid-template-columns: 1fr; gap: 0; }
-  .source-page-card { min-height: 3.25rem; gap: 0.375rem; padding: 0.5rem 0.75rem; border-radius: 0; }
-  .source-page-select { gap: 0.4375rem; }
-  .source-page-select .source-type-chip { min-height: 1.5rem; padding: 0 0.4375rem; font-size: 0.5625rem; }
-  .source-page-select > strong { font-size: 0.75rem; }
-  .source-page-select > small { display: none; }
-  .source-progress { gap: 0.375rem; font-size: 0.5625rem; }
+  .sources-table-wrap { overflow-x: visible; }
+  .sources-page-list { min-width: 0; grid-template-columns: 1fr; gap: 0; }
+  .source-table-header,
+  .source-page-card { grid-template-columns: 2.5rem minmax(0, 1fr) 3.25rem 3.25rem 2.25rem; column-gap: 0.25rem; }
+  .source-table-header { min-height: 1.875rem; padding: 0 0.375rem; font-size: 0.5rem; letter-spacing: 0; }
+  .source-table-header > span:nth-child(2) { font-size: 0; }
+  .source-table-header > span:nth-child(2)::after { content: "채널명 · ID"; font-size: 0.5rem; }
+  .source-table-header > span:nth-child(3) { display: none; }
+  .source-page-card { min-height: 3.5rem; gap: 0.25rem; padding: 0.5rem 0.375rem; border-radius: 0; }
+  .source-page-select { grid-column: 1 / 3; grid-template-columns: 2.5rem minmax(0, 1fr); column-gap: 0.25rem; row-gap: 0.0625rem; }
+  .source-page-select .source-type-chip { grid-row: 1 / 3; min-height: 1.375rem; padding: 0 0.3125rem; font-size: 0.5rem; }
+  .source-page-select > strong { grid-column: 2; font-size: 0.625rem; }
+  .source-page-select > small { display: block; grid-column: 2; grid-row: 2; font-size: 0.5rem; }
+  .source-page-card > .source-progress:nth-of-type(1) { grid-column: 3; }
+  .source-channel-video-count { grid-column: 4; font-size: 0.5625rem; }
+  .source-card-actions { grid-column: 5; }
+  .source-progress { font-size: 0.5625rem; }
   .source-progress-state { padding: 0.21875rem 0.375rem; }
-  .source-more-button { width: var(--touch-target); height: var(--touch-target); border-radius: 0.6875rem; }
+  .source-more-button { width: 2.125rem; height: 2.125rem; border-radius: 0.5625rem; }
   .source-action-menu { width: 10.5rem; }
   .source-action-menu button { min-height: var(--touch-target); font-size: 0.75rem; }
   .explore-section { margin-bottom: 1.5rem; padding: 2rem 0 1rem; }
