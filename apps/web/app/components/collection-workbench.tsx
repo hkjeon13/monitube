@@ -653,15 +653,6 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     setSearchRun((current) => current + 1);
   };
 
-  const clearCollectedSearch = () => {
-    searchRequest.current += 1;
-    setSearchQuery("");
-    setSubmittedSearchQuery("");
-    setSearchResults(null);
-    setSearchError(null);
-    setIsSearchLoading(false);
-  };
-
   useEffect(() => {
     const query = submittedSearchQuery;
     if (page !== "explore" || query.length < 2) {
@@ -1131,7 +1122,6 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
               autoComplete="off"
             />
             <button className="explore-search-submit" type="submit" aria-label="검색" disabled={searchQuery.trim().length < 2 || isSearchLoading}><MagnifyingGlassIcon aria-hidden="true" /></button>
-            {searchQuery && <button type="button" onClick={clearCollectedSearch} aria-label="검색어 지우기"><XMarkIcon aria-hidden="true" /></button>}
           </form>
           {hasSearchQuery && <p className="explore-search-hint">Jaro–Winkler 유사도 검색으로 오타와 붙여쓴 검색어도 함께 찾습니다.</p>}
           {searchError && <p className="inline-error" role="status">{searchError}</p>}
