@@ -953,8 +953,8 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
           <div className="sources-page-list" aria-label="수집 대상 목록">
             <div className="source-table-header">
               <span>구분</span>
-              <span>채널명</span>
-              <span>채널 ID</span>
+              <span>수집 대상</span>
+              <span>식별값</span>
               <span>수집 상태</span>
               <span>채널 영상</span>
               <span className="source-table-actions-header">관리</span>
@@ -964,8 +964,9 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
               const pinned = source.targetId ? pinsByTargetId.get(source.targetId)?.enabled !== false : false;
               const menuOpen = openSourceMenuId === source.id;
               const channel = source.targetId ? explore.channels.find((item) => item.targetId === source.targetId) : undefined;
-              const channelName = channel?.title ?? channel?.handle ?? (source.type === "channel" ? "채널 정보 확인 중" : sourceTypeCopy(source.type));
-              const channelId = channel?.youtubeChannelId ?? sourceTargetValue(source);
+              const targetValue = sourceTargetValue(source);
+              const channelName = channel?.title ?? channel?.handle ?? (source.type === "channel" ? "채널 정보 확인 중" : targetValue);
+              const channelId = channel?.youtubeChannelId ?? targetValue;
               const channelVideoCount = channel ? formatCount(channel.youtubeVideoCount ?? channel.videoCount) : "—";
               return (
                 <article key={source.id} className={`source-page-card${source.id === activeSourceId ? " source-page-card-active" : ""}${menuOpen ? " source-page-card-menu-open" : ""}`}>
