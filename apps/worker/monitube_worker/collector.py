@@ -443,6 +443,36 @@ class YouTubeCollector:
                 break
         return count
 
+    def _prioritize_comment_collection(
+        self, videos: Iterable[VideoRecord], persisted_comment_counts: Mapping[str, int]
+    ) -> list[VideoRecord]:
+        """Order incomplete videos by comment coverage, then by oldest upload.
+
+        YouTube's advertised ``commentCount`` is the target count.  A lower
+        persisted/advertised ratio means the video has more of its public
+        discussion left to collect.  Preserve the video holding an active
+        page cursor first so a quota-paused job can resume without discarding
+        its already-paid-for pagination position.
+        """
+
+        resume_scope = self._active_checkpoint.get("scopeKey") if self._active_checkpoint.get("stage") == "comments" else None
+
+        def priority(video: VideoRecord) -> tuple[int, float, datetime, str]:
+            advertised_count = as_int(video.statistics.get("commentCount"))
+            persisted_count = persisted_comment_counts.get(video.youtube_video_id, 0)
+            coverage = persisted_count / advertised_count if advertised_count else 1.0
+            # Missing publication metadata is placed last within the same
+            # coverage band because it cannot reliably be considered old.
+            published_at = video.published_at or datetime.max.replace(tzinfo=UTC)
+            return (
+                0 if video.youtube_video_id == resume_scope else 1,
+                coverage,
+                published_at,
+                video.youtube_video_id,
+            )
+
+        return sorted(videos, key=priority)
+
     def collect(self, job: JobRecord) -> None:
         """Collect and persist a single claimed job, raising runner-recognized errors."""
 
@@ -485,10 +515,14 @@ class YouTubeCollector:
                 persisted_comment_counts = self.repository.comment_counts_by_video(
                     video.youtube_video_id for video in videos
                 )
-                videos_with_new_comments = [
-                    video for video in videos
-                    if persisted_comment_counts.get(video.youtube_video_id, 0) < video.statistics.get("commentCount", 0)
-                ]
+                videos_with_new_comments = self._prioritize_comment_collection(
+                    [
+                        video
+                        for video in videos
+                        if persisted_comment_counts.get(video.youtube_video_id, 0) < video.statistics.get("commentCount", 0)
+                    ],
+                    persisted_comment_counts,
+                )
                 completed_comment_videos = len(videos) - len(videos_with_new_comments)
                 collected_comments = 0
                 self._set_phase_progress(

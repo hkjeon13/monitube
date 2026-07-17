@@ -231,6 +231,39 @@ def test_channel_refresh_stops_at_known_upload_page_and_comment_page() -> None:
     assert client.comment_requests[0]["order"] == "time"
 
 
+def test_incomplete_comment_collection_prioritizes_lowest_coverage_then_oldest_video() -> None:
+    repository = InMemoryRepository()
+    collector = YouTubeCollector(repository, DirectVideoClient())
+    now = utcnow()
+    videos = [
+        VideoRecord(
+            id=new_id(), youtube_video_id="partially-collected", youtube_channel_id=None,
+            title=None, description=None, published_at=now - timedelta(days=30), duration_seconds=None,
+            privacy_status=None, made_for_kids=None, statistics={"commentCount": 10}, source_fetched_at=now,
+        ),
+        VideoRecord(
+            id=new_id(), youtube_video_id="newer-uncollected", youtube_channel_id=None,
+            title=None, description=None, published_at=now - timedelta(days=5), duration_seconds=None,
+            privacy_status=None, made_for_kids=None, statistics={"commentCount": 10}, source_fetched_at=now,
+        ),
+        VideoRecord(
+            id=new_id(), youtube_video_id="older-uncollected", youtube_channel_id=None,
+            title=None, description=None, published_at=now - timedelta(days=20), duration_seconds=None,
+            privacy_status=None, made_for_kids=None, statistics={"commentCount": 10}, source_fetched_at=now,
+        ),
+    ]
+
+    prioritized = collector._prioritize_comment_collection(
+        videos, {"partially-collected": 1, "newer-uncollected": 0, "older-uncollected": 0}
+    )
+
+    assert [video.youtube_video_id for video in prioritized] == [
+        "older-uncollected",
+        "newer-uncollected",
+        "partially-collected",
+    ]
+
+
 class ResumedChannelClient:
     def __init__(self) -> None:
         self.comment_calls = 0
