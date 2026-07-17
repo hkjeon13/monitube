@@ -39,6 +39,17 @@ from .domain import (
 from .repositories import CollectionRepository, InvalidStateTransitionError, NotFoundError, RepositoryError, _ALLOWED_TRANSITIONS
 
 
+def _strip_nul(value: Any) -> Any:
+    """PostgreSQL text fields reject NUL bytes from upstream public metadata."""
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if isinstance(value, dict):
+        return {key: _strip_nul(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_strip_nul(item) for item in value]
+    return value
+
+
 def _optional_nonnegative_int(value: Any) -> int | None:
     try:
         return max(0, int(value))
@@ -1031,6 +1042,7 @@ class PostgresRepository(CollectionRepository):
         return self.transition_job(job_id, current.state, **changes)
 
     def upsert_channel(self, channel: dict[str, Any]) -> dict[str, Any]:
+        channel = _strip_nul(channel)
         statistics = dict(channel.get("statistics") or {})
         payload = {**channel, "thumbnail_url": channel.get("thumbnail_url")}
         with self._connection() as connection, connection.cursor() as cursor:
@@ -1070,6 +1082,14 @@ class PostgresRepository(CollectionRepository):
             return stored
 
     def upsert_video(self, video: VideoRecord) -> VideoRecord:
+        video = replace(
+            video,
+            youtube_video_id=_strip_nul(video.youtube_video_id),
+            youtube_channel_id=_strip_nul(video.youtube_channel_id),
+            title=_strip_nul(video.title),
+            description=_strip_nul(video.description),
+            privacy_status=_strip_nul(video.privacy_status),
+        )
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT id FROM channels WHERE youtube_channel_id = %s",
@@ -1187,6 +1207,14 @@ class PostgresRepository(CollectionRepository):
             )
 
     def upsert_comment(self, comment: CommentRecord) -> CommentRecord:
+        comment = replace(
+            comment,
+            youtube_comment_id=_strip_nul(comment.youtube_comment_id),
+            youtube_video_id=_strip_nul(comment.youtube_video_id),
+            youtube_parent_comment_id=_strip_nul(comment.youtube_parent_comment_id),
+            youtube_thread_id=_strip_nul(comment.youtube_thread_id),
+            text_display=_strip_nul(comment.text_display),
+        )
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute("SELECT id FROM videos WHERE youtube_video_id = %s", (comment.youtube_video_id,))
             video = cursor.fetchone()
