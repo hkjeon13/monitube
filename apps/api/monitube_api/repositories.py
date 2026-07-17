@@ -931,6 +931,7 @@ class InMemoryRepository(CollectionRepository):
                     "hiddenSubscriberCount": (channel.get("statistics") or {}).get("hiddenSubscriberCount"),
                     "videoCount": len(channel_videos),
                     "commentCount": sum(1 for comment in self._comments.values() if comment.youtube_video_id in ids),
+                    "youtubeCommentCount": sum(int((video.statistics or {}).get("commentCount") or 0) for video in channel_videos),
                     "lastFetchedAt": max((video.source_fetched_at for video in channel_videos), default=channel.get("source_fetched_at")),
                     "targetId": target.id if target else None, "pin": deepcopy(pin) if pin else None,
                 })

@@ -209,6 +209,7 @@ class ExploreChannel(ApiModel):
     hiddenSubscriberCount: bool | None = None
     videoCount: int = Field(ge=0)
     commentCount: int = Field(ge=0)
+    youtubeCommentCount: int = Field(default=0, ge=0)
     lastFetchedAt: datetime | None = None
     targetId: str | None = None
     pin: TargetPin | None = None

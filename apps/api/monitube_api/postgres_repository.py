@@ -1479,6 +1479,7 @@ class PostgresRepository(CollectionRepository):
                 SELECT c.youtube_channel_id, c.handle, c.title, c.description, c.thumbnail_url,
                        COALESCE(video_counts.video_count, 0)::integer AS video_count,
                        COALESCE(comment_counts.comment_count, 0)::integer AS comment_count,
+                       COALESCE(video_stats.youtube_comment_count, 0)::integer AS youtube_comment_count,
                        channel_stats.subscriber_count, channel_stats.view_count,
                        channel_stats.video_count AS youtube_video_count, channel_stats.hidden_subscriber_count,
                        GREATEST(c.source_fetched_at, video_counts.last_fetched_at) AS last_fetched_at,
@@ -1487,6 +1488,17 @@ class PostgresRepository(CollectionRepository):
                 FROM channels c
                 LEFT JOIN LATERAL (SELECT count(*) AS video_count, max(source_fetched_at) AS last_fetched_at FROM videos WHERE channel_id = c.id) video_counts ON TRUE
                 LEFT JOIN LATERAL (SELECT count(*) AS comment_count FROM comments cm JOIN videos v ON v.id = cm.video_id WHERE v.channel_id = c.id) comment_counts ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT sum(COALESCE(latest_stats.comment_count, 0)) AS youtube_comment_count
+                    FROM videos v
+                    LEFT JOIN LATERAL (
+                        SELECT comment_count FROM video_stat_snapshots
+                        WHERE video_id = v.id
+                        ORDER BY fetched_at DESC
+                        LIMIT 1
+                    ) latest_stats ON TRUE
+                    WHERE v.channel_id = c.id
+                ) video_stats ON TRUE
                 LEFT JOIN LATERAL (SELECT subscriber_count, view_count, video_count, hidden_subscriber_count FROM channel_snapshots WHERE channel_id = c.id AND (subscriber_count IS NOT NULL OR view_count IS NOT NULL OR video_count IS NOT NULL OR hidden_subscriber_count IS NOT NULL) ORDER BY fetched_at DESC LIMIT 1) channel_stats ON TRUE
                 LEFT JOIN collection_targets target ON target.resolved_channel_id = c.id
                 LEFT JOIN collection_target_pins pin ON pin.target_id = target.id
@@ -1498,7 +1510,7 @@ class PostgresRepository(CollectionRepository):
                 pin = None
                 if row.get("pin_enabled") is not None:
                     pin = {"target_id": str(row["target_id"]), "enabled": bool(row["pin_enabled"]), "interval_minutes": int(row["pin_interval_minutes"]), "next_run_at": row["pin_next_run_at"], "last_dispatched_at": row["pin_last_dispatched_at"]}
-                channels.append({"youtubeChannelId": row["youtube_channel_id"], "handle": row["handle"], "title": row["title"], "description": row["description"], "thumbnailUrl": row["thumbnail_url"], "subscriberCount": row["subscriber_count"], "viewCount": row["view_count"], "youtubeVideoCount": row["youtube_video_count"], "hiddenSubscriberCount": row["hidden_subscriber_count"], "videoCount": int(row["video_count"]), "commentCount": int(row["comment_count"]), "lastFetchedAt": row["last_fetched_at"], "targetId": str(row["target_id"]) if row.get("target_id") else None, "pin": pin})
+                channels.append({"youtubeChannelId": row["youtube_channel_id"], "handle": row["handle"], "title": row["title"], "description": row["description"], "thumbnailUrl": row["thumbnail_url"], "subscriberCount": row["subscriber_count"], "viewCount": row["view_count"], "youtubeVideoCount": row["youtube_video_count"], "hiddenSubscriberCount": row["hidden_subscriber_count"], "videoCount": int(row["video_count"]), "commentCount": int(row["comment_count"]), "youtubeCommentCount": int(row["youtube_comment_count"]), "lastFetchedAt": row["last_fetched_at"], "targetId": str(row["target_id"]) if row.get("target_id") else None, "pin": pin})
             cursor.execute(
                 """
                 SELECT v.id::text, v.youtube_video_id, c.youtube_channel_id, v.title, v.description, v.published_at,
