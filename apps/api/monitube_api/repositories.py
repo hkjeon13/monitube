@@ -955,7 +955,20 @@ class InMemoryRepository(CollectionRepository):
                 })
             channels.sort(key=lambda item: item["lastFetchedAt"] or utcnow(), reverse=True)
             videos = [video for video in self._videos.values() if channel_id is None or video.youtube_channel_id == channel_id]
-            videos = sorted(videos, key=lambda item: item.source_fetched_at, reverse=True)[:limit]
+            videos_by_channel: dict[str, list[VideoRecord]] = {}
+            for video in videos:
+                videos_by_channel.setdefault(video.youtube_channel_id, []).append(video)
+            ordered_buckets = [sorted(bucket, key=lambda item: item.source_fetched_at, reverse=True) for bucket in videos_by_channel.values()]
+            videos = []
+            while ordered_buckets and len(videos) < limit:
+                next_buckets: list[list[VideoRecord]] = []
+                for bucket in ordered_buckets:
+                    videos.append(bucket.pop(0))
+                    if len(videos) >= limit:
+                        break
+                    if bucket:
+                        next_buckets.append(bucket)
+                ordered_buckets = next_buckets
             return {"channels": channels, "videos": videos}
 
     def list_channel_subscriber_history(self, *, youtube_channel_id: str, limit: int = 180) -> list[dict[str, Any]]:

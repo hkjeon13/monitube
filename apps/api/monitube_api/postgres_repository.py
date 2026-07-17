@@ -1557,15 +1557,32 @@ class PostgresRepository(CollectionRepository):
                 channels.append({"youtubeChannelId": row["youtube_channel_id"], "handle": row["handle"], "title": row["title"], "description": row["description"], "thumbnailUrl": row["thumbnail_url"], "subscriberCount": row["subscriber_count"], "viewCount": row["view_count"], "youtubeVideoCount": row["youtube_video_count"], "hiddenSubscriberCount": row["hidden_subscriber_count"], "videoCount": video_count, "commentCount": comment_count, "youtubeCommentCount": youtube_comment_count, "videoCollectionRate": min(100, round((video_count / youtube_video_count) * 100)) if youtube_video_count else 0, "commentCollectionRate": min(100, round((comment_count / youtube_comment_count) * 100)) if youtube_comment_count else 0, "lastFetchedAt": row["last_fetched_at"], "targetId": str(row["target_id"]) if row.get("target_id") else None, "pin": pin})
             cursor.execute(
                 """
-                SELECT v.id::text, v.youtube_video_id, c.youtube_channel_id, v.title, v.description, v.published_at,
-                       v.duration_seconds, v.privacy_status, v.made_for_kids, v.source_fetched_at,
-                       jsonb_build_object('viewCount', COALESCE(stats.view_count, 0), 'likeCount', COALESCE(stats.like_count, 0), 'commentCount', COALESCE(stats.comment_count, 0)) AS statistics
-                FROM videos v LEFT JOIN channels c ON c.id = v.channel_id
-                LEFT JOIN LATERAL (SELECT view_count, like_count, comment_count FROM video_stat_snapshots WHERE video_id = v.id ORDER BY fetched_at DESC LIMIT 1) stats ON TRUE
-                WHERE (%s::text IS NULL OR c.youtube_channel_id = %s)
-                ORDER BY v.source_fetched_at DESC NULLS LAST, v.published_at DESC NULLS LAST LIMIT %s
+                WITH source_ranked AS (
+                    SELECT v.id, v.youtube_video_id, c.youtube_channel_id, v.title, v.description, v.published_at,
+                           v.duration_seconds, v.privacy_status, v.made_for_kids, v.source_fetched_at,
+                           jsonb_build_object('viewCount', COALESCE(stats.view_count, 0), 'likeCount', COALESCE(stats.like_count, 0), 'commentCount', COALESCE(stats.comment_count, 0)) AS statistics,
+                           row_number() OVER (
+                               PARTITION BY COALESCE(source_video.source_id::text, c.youtube_channel_id)
+                               ORDER BY v.source_fetched_at DESC NULLS LAST, v.published_at DESC NULLS LAST
+                           ) AS source_rank
+                    FROM videos v
+                    LEFT JOIN channels c ON c.id = v.channel_id
+                    LEFT JOIN source_videos source_video ON source_video.video_id = v.id
+                    LEFT JOIN LATERAL (SELECT view_count, like_count, comment_count FROM video_stat_snapshots WHERE video_id = v.id ORDER BY fetched_at DESC LIMIT 1) stats ON TRUE
+                    WHERE (%s::text IS NULL OR c.youtube_channel_id = %s)
+                ), deduplicated AS (
+                    SELECT DISTINCT ON (id) *
+                    FROM source_ranked
+                    ORDER BY id, source_rank ASC, source_fetched_at DESC NULLS LAST
+                )
+                SELECT id::text, youtube_video_id, youtube_channel_id, title, description, published_at,
+                       duration_seconds, privacy_status, made_for_kids, source_fetched_at, statistics
+                FROM deduplicated
+                WHERE (%s::text IS NOT NULL OR source_rank <= 12)
+                ORDER BY source_rank ASC, source_fetched_at DESC NULLS LAST, published_at DESC NULLS LAST
+                LIMIT %s
                 """,
-                (channel_id, channel_id, 10_000 if channel_id else limit),
+                (channel_id, channel_id, channel_id, 10_000 if channel_id else limit),
             )
             return {"channels": channels, "videos": [self._video(row) for row in cursor.fetchall()]}
 

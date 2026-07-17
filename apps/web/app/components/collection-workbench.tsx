@@ -515,6 +515,8 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   const [subscriberHistory, setSubscriberHistory] = useState<ChannelSubscriberSnapshot[]>([]);
   const [exploreVisibleCount, setExploreVisibleCount] = useState(12);
   const [searchQuery, setSearchQuery] = useState("");
+  const [submittedSearchQuery, setSubmittedSearchQuery] = useState("");
+  const [searchRun, setSearchRun] = useState(0);
   const [searchResults, setSearchResults] = useState<CollectedSearchData | null>(null);
   const [isSearchLoading, setIsSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
@@ -576,7 +578,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     [explore.channels, exploreChannelId],
   );
   const displayedSources = page === "keywords" ? sources.filter((source) => source.type === "keyword") : sources;
-  const hasSearchQuery = searchQuery.trim().length >= 2;
+  const hasSearchQuery = submittedSearchQuery.length >= 2;
   const pinsByTargetId = useMemo(
     () => new Map(explore.channels.flatMap((channel) => channel.targetId && channel.pin ? [[channel.targetId, channel.pin] as const] : [])),
     [explore.channels],
@@ -636,8 +638,32 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     }
   }, []);
 
-  useEffect(() => {
+  const submitCollectedSearch = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
     const query = searchQuery.trim();
+    if (query.length < 2) {
+      setSearchError("검색어를 두 글자 이상 입력하세요.");
+      return;
+    }
+    searchRequest.current += 1;
+    setSubmittedSearchQuery(query);
+    setSearchResults(null);
+    setSearchError(null);
+    setIsSearchLoading(true);
+    setSearchRun((current) => current + 1);
+  };
+
+  const clearCollectedSearch = () => {
+    searchRequest.current += 1;
+    setSearchQuery("");
+    setSubmittedSearchQuery("");
+    setSearchResults(null);
+    setSearchError(null);
+    setIsSearchLoading(false);
+  };
+
+  useEffect(() => {
+    const query = submittedSearchQuery;
     if (page !== "explore" || query.length < 2) {
       setSearchResults(null);
       setSearchError(null);
@@ -645,24 +671,19 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
       return;
     }
     const requestId = ++searchRequest.current;
-    const timer = window.setTimeout(() => {
-      setIsSearchLoading(true);
-      setSearchError(null);
-      void searchCollected(query)
-        .then((result) => {
-          if (requestId === searchRequest.current) setSearchResults(result);
-        })
-        .catch((caught) => {
-          if (requestId === searchRequest.current) {
-            setSearchError(caught instanceof Error ? caught.message : "통합 검색 결과를 불러오지 못했습니다.");
-          }
-        })
-        .finally(() => {
-          if (requestId === searchRequest.current) setIsSearchLoading(false);
-        });
-    }, 280);
-    return () => window.clearTimeout(timer);
-  }, [page, searchQuery]);
+    void searchCollected(query)
+      .then((result) => {
+        if (requestId === searchRequest.current) setSearchResults(result);
+      })
+      .catch((caught) => {
+        if (requestId === searchRequest.current) {
+          setSearchError(caught instanceof Error ? caught.message : "통합 검색 결과를 불러오지 못했습니다.");
+        }
+      })
+      .finally(() => {
+        if (requestId === searchRequest.current) setIsSearchLoading(false);
+      });
+  }, [page, searchRun, submittedSearchQuery]);
 
   const togglePin = useCallback(async (targetId: string, pinned: boolean) => {
     setPinningTargetId(targetId);
@@ -1098,7 +1119,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
 
         <section className="explore-section" id="explore" aria-label="Explore" tabIndex={-1}>
           {exploreError && <p className="inline-error" role="status">{exploreError}</p>}
-          <div className="explore-search" role="search">
+          <form className="explore-search" role="search" onSubmit={submitCollectedSearch}>
             <MagnifyingGlassIcon aria-hidden="true" />
             <label className="visually-hidden" htmlFor="collected-search">수집 데이터 통합 검색</label>
             <input
@@ -1109,16 +1130,24 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
               type="search"
               autoComplete="off"
             />
-            {searchQuery && <button type="button" onClick={() => setSearchQuery("")} aria-label="검색어 지우기"><XMarkIcon aria-hidden="true" /></button>}
-          </div>
+            <button className="explore-search-submit" type="submit" aria-label="검색" disabled={searchQuery.trim().length < 2 || isSearchLoading}><MagnifyingGlassIcon aria-hidden="true" /></button>
+            {searchQuery && <button type="button" onClick={clearCollectedSearch} aria-label="검색어 지우기"><XMarkIcon aria-hidden="true" /></button>}
+          </form>
           {hasSearchQuery && <p className="explore-search-hint">Jaro–Winkler 유사도 검색으로 오타와 붙여쓴 검색어도 함께 찾습니다.</p>}
           {searchError && <p className="inline-error" role="status">{searchError}</p>}
           {isExploreLoading && explore.channels.length === 0 ? <p className="explore-loading">수집 라이브러리를 불러오는 중입니다…</p> : (
             hasSearchQuery ? (
               <section className="collected-search-results" aria-live="polite" aria-label="통합 검색 결과">
-                {isSearchLoading && !searchResults ? <p className="explore-loading">수집 데이터에서 찾는 중입니다…</p> : (
+                {isSearchLoading && !searchResults ? (
+                  <div className="search-results-skeleton" aria-busy="true" aria-label="검색 결과를 불러오는 중">
+                    <div className="search-result-heading"><div><p className="section-kicker">UNIFIED RESULTS</p><h3>“{submittedSearchQuery}” 검색 중</h3></div></div>
+                    <div className="search-result-columns">
+                      {["동영상", "댓글"].map((title) => <section key={title}><h4>{title}</h4>{Array.from({ length: 5 }, (_, index) => <div className="search-skeleton-item" key={index}><span className="search-skeleton-line search-skeleton-title" /><span className="search-skeleton-line search-skeleton-copy" /><span className="search-skeleton-line search-skeleton-meta" /></div>)}</section>)}
+                    </div>
+                  </div>
+                ) : (
                   <>
-                    <div className="search-result-heading"><div><p className="section-kicker">UNIFIED RESULTS</p><h3>“{searchQuery.trim()}” 검색 결과</h3></div><span>{formatCount((searchResults?.videos.length ?? 0) + (searchResults?.comments.length ?? 0))}개</span></div>
+                    <div className="search-result-heading"><div><p className="section-kicker">UNIFIED RESULTS</p><h3>“{submittedSearchQuery}” 검색 결과</h3></div><span>{formatCount((searchResults?.videos.length ?? 0) + (searchResults?.comments.length ?? 0))}개</span></div>
                     <div className="search-result-columns">
                       <section><h4>동영상</h4>{searchResults?.videos.map((result) => <button className="search-video-result" type="button" key={result.video.id} onClick={(event) => openVideoDrawer(result.video, event.currentTarget)}><img src={youtubeThumbnail(result.video.youtubeVideoId)} alt="" /><span><strong>{result.video.title}</strong><small>{result.matchedFields.map(searchFieldLabel).join(" · ")} · 유사도 {Math.round(result.score * 100)}%</small></span><ChevronRightIcon aria-hidden="true" /></button>)}{!isSearchLoading && (searchResults?.videos.length ?? 0) === 0 && <p className="search-empty">일치하는 동영상이 없습니다.</p>}</section>
                       <section><h4>댓글</h4>{searchResults?.comments.map((result) => <button className="search-comment-result" type="button" key={result.comment.id} onClick={(event) => openVideoDrawer(result.video, event.currentTarget)}><strong>{result.video.title}</strong><p>{result.comment.text}</p><small>{result.channelTitle ?? "수집 채널"} · {result.matchedFields.map(searchFieldLabel).join(" · ")} · 유사도 {Math.round(result.score * 100)}%</small></button>)}{!isSearchLoading && (searchResults?.comments.length ?? 0) === 0 && <p className="search-empty">일치하는 댓글이 없습니다.</p>}</section>
