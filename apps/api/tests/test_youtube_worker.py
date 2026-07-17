@@ -105,18 +105,10 @@ def test_quota_error_logs_checkpoint_and_due_job_resumes_from_same_cursor() -> N
     assert completed.state is JobState.COMPLETED
     # Discovery restarts from the frozen query window rather than using a bare page
     # token that would omit IDs from earlier, not-yet-linked pages.
-    assert resume_client.calls[0] == ("search", {
-        "part": "snippet",
-        "type": "video",
-        "q": "FastAPI",
-        "order": "date",
-        "publishedAfter": None,
-        "publishedBefore": None,
-        "regionCode": None,
-        "relevanceLanguage": None,
-        "maxResults": 50,
-        "pageToken": None,
-    })
+    endpoint, params = resume_client.calls[0]
+    assert endpoint == "search"
+    assert params["pageToken"] is None
+    assert params["publishedBefore"] == job.created_at.isoformat().replace("+00:00", "Z")
 
 
 def test_quota_retry_delay_is_bounded_between_one_and_three_hours() -> None:

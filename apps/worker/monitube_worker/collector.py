@@ -70,6 +70,7 @@ class YouTubeCollector:
     def _checkpoint(self, job: JobRecord, *, stage: str, scope_key: str, page_token: str | None, batch_cursor: int = 0) -> None:
         quota_retry_attempt = as_int(self._active_checkpoint.get("quotaRetryAttempt"))
         phase_progress = self._active_checkpoint.get("phaseProgress")
+        keyword_window_end = self._active_checkpoint.get("keywordWindowEnd")
         self._active_checkpoint = {
             "stage": stage,
             "scopeKey": scope_key,
@@ -80,6 +81,8 @@ class YouTubeCollector:
             self._active_checkpoint["phaseProgress"] = phase_progress
         if quota_retry_attempt:
             self._active_checkpoint["quotaRetryAttempt"] = quota_retry_attempt
+        if keyword_window_end:
+            self._active_checkpoint["keywordWindowEnd"] = keyword_window_end
         self.repository.checkpoint_job(job.id, self._active_checkpoint)
 
     def _set_phase_progress(
@@ -286,6 +289,13 @@ class YouTubeCollector:
     def _keyword_video_ids(self, job: JobRecord, source_config: Mapping[str, Any]) -> list[str]:
         max_pages = as_int(source_config.get("maxPagesPerRun")) or 1
         ids: list[str] = []
+        # Freeze the upper bound once per job. A latest-first retry then replays
+        # the same ordered result window, rather than letting newly published
+        # videos shift a later page and create a gap.
+        keyword_window_end = source_config.get("publishedBefore") or job.checkpoint.get("keywordWindowEnd") or self._active_checkpoint.get("keywordWindowEnd")
+        if not keyword_window_end:
+            keyword_window_end = job.created_at.astimezone(UTC).isoformat().replace("+00:00", "Z")
+        self._active_checkpoint["keywordWindowEnd"] = keyword_window_end
         # Replay the frozen query window and dedupe through source/video upserts.
         # A bare page cursor cannot reproduce previous search result IDs safely.
         page_token: str | None = None
@@ -298,7 +308,7 @@ class YouTubeCollector:
                 q=source_config["query"],
                 order=source_config.get("order", "date"),
                 publishedAfter=source_config.get("publishedAfter"),
-                publishedBefore=source_config.get("publishedBefore"),
+                publishedBefore=keyword_window_end,
                 regionCode=source_config.get("regionCode"),
                 relevanceLanguage=source_config.get("relevanceLanguage"),
                 maxResults=50,

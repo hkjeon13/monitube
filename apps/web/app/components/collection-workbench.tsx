@@ -70,7 +70,6 @@ type FormState = {
   relevanceLanguage: string;
   regionCode: string;
   order: KeywordSourceConfig["order"];
-  maxPagesPerRun: number;
   includeComments: boolean;
 };
 
@@ -84,7 +83,6 @@ const initialForm: FormState = {
   relevanceLanguage: "ko",
   regionCode: "KR",
   order: "date",
-  maxPagesPerRun: 3,
   includeComments: true,
 };
 
@@ -218,7 +216,7 @@ function sourceRequest(form: FormState): CreateCollectionSourceRequest {
       ? { relevanceLanguage: form.relevanceLanguage.trim().toLowerCase() }
       : {}),
     order: form.order,
-    maxPagesPerRun: clampPositive(form.maxPagesPerRun, 1),
+    maxPagesPerRun: 100,
     includeComments: form.includeComments,
     collectAllComments: form.includeComments,
   };
@@ -1466,7 +1464,6 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
                   <label className="drawer-field"><span>시작일</span><input type="date" value={form.publishedAfter} onChange={(event) => update("publishedAfter", event.target.value)} /></label>
                   <label className="drawer-field"><span>종료일</span><input type="date" value={form.publishedBefore} onChange={(event) => update("publishedBefore", event.target.value)} /></label>
                   <label className="drawer-field"><span>정렬</span><select value={form.order} onChange={(event) => update("order", event.target.value as KeywordSourceConfig["order"])}><option value="date">최신순</option><option value="relevance">관련성순</option><option value="viewCount">조회수순</option></select></label>
-                  <label className="drawer-field"><span>최대 검색 페이지</span><input type="number" min="1" max="100" value={form.maxPagesPerRun} onChange={(event) => update("maxPagesPerRun", Number(event.target.value))} /></label>
                   <label className="drawer-field"><span>관련 언어</span><input value={form.relevanceLanguage} maxLength={8} onChange={(event) => update("relevanceLanguage", event.target.value)} placeholder="ko" /></label>
                   <label className="drawer-field"><span>지역</span><input value={form.regionCode} maxLength={2} onChange={(event) => update("regionCode", event.target.value)} placeholder="KR" /></label>
                 </div>
