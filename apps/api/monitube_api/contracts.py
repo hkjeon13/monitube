@@ -181,6 +181,13 @@ class JobStatus(ApiModel):
 
 
 class CollectionSourceBase(ApiModel):
+    """A user's visible subscription to a shared collection target.
+
+    ``id`` is deliberately the subscription ID, not the worker-facing legacy
+    source ID. ``targetId`` remains the stable ID for shared public data and
+    target-level job coalescing.
+    """
+
     id: str
     enabled: bool
     nextRunAt: datetime | None = None

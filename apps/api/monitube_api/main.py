@@ -197,13 +197,26 @@ def create_app(repository: CollectionRepository | None = None, settings: Setting
     router = APIRouter(prefix="/v1", dependencies=[Depends(get_current_user)])
 
     def require_source_owner(source_id: str, user: AuthUser) -> None:
+        """Authorize a public Sources ID, which is now a user subscription ID."""
         owns_source = getattr(repository, "source_owned_by", None)
         if owns_source and not owns_source(source_id=source_id, owner_id=user.id):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source was not found")
 
-    def owns_collection_data(user: AuthUser) -> bool:
-        has_sources = getattr(repository, "owner_has_sources", None)
-        return bool(has_sources(owner_id=user.id)) if has_sources else True
+    def require_target_owner(target_id: str, user: AuthUser) -> None:
+        """Keep legacy target-pin endpoints from exposing another user's target."""
+        owns_target = getattr(repository, "target_owned_by", None)
+        if owns_target and not owns_target(target_id=target_id, owner_id=user.id):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Collection target was not found")
+
+    def require_target_subscription(target_id: str, service: CollectionService, user: AuthUser) -> CollectionSource:
+        """Resolve a user's subscription without ever returning a worker source."""
+        source = next(
+            (item for item in service.list_sources(owner_id=user.id) if item.targetId == target_id),
+            None,
+        )
+        if source is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Collection target was not found")
+        return source
 
     @router.post("/channel-resolutions", response_model=ChannelResolutionResponse, tags=["channels"])
     def resolve_channel(payload: ChannelResolutionRequest, service: Service) -> ChannelResolutionResponse:
@@ -238,11 +251,7 @@ def create_app(repository: CollectionRepository | None = None, settings: Setting
     ) -> CollectionRequestResponse:
         """Create or join a shared target collection job in one atomic command."""
 
-        submission = service.submit_collection_request(payload, idempotency_key=idempotency_key)
-        assign_owner = getattr(repository, "assign_source_owner", None)
-        if assign_owner:
-            assign_owner(source_id=submission.source.id, owner_id=user.id)
-        return submission
+        return service.submit_collection_request(payload, owner_id=user.id, idempotency_key=idempotency_key)
 
     @router.get("/sources", response_model=list[CollectionSource], tags=["sources"])
     def list_sources(service: Service, user: User) -> list[CollectionSource]:
@@ -253,17 +262,11 @@ def create_app(repository: CollectionRepository | None = None, settings: Setting
         service: Service, user: User,
         channel_id: str | None = Query(default=None, alias="channelId", min_length=1, max_length=64),
     ) -> ExploreResponse:
-        if not owns_collection_data(user):
-            # Explore is populated by source results. An account that has not
-            # claimed or collected any source has no data to render yet.
-            return ExploreResponse(channels=[], videos=[])
-        return service.explore(channel_id=channel_id)
+        return service.explore(owner_id=user.id, channel_id=channel_id)
 
     @router.get("/channels/{youtube_channel_id}/subscriber-history", response_model=list[ChannelSubscriberSnapshot], tags=["explore"])
     def channel_subscriber_history(youtube_channel_id: str, service: Service, user: User) -> list[ChannelSubscriberSnapshot]:
-        if not owns_collection_data(user):
-            return []
-        return service.channel_subscriber_history(youtube_channel_id)
+        return service.channel_subscriber_history(youtube_channel_id, owner_id=user.id)
 
     @router.get("/search", response_model=UnifiedSearchResponse, tags=["search"])
     def search_collected(
@@ -271,42 +274,60 @@ def create_app(repository: CollectionRepository | None = None, settings: Setting
         q: str = Query(min_length=2, max_length=200),
         limit: int = Query(default=20, ge=1, le=50), user: User = None,
     ) -> UnifiedSearchResponse:
-        if not owns_collection_data(user):
-            return UnifiedSearchResponse(query=q, videos=[], comments=[])
-        return service.search_collected(q, limit=limit)
+        return service.search_collected(q, owner_id=user.id, limit=limit)
 
     @router.put("/collection-targets/{target_id}/pin", response_model=TargetPin, tags=["pins"])
-    def set_target_pin(target_id: str, payload: TargetPinUpdate, service: Service) -> TargetPin:
-        return service.set_target_pin(target_id, payload)
+    def set_target_pin(target_id: str, payload: TargetPinUpdate, service: Service, user: User) -> TargetPin:
+        """Deprecated compatibility route for one user's subscription setting.
+
+        A target pin is shared.  Letting one subscriber toggle it directly would
+        stop refreshes requested by another subscriber, so this route maps the
+        legacy enabled flag to the caller's subscription instead.  The repository
+        then derives the aggregate shared pin from all enabled subscriptions.
+        ``intervalMinutes`` is deliberately ignored; refresh cadence is a service
+        policy rather than an individual user's setting.
+        """
+        require_target_owner(target_id, user)
+        subscription = require_target_subscription(target_id, service, user)
+        service.update_source(
+            subscription.id,
+            CollectionSourceUpdate(enabled=payload.enabled),
+            owner_id=user.id,
+        )
+        pin = service.get_target_pin(target_id)
+        if pin is None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Collection target has no refresh pin")
+        return pin
 
     @router.get("/collection-targets/{target_id}/pin", response_model=TargetPin | None, tags=["pins"])
-    def get_target_pin(target_id: str, service: Service) -> TargetPin | None:
+    def get_target_pin(target_id: str, service: Service, user: User) -> TargetPin | None:
+        require_target_owner(target_id, user)
         return service.get_target_pin(target_id)
 
     @router.get("/sources/{source_id}", response_model=CollectionSource, tags=["sources"])
     def get_source(source_id: str, service: Service, user: User) -> CollectionSource:
         require_source_owner(source_id, user)
-        return service.get_source(source_id)
+        return service.get_source(source_id, owner_id=user.id)
 
     @router.get("/sources/{source_id}/results", response_model=SourceResultsResponse, tags=["results"])
     def get_source_results(source_id: str, service: Service, user: User) -> SourceResultsResponse:
         require_source_owner(source_id, user)
-        return service.get_source_results(source_id)
+        return service.get_source_results(source_id, owner_id=user.id)
 
     @router.get("/sources/{source_id}/jobs", response_model=list[JobStatus], tags=["jobs"])
     def list_source_jobs(source_id: str, service: Service, user: User, limit: int = Query(default=20, ge=1, le=50)) -> list[JobStatus]:
         require_source_owner(source_id, user)
-        return service.list_source_jobs(source_id, limit=limit)
+        return service.list_source_jobs(source_id, owner_id=user.id, limit=limit)
 
     @router.patch("/sources/{source_id}", response_model=CollectionSource, tags=["sources"])
     def update_source(source_id: str, payload: CollectionSourceUpdate, service: Service, user: User) -> CollectionSource:
         require_source_owner(source_id, user)
-        return service.update_source(source_id, payload)
+        return service.update_source(source_id, payload, owner_id=user.id)
 
     @router.delete("/sources/{source_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["sources"])
     def delete_source(source_id: str, service: Service, user: User) -> Response:
         require_source_owner(source_id, user)
-        service.delete_source(source_id)
+        service.delete_source(source_id, owner_id=user.id)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @router.post(
@@ -317,25 +338,19 @@ def create_app(repository: CollectionRepository | None = None, settings: Setting
     )
     def create_job(source_id: str, payload: JobCreate, service: Service, user: User) -> JobStatus:
         require_source_owner(source_id, user)
-        return service.create_job(source_id, payload)
+        return service.create_job(source_id, payload, owner_id=user.id)
 
     @router.get("/jobs/{job_id}", response_model=JobStatus, tags=["jobs"])
     def get_job(job_id: str, service: Service, user: User) -> JobStatus:
-        if not owns_collection_data(user):
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job was not found")
-        return service.get_job(job_id)
+        return service.get_job(job_id, owner_id=user.id)
 
     @router.get("/videos/{video_id}/comments", response_model=VideoCommentsResponse, tags=["results"])
     def get_video_comments(video_id: str, service: Service, user: User) -> VideoCommentsResponse:
-        if not owns_collection_data(user):
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Video was not found")
-        return service.get_video_comments(video_id)
+        return service.get_video_comments(video_id, owner_id=user.id)
 
     @router.get("/comments/{comment_id}", response_model=CommentDetailResponse, tags=["results"])
     def get_comment_detail(comment_id: str, service: Service, user: User) -> CommentDetailResponse:
-        if not owns_collection_data(user):
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Comment was not found")
-        return service.get_comment_detail(comment_id)
+        return service.get_comment_detail(comment_id, owner_id=user.id)
 
     app.include_router(auth_router)
     app.include_router(router)

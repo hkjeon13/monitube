@@ -25,6 +25,7 @@ from .fuzzy_search import normalize_search_text, rank_text_fields
 from .domain import (
     CollectionRequestRecord,
     CollectionSubmission,
+    CollectionSubscriptionRecord,
     CollectionTargetRecord,
     CommentRecord,
     JobRecord,
@@ -130,6 +131,20 @@ class PostgresRepository(CollectionRepository):
             idempotency_key=row.get("idempotency_key"),
             job_id=str(row["job_id"]) if row.get("job_id") else None,
             status=str(row["status"]),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            user_id=str(row["user_id"]) if row.get("user_id") else None,
+            subscription_id=str(row["subscription_id"]) if row.get("subscription_id") else None,
+        )
+
+    @staticmethod
+    def _subscription(row: dict[str, Any]) -> CollectionSubscriptionRecord:
+        return CollectionSubscriptionRecord(
+            id=str(row["id"]),
+            user_id=str(row["user_id"]),
+            target_id=str(row["target_id"]),
+            display_config=dict(row.get("display_config") or {}),
+            enabled=bool(row["enabled"]),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -282,6 +297,165 @@ class PostgresRepository(CollectionRepository):
         )
         return cursor.fetchone()
 
+    @staticmethod
+    def _select_subscription(cursor: Any, subscription_id: str, *, owner_id: str | None = None) -> dict[str, Any] | None:
+        cursor.execute(
+            """
+            SELECT subscription.id::text, subscription.user_id::text, subscription.target_id::text,
+                   subscription.display_config, subscription.enabled, subscription.created_at, subscription.updated_at
+            FROM collection_subscriptions subscription
+            WHERE subscription.id = %s
+              AND (%s::uuid IS NULL OR subscription.user_id = %s::uuid)
+            """,
+            (subscription_id, owner_id, owner_id),
+        )
+        return cursor.fetchone()
+
+    @staticmethod
+    def _select_subscription_source(
+        cursor: Any, subscription_id: str, *, owner_id: str | None = None
+    ) -> dict[str, Any] | None:
+        """Return a subscription projected to the existing public SourceRecord shape."""
+
+        cursor.execute(
+            """
+            SELECT subscription.id::text AS id,
+                   target.type::text,
+                   COALESCE(NULLIF(subscription.display_config, '{}'::jsonb), target.config) AS config,
+                   subscription.enabled,
+                   subscription.created_at,
+                   subscription.updated_at,
+                   NULL::timestamptz AS next_run_at,
+                   target.id::text AS target_id,
+                   target.canonical_key,
+                   target.coverage,
+                   target.last_completed_at,
+                   latest_job.latest_job
+            FROM collection_subscriptions subscription
+            JOIN collection_targets target ON target.id = subscription.target_id
+            LEFT JOIN LATERAL (
+              SELECT to_jsonb(job) AS latest_job
+              FROM sync_jobs job
+              WHERE job.target_id = target.id
+              ORDER BY job.created_at DESC
+              LIMIT 1
+            ) latest_job ON TRUE
+            WHERE subscription.id = %s
+              AND (%s::uuid IS NULL OR subscription.user_id = %s::uuid)
+            """,
+            (subscription_id, owner_id, owner_id),
+        )
+        return cursor.fetchone()
+
+    @staticmethod
+    def _subscription_target_ids(cursor: Any, *, owner_id: str, enabled_only: bool = True) -> set[str]:
+        cursor.execute(
+            """
+            SELECT target_id::text
+            FROM collection_subscriptions
+            WHERE user_id = %s
+              AND (NOT %s OR enabled = TRUE)
+            """,
+            (owner_id, enabled_only),
+        )
+        return {str(row["target_id"]) for row in cursor.fetchall()}
+
+    def _ensure_subscription(
+        self, cursor: Any, *, owner_id: str, target_id: str, display_config: dict[str, Any]
+    ) -> CollectionSubscriptionRecord:
+        cursor.execute(
+            """
+            INSERT INTO collection_subscriptions (user_id, target_id, display_config, enabled)
+            VALUES (%s, %s, %s, TRUE)
+            ON CONFLICT (user_id, target_id) DO UPDATE
+            SET display_config = CASE
+                    WHEN EXCLUDED.display_config = '{}'::jsonb THEN collection_subscriptions.display_config
+                    ELSE EXCLUDED.display_config
+                END,
+                enabled = TRUE,
+                updated_at = now()
+            RETURNING id::text, user_id::text, target_id::text, display_config, enabled, created_at, updated_at
+            """,
+            (owner_id, target_id, Json(display_config)),
+        )
+        return self._subscription(cursor.fetchone())
+
+    def _sync_target_pin_for_subscriptions(self, cursor: Any, *, target_id: str) -> None:
+        """Enable a target pin only while at least one subscription is enabled."""
+
+        cursor.execute(
+            "SELECT type::text FROM collection_targets WHERE id = %s FOR UPDATE",
+            (target_id,),
+        )
+        target = cursor.fetchone()
+        if not target:
+            return
+        cursor.execute(
+            "SELECT EXISTS (SELECT 1 FROM collection_subscriptions WHERE target_id = %s AND enabled = TRUE) AS has_enabled",
+            (target_id,),
+        )
+        has_enabled = bool(cursor.fetchone()["has_enabled"])
+        if not has_enabled:
+            cursor.execute(
+                "UPDATE collection_target_pins SET enabled = FALSE, updated_at = now() WHERE target_id = %s",
+                (target_id,),
+            )
+            return
+        cursor.execute(
+            "SELECT 1 FROM collection_target_pins WHERE target_id = %s FOR UPDATE",
+            (target_id,),
+        )
+        if cursor.fetchone():
+            cursor.execute(
+                "UPDATE collection_target_pins SET enabled = TRUE, next_run_at = now(), updated_at = now() WHERE target_id = %s",
+                (target_id,),
+            )
+        elif target["type"] == SourceType.CHANNEL.value:
+            cursor.execute(
+                """
+                INSERT INTO collection_target_pins (target_id, enabled, interval_minutes, next_run_at)
+                VALUES (%s, TRUE, 360, now())
+                ON CONFLICT (target_id) DO UPDATE
+                SET enabled = TRUE, next_run_at = now(), updated_at = now()
+                """,
+                (target_id,),
+            )
+
+    def get_subscription(
+        self, subscription_id: str, *, owner_id: str | None = None
+    ) -> CollectionSubscriptionRecord:
+        with self._connection() as connection, connection.cursor() as cursor:
+            row = self._select_subscription(cursor, subscription_id, owner_id=owner_id)
+            if not row:
+                raise NotFoundError(f"Subscription '{subscription_id}' was not found")
+            return self._subscription(row)
+
+    def list_subscriptions(self, *, owner_id: str) -> list[CollectionSubscriptionRecord]:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id::text, user_id::text, target_id::text, display_config, enabled, created_at, updated_at
+                FROM collection_subscriptions
+                WHERE user_id = %s
+                ORDER BY created_at, id
+                """,
+                (owner_id,),
+            )
+            return [self._subscription(row) for row in cursor.fetchall()]
+
+    def ensure_subscription(
+        self, *, owner_id: str, target_id: str, display_config: dict[str, Any]
+    ) -> CollectionSubscriptionRecord:
+        with self._connection() as connection, connection.cursor() as cursor:
+            subscription = self._ensure_subscription(
+                cursor,
+                owner_id=owner_id,
+                target_id=target_id,
+                display_config=display_config,
+            )
+            self._sync_target_pin_for_subscriptions(cursor, target_id=target_id)
+            return subscription
+
     def create_source(self, *, source_type: SourceType, config: dict[str, Any], owner_id: str | None = None) -> SourceRecord:
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
@@ -296,15 +470,64 @@ class PostgresRepository(CollectionRepository):
             assert row is not None
             return self._source(row)
 
-    def get_source(self, source_id: str) -> SourceRecord:
+    def get_source(self, source_id: str, *, owner_id: str | None = None) -> SourceRecord:
         with self._connection() as connection, connection.cursor() as cursor:
+            subscription_row = self._select_subscription_source(cursor, source_id, owner_id=owner_id)
+            if subscription_row:
+                return self._source(subscription_row)
+            # Do not fall through to a physical source if a subscription with this
+            # ID exists but belongs to another user.
+            if self._select_subscription(cursor, source_id) is not None:
+                raise NotFoundError(f"Source '{source_id}' was not found")
             row = self._select_source(cursor, source_id)
             if not row:
                 raise NotFoundError(f"Source '{source_id}' was not found")
+            if owner_id is not None:
+                if row.get("target_id"):
+                    raise NotFoundError(f"Source '{source_id}' was not found")
+                cursor.execute("SELECT 1 FROM collection_sources WHERE id = %s AND owner_id = %s", (source_id, owner_id))
+                if not cursor.fetchone():
+                    raise NotFoundError(f"Source '{source_id}' was not found")
             return self._source(row)
 
     def list_sources(self, *, owner_id: str | None = None) -> list[SourceRecord]:
         with self._connection() as connection, connection.cursor() as cursor:
+            if owner_id is not None:
+                cursor.execute(
+                    "SELECT id::text FROM collection_subscriptions WHERE user_id = %s ORDER BY created_at, id",
+                    (owner_id,),
+                )
+                subscriptions = []
+                for row in cursor.fetchall():
+                    selected = self._select_subscription_source(cursor, str(row["id"]), owner_id=owner_id)
+                    if selected:
+                        subscriptions.append(self._source(selected))
+
+                # Untargeted legacy sources remain user-owned objects.  A
+                # target-backed worker source is never exposed through an
+                # authenticated Sources route; its subscription is the DTO.
+                cursor.execute(
+                    """
+                    SELECT cs.id::text, cs.type::text, cs.config, cs.enabled, cs.created_at, cs.updated_at, cs.next_run_at,
+                           cs.target_id::text, ct.canonical_key, ct.coverage, ct.last_completed_at, latest_job.latest_job
+                    FROM collection_sources cs
+                    LEFT JOIN collection_targets ct ON ct.id = cs.target_id
+                    LEFT JOIN LATERAL (
+                      SELECT to_jsonb(job) AS latest_job
+                      FROM sync_jobs job
+                      WHERE (cs.target_id IS NOT NULL AND job.target_id = cs.target_id)
+                         OR (cs.target_id IS NULL AND job.source_id = cs.id)
+                      ORDER BY job.created_at DESC
+                      LIMIT 1
+                    ) latest_job ON TRUE
+                    WHERE cs.owner_id = %s
+                      AND cs.target_id IS NULL
+                    ORDER BY cs.created_at
+                    """,
+                    (owner_id,),
+                )
+                return subscriptions + [self._source(row) for row in cursor.fetchall()]
+
             cursor.execute(
                 """
                 SELECT cs.id::text, cs.type::text, cs.config, cs.enabled, cs.created_at, cs.updated_at, cs.next_run_at,
@@ -319,8 +542,7 @@ class PostgresRepository(CollectionRepository):
                   ORDER BY job.created_at DESC
                   LIMIT 1
                 ) latest_job ON TRUE
-                WHERE (%s::uuid IS NULL OR cs.owner_id = %s::uuid)
-                  AND (cs.target_id IS NULL
+                WHERE cs.target_id IS NULL
                    OR cs.id = (
                      SELECT cr.source_id
                      FROM collection_requests cr
@@ -332,49 +554,120 @@ class PostgresRepository(CollectionRepository):
                               COALESCE((primary_source.config ->> 'maxCommentPagesPerVideo')::integer, 0) DESC,
                               cr.created_at, cr.id
                      LIMIT 1
-                   ))
+                   )
                 ORDER BY cs.created_at
-                """,
-                (owner_id, owner_id),
+                """
             )
             return [self._source(row) for row in cursor.fetchall()]
 
     def source_owned_by(self, *, source_id: str, owner_id: str) -> bool:
         with self._connection() as connection, connection.cursor() as cursor:
-            cursor.execute("SELECT 1 FROM collection_sources WHERE id = %s AND owner_id = %s", (source_id, owner_id))
+            subscription = self._select_subscription(cursor, source_id, owner_id=owner_id)
+            if subscription:
+                return True
+            cursor.execute(
+                "SELECT 1 FROM collection_sources WHERE id = %s AND owner_id = %s AND target_id IS NULL",
+                (source_id, owner_id),
+            )
+            return cursor.fetchone() is not None
+
+    def target_owned_by(self, *, target_id: str, owner_id: str) -> bool:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT 1 FROM collection_subscriptions WHERE target_id = %s AND user_id = %s LIMIT 1",
+                (target_id, owner_id),
+            )
+            return cursor.fetchone() is not None
+
+    def job_owned_by(self, *, job_id: str, owner_id: str) -> bool:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT 1
+                FROM sync_jobs job
+                LEFT JOIN collection_subscriptions subscription ON subscription.target_id = job.target_id
+                LEFT JOIN collection_sources source ON source.id = job.source_id
+                WHERE job.id = %s
+                  AND (subscription.user_id = %s OR (source.owner_id = %s AND source.target_id IS NULL))
+                LIMIT 1
+                """,
+                (job_id, owner_id, owner_id),
+            )
             return cursor.fetchone() is not None
 
     def owner_has_sources(self, *, owner_id: str) -> bool:
         with self._connection() as connection, connection.cursor() as cursor:
-            cursor.execute("SELECT 1 FROM collection_sources WHERE owner_id = %s LIMIT 1", (owner_id,))
+            cursor.execute(
+                """
+                SELECT 1
+                FROM collection_subscriptions
+                WHERE user_id = %s
+                UNION ALL
+                SELECT 1 FROM collection_sources WHERE owner_id = %s AND target_id IS NULL
+                LIMIT 1
+                """,
+                (owner_id, owner_id),
+            )
             return cursor.fetchone() is not None
 
-    def assign_source_owner(self, *, source_id: str, owner_id: str) -> None:
+    def subscription_target_ids(self, *, owner_id: str, enabled_only: bool = True) -> set[str]:
         with self._connection() as connection, connection.cursor() as cursor:
-            cursor.execute("UPDATE collection_sources SET owner_id = %s WHERE id = %s AND owner_id IS NULL", (owner_id, source_id))
+            return self._subscription_target_ids(cursor, owner_id=owner_id, enabled_only=enabled_only)
+
+    def assign_source_owner(self, *, source_id: str, owner_id: str) -> None:
+        """Compatibility shim for older routes; new requests already have a subscription."""
+
+        with self._connection() as connection, connection.cursor() as cursor:
+            if self._select_subscription(cursor, source_id) is not None:
+                return
             cursor.execute(
-                """UPDATE collection_targets target SET owner_id = %s
-                   FROM collection_sources source
-                   WHERE source.id = %s AND source.target_id = target.id AND target.owner_id IS NULL""",
+                "UPDATE collection_sources SET owner_id = %s WHERE id = %s AND owner_id IS NULL RETURNING target_id::text",
                 (owner_id, source_id),
             )
+            row = cursor.fetchone()
+            if row and row.get("target_id"):
+                self._ensure_subscription(cursor, owner_id=owner_id, target_id=str(row["target_id"]), display_config={})
+                self._sync_target_pin_for_subscriptions(cursor, target_id=str(row["target_id"]))
 
-    def update_source(self, source_id: str, **changes: Any) -> SourceRecord:
+    def update_source(self, source_id: str, *, owner_id: str | None = None, **changes: Any) -> SourceRecord:
         allowed = {"enabled", "config", "next_run_at"}
         unknown = changes.keys() - allowed
         if unknown:
             raise RepositoryError(f"Unsupported source changes: {', '.join(sorted(unknown))}")
-        if not changes:
-            return self.get_source(source_id)
-        assignments: list[str] = []
-        values: list[Any] = []
-        for key, value in changes.items():
-            assignments.append(f"{key} = %s")
-            values.append(Json(value) if key == "config" else value)
-        values.append(source_id)
         with self._connection() as connection, connection.cursor() as cursor:
+            subscription = self._select_subscription(cursor, source_id, owner_id=owner_id)
+            if subscription:
+                assignments: list[str] = []
+                values: list[Any] = []
+                if "enabled" in changes:
+                    assignments.append("enabled = %s")
+                    values.append(bool(changes["enabled"]))
+                if "config" in changes:
+                    assignments.append("display_config = %s")
+                    values.append(Json(changes["config"]))
+                if assignments:
+                    values.append(source_id)
+                    cursor.execute(
+                        f"UPDATE collection_subscriptions SET {', '.join(assignments)}, updated_at = now() WHERE id = %s",
+                        values,
+                    )
+                    self._sync_target_pin_for_subscriptions(cursor, target_id=subscription.target_id)
+                selected = self._select_subscription_source(cursor, source_id, owner_id=owner_id)
+                assert selected is not None
+                return self._source(selected)
+            if self._select_subscription(cursor, source_id) is not None:
+                raise NotFoundError(f"Source '{source_id}' was not found")
+            if not changes:
+                return self.get_source(source_id, owner_id=owner_id)
+            assignments = []
+            values = []
+            for key, value in changes.items():
+                assignments.append(f"{key} = %s")
+                values.append(Json(value) if key == "config" else value)
+            values.extend((source_id, owner_id, owner_id))
             cursor.execute(
-                f"UPDATE collection_sources SET {', '.join(assignments)}, updated_at = now() WHERE id = %s RETURNING id::text",
+                f"UPDATE collection_sources SET {', '.join(assignments)}, updated_at = now() "
+                "WHERE id = %s AND (%s::uuid IS NULL OR (owner_id = %s::uuid AND target_id IS NULL)) RETURNING id::text",
                 values,
             )
             row = cursor.fetchone()
@@ -384,9 +677,29 @@ class PostgresRepository(CollectionRepository):
             assert selected is not None
             return self._source(selected)
 
-    def delete_source(self, source_id: str) -> None:
+    def delete_source(self, source_id: str, *, owner_id: str | None = None) -> None:
         with self._connection() as connection, connection.cursor() as cursor:
-            cursor.execute("SELECT target_id::text FROM collection_sources WHERE id = %s FOR UPDATE", (source_id,))
+            subscription = self._select_subscription(cursor, source_id, owner_id=owner_id)
+            if subscription:
+                # Deleting a subscription intentionally consumes any request
+                # replay key tied to it.  Without this, a later retry would
+                # find the historical audit row after its FK is SET NULL and
+                # return the internal worker source instead of a new
+                # user-facing subscription.
+                cursor.execute(
+                    "UPDATE collection_requests SET idempotency_key = NULL, updated_at = now() WHERE subscription_id = %s",
+                    (source_id,),
+                )
+                cursor.execute("DELETE FROM collection_subscriptions WHERE id = %s", (source_id,))
+                self._sync_target_pin_for_subscriptions(cursor, target_id=subscription.target_id)
+                return
+            if self._select_subscription(cursor, source_id) is not None:
+                raise NotFoundError(f"Source '{source_id}' was not found")
+            cursor.execute(
+                "SELECT target_id::text FROM collection_sources WHERE id = %s "
+                "AND (%s::uuid IS NULL OR (owner_id = %s::uuid AND target_id IS NULL)) FOR UPDATE",
+                (source_id, owner_id, owner_id),
+            )
             row = cursor.fetchone()
             if not row:
                 raise NotFoundError(f"Source '{source_id}' was not found")
@@ -394,9 +707,13 @@ class PostgresRepository(CollectionRepository):
             if not target_id:
                 cursor.execute("DELETE FROM collection_sources WHERE id = %s", (source_id,))
                 return
-            # Dashboard sources are canonical targets. Remove every historical
-            # source/request alias for this target, stop its pin and jobs, but leave
-            # normalized channels, videos and comments available in Explore.
+            # A physical legacy source is never a reason to erase a shared target
+            # that has user subscriptions.  The old destructive behavior remains
+            # only for genuinely unclaimed legacy targets.
+            cursor.execute("SELECT 1 FROM collection_subscriptions WHERE target_id = %s LIMIT 1", (target_id,))
+            if cursor.fetchone():
+                cursor.execute("DELETE FROM collection_sources WHERE id = %s", (source_id,))
+                return
             cursor.execute("DELETE FROM collection_sources WHERE target_id = %s", (target_id,))
             cursor.execute("DELETE FROM collection_targets WHERE id = %s", (target_id,))
 
@@ -414,15 +731,32 @@ class PostgresRepository(CollectionRepository):
         include_comments: bool,
         max_videos: int | None,
         max_comments_per_video: int | None,
+        owner_id: str | None = None,
         runtime_config_id: str | None = None,
     ) -> JobRecord:
         with self._connection() as connection, connection.cursor() as cursor:
-            cursor.execute("SELECT target_id::text FROM collection_sources WHERE id = %s", (source_id,))
-            source = cursor.fetchone()
-            if not source:
-                raise NotFoundError(f"Source '{source_id}' was not found")
-            if source.get("target_id"):
-                cursor.execute("SELECT id FROM collection_targets WHERE id = %s FOR UPDATE", (source["target_id"],))
+            subscription = self._select_subscription(cursor, source_id, owner_id=owner_id)
+            if subscription:
+                target_id = subscription["target_id"]
+                worker_source = self._target_source(cursor, str(target_id))
+                if not worker_source:
+                    raise RepositoryError(f"Target '{target_id}' has no worker source")
+                worker_source_id = worker_source.id
+            else:
+                if self._select_subscription(cursor, source_id) is not None:
+                    raise NotFoundError(f"Source '{source_id}' was not found")
+                cursor.execute(
+                    "SELECT id::text, target_id::text FROM collection_sources "
+                    "WHERE id = %s AND (%s::uuid IS NULL OR (owner_id = %s::uuid AND target_id IS NULL))",
+                    (source_id, owner_id, owner_id),
+                )
+                source = cursor.fetchone()
+                if not source:
+                    raise NotFoundError(f"Source '{source_id}' was not found")
+                target_id = source.get("target_id")
+                worker_source_id = str(source["id"])
+            if target_id:
+                cursor.execute("SELECT id FROM collection_targets WHERE id = %s FOR UPDATE", (target_id,))
                 cursor.execute(
                     """
                     SELECT * FROM sync_jobs
@@ -431,7 +765,7 @@ class PostgresRepository(CollectionRepository):
                     LIMIT 1
                     FOR UPDATE
                     """,
-                    (source["target_id"],),
+                    (target_id,),
                 )
                 active = cursor.fetchone()
                 if active:
@@ -446,7 +780,7 @@ class PostgresRepository(CollectionRepository):
                 VALUES (%s, %s, %s, 'queued', 'queued', %s, %s, %s, %s)
                 RETURNING *
                 """,
-                (source_id, source.get("target_id"), config_id, new_id(), include_comments, max_videos, max_comments_per_video),
+                (worker_source_id, target_id, config_id, new_id(), include_comments, max_videos, max_comments_per_video),
             )
             return self._job(cursor.fetchone())
 
@@ -592,12 +926,16 @@ class PostgresRepository(CollectionRepository):
         if not target_row:
             raise NotFoundError(f"Target '{request.target_id}' was not found")
         target = self._target(target_row)
-        source_id = request.source_id
-        if source_id is None:
-            source = self._target_source(cursor, target.id)
-        else:
-            source_row = self._select_source(cursor, source_id)
+        if request.subscription_id:
+            source_row = self._select_subscription_source(cursor, request.subscription_id)
             source = self._source(source_row) if source_row else None
+        else:
+            source_id = request.source_id
+            if source_id is None:
+                source = self._target_source(cursor, target.id)
+            else:
+                source_row = self._select_source(cursor, source_id)
+                source = self._source(source_row) if source_row else None
         if not source:
             raise RepositoryError(f"Target '{target.id}' has no worker source")
         job: JobRecord | None = None
@@ -624,15 +962,10 @@ class PostgresRepository(CollectionRepository):
         aliases: list[tuple[str, str]],
         force_refresh: bool,
         idempotency_key: str | None,
+        owner_id: str | None = None,
         runtime_config_id: str | None = None,
     ) -> CollectionSubmission:
         with self._connection() as connection, connection.cursor() as cursor:
-            if idempotency_key:
-                cursor.execute("SELECT * FROM collection_requests WHERE idempotency_key = %s ORDER BY created_at LIMIT 1 FOR UPDATE", (idempotency_key,))
-                replay = cursor.fetchone()
-                if replay:
-                    return self._submission(cursor, self._request(replay))
-
             target: CollectionTargetRecord | None = None
             for alias_kind, alias_value in aliases:
                 cursor.execute(
@@ -680,8 +1013,16 @@ class PostgresRepository(CollectionRepository):
             # of racing the partial unique request index.
             if idempotency_key:
                 cursor.execute(
-                    "SELECT * FROM collection_requests WHERE target_id = %s AND idempotency_key = %s FOR UPDATE",
-                    (target.id, idempotency_key),
+                    """
+                    SELECT * FROM collection_requests
+                    WHERE target_id = %s
+                      AND user_id IS NOT DISTINCT FROM %s::uuid
+                      AND idempotency_key = %s
+                    ORDER BY created_at
+                    LIMIT 1
+                    FOR UPDATE
+                    """,
+                    (target.id, owner_id, idempotency_key),
                 )
                 replay = cursor.fetchone()
                 if replay:
@@ -717,6 +1058,16 @@ class PostgresRepository(CollectionRepository):
             source_row = self._select_source(cursor, source.id)
             assert source_row is not None
             source = self._source(source_row)
+
+            subscription: CollectionSubscriptionRecord | None = None
+            if owner_id:
+                subscription = self._ensure_subscription(
+                    cursor,
+                    owner_id=owner_id,
+                    target_id=target.id,
+                    display_config=config,
+                )
+                self._sync_target_pin_for_subscriptions(cursor, target_id=target.id)
 
             cursor.execute(
                 """
@@ -761,8 +1112,10 @@ class PostgresRepository(CollectionRepository):
 
             cursor.execute(
                 """
-                INSERT INTO collection_requests (target_id, source_id, request_config, idempotency_key, job_id, status)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                INSERT INTO collection_requests (
+                    target_id, source_id, request_config, idempotency_key, job_id, status, user_id, subscription_id
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING *
                 """,
                 (
@@ -772,6 +1125,8 @@ class PostgresRepository(CollectionRepository):
                     idempotency_key,
                     request_job_id,
                     request_status,
+                    owner_id,
+                    subscription.id if subscription else None,
                 ),
             )
             return self._submission(cursor, self._request(cursor.fetchone()))
@@ -824,6 +1179,81 @@ class PostgresRepository(CollectionRepository):
                         """,
                         (current_target.id,),
                     )
+                # Move user-facing subscriptions before retiring the provisional
+                # target.  Preserve each non-conflicting subscription UUID so
+                # existing Sources URLs remain valid.  Only a user who already
+                # has a destination subscription needs a merge/delete.
+                cursor.execute(
+                    """
+                    UPDATE collection_requests request
+                    SET subscription_id = destination.id
+                    FROM collection_subscriptions provisional
+                    JOIN collection_subscriptions destination
+                      ON destination.user_id = provisional.user_id
+                     AND destination.target_id = %s
+                    WHERE provisional.target_id = %s
+                      AND request.subscription_id = provisional.id
+                    """,
+                    (target.id, current_target.id),
+                )
+                cursor.execute(
+                    """
+                    UPDATE collection_subscriptions destination
+                    SET enabled = destination.enabled OR provisional.enabled,
+                        updated_at = now()
+                    FROM collection_subscriptions provisional
+                    WHERE provisional.target_id = %s
+                      AND destination.target_id = %s
+                      AND destination.user_id = provisional.user_id
+                    """,
+                    (current_target.id, target.id),
+                )
+                cursor.execute(
+                    """
+                    DELETE FROM collection_subscriptions provisional
+                    USING collection_subscriptions destination
+                    WHERE provisional.target_id = %s
+                      AND destination.target_id = %s
+                      AND destination.user_id = provisional.user_id
+                    """,
+                    (current_target.id, target.id),
+                )
+                cursor.execute(
+                    "UPDATE collection_subscriptions SET target_id = %s, updated_at = now() WHERE target_id = %s",
+                    (target.id, current_target.id),
+                )
+                # The target-scoped idempotency key is unique per user.  Requests
+                # from two targets can legitimately share it before promotion; the
+                # older provisional audit row remains, but no longer competes with
+                # the canonical request's retry key after the target merge.
+                cursor.execute(
+                    """
+                    UPDATE collection_requests provisional_request
+                    SET idempotency_key = NULL, updated_at = now()
+                    FROM collection_requests canonical_request
+                    WHERE provisional_request.target_id = %s
+                      AND canonical_request.target_id = %s
+                      AND provisional_request.user_id IS NOT DISTINCT FROM canonical_request.user_id
+                      AND provisional_request.idempotency_key = canonical_request.idempotency_key
+                      AND provisional_request.idempotency_key IS NOT NULL
+                    """,
+                    (current_target.id, target.id),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO collection_target_pins (
+                        target_id, enabled, interval_minutes, next_run_at, last_dispatched_at
+                    )
+                    SELECT %s, enabled, interval_minutes, next_run_at, last_dispatched_at
+                    FROM collection_target_pins
+                    WHERE target_id = %s
+                    ON CONFLICT (target_id) DO UPDATE
+                    SET enabled = collection_target_pins.enabled OR EXCLUDED.enabled,
+                        next_run_at = LEAST(collection_target_pins.next_run_at, EXCLUDED.next_run_at),
+                        updated_at = now()
+                    """,
+                    (target.id, current_target.id),
+                )
                 # Preserve every reference before retiring the provisional target.
                 cursor.execute("UPDATE collection_sources SET target_id = %s WHERE target_id = %s", (target.id, current_target.id))
                 cursor.execute("UPDATE collection_requests SET target_id = %s WHERE target_id = %s", (target.id, current_target.id))
@@ -850,6 +1280,7 @@ class PostgresRepository(CollectionRepository):
                 )
                 cursor.execute("DELETE FROM collection_target_aliases WHERE target_id = %s", (current_target.id,))
                 cursor.execute("DELETE FROM collection_targets WHERE id = %s", (current_target.id,))
+                self._sync_target_pin_for_subscriptions(cursor, target_id=target.id)
             else:
                 cursor.execute(
                     """
@@ -885,20 +1316,50 @@ class PostgresRepository(CollectionRepository):
                 )
             return target
 
-    def get_job(self, job_id: str) -> JobRecord:
+    def get_job(self, job_id: str, *, owner_id: str | None = None) -> JobRecord:
         with self._connection() as connection, connection.cursor() as cursor:
-            cursor.execute("SELECT * FROM sync_jobs WHERE id = %s", (job_id,))
+            cursor.execute(
+                """
+                SELECT job.*
+                FROM sync_jobs job
+                LEFT JOIN collection_sources source ON source.id = job.source_id
+                WHERE job.id = %s
+                  AND (
+                    %s::uuid IS NULL
+                    OR EXISTS (
+                      SELECT 1 FROM collection_subscriptions subscription
+                      WHERE subscription.target_id = job.target_id AND subscription.user_id = %s::uuid
+                    )
+                    OR (source.target_id IS NULL AND source.owner_id = %s::uuid)
+                  )
+                """,
+                (job_id, owner_id, owner_id, owner_id),
+            )
             row = cursor.fetchone()
             if not row:
                 raise NotFoundError(f"Job '{job_id}' was not found")
             return self._job(row)
 
-    def list_jobs_for_source(self, source_id: str, *, limit: int = 20) -> list[JobRecord]:
+    def list_jobs_for_source(
+        self, source_id: str, *, limit: int = 20, owner_id: str | None = None
+    ) -> list[JobRecord]:
         with self._connection() as connection, connection.cursor() as cursor:
-            source_row = self._select_source(cursor, source_id)
-            if not source_row:
-                raise NotFoundError(f"Source '{source_id}' was not found")
-            source = self._source(source_row)
+            source_row = self._select_subscription_source(cursor, source_id, owner_id=owner_id)
+            if source_row:
+                source = self._source(source_row)
+            else:
+                if self._select_subscription(cursor, source_id) is not None:
+                    raise NotFoundError(f"Source '{source_id}' was not found")
+                source_row = self._select_source(cursor, source_id)
+                if not source_row:
+                    raise NotFoundError(f"Source '{source_id}' was not found")
+                if owner_id is not None:
+                    if source_row.get("target_id"):
+                        raise NotFoundError(f"Source '{source_id}' was not found")
+                    cursor.execute("SELECT 1 FROM collection_sources WHERE id = %s AND owner_id = %s", (source_id, owner_id))
+                    if not cursor.fetchone():
+                        raise NotFoundError(f"Source '{source_id}' was not found")
+                source = self._source(source_row)
             if source.target_id:
                 cursor.execute("SELECT * FROM sync_jobs WHERE target_id = %s ORDER BY updated_at DESC LIMIT %s", (source.target_id, limit))
             else:
@@ -1417,12 +1878,24 @@ class PostgresRepository(CollectionRepository):
             )
         return summary
 
-    def get_source_results(self, source_id: str) -> dict[str, Any]:
+    def get_source_results(self, source_id: str, *, owner_id: str | None = None) -> dict[str, Any]:
         with self._connection() as connection, connection.cursor() as cursor:
-            source_row = self._select_source(cursor, source_id)
-            if not source_row:
-                raise NotFoundError(f"Source '{source_id}' was not found")
-            source = self._source(source_row)
+            source_row = self._select_subscription_source(cursor, source_id, owner_id=owner_id)
+            if source_row:
+                source = self._source(source_row)
+            else:
+                if self._select_subscription(cursor, source_id) is not None:
+                    raise NotFoundError(f"Source '{source_id}' was not found")
+                source_row = self._select_source(cursor, source_id)
+                if not source_row:
+                    raise NotFoundError(f"Source '{source_id}' was not found")
+                if owner_id is not None:
+                    if source_row.get("target_id"):
+                        raise NotFoundError(f"Source '{source_id}' was not found")
+                    cursor.execute("SELECT 1 FROM collection_sources WHERE id = %s AND owner_id = %s", (source_id, owner_id))
+                    if not cursor.fetchone():
+                        raise NotFoundError(f"Source '{source_id}' was not found")
+                source = self._source(source_row)
             if source.target_id:
                 cursor.execute("SELECT * FROM sync_jobs WHERE target_id = %s ORDER BY created_at DESC LIMIT 1", (source.target_id,))
             else:
@@ -1433,7 +1906,7 @@ class PostgresRepository(CollectionRepository):
             summary = build_summary(videos, comments)
             return {"source": source, "latest_job": self._job(latest_row) if latest_row else None, "videos": videos, "comments": comments, "analysis": summary}
 
-    def get_video_comments(self, video_id: str) -> dict[str, Any]:
+    def get_video_comments(self, video_id: str, *, owner_id: str | None = None) -> dict[str, Any]:
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -1443,9 +1916,18 @@ class PostgresRepository(CollectionRepository):
                 FROM videos v
                 LEFT JOIN channels c ON c.id = v.channel_id
                 LEFT JOIN LATERAL (SELECT view_count, like_count, comment_count FROM video_stat_snapshots WHERE video_id = v.id ORDER BY fetched_at DESC LIMIT 1) stats ON TRUE
-                WHERE v.youtube_video_id = %s OR v.id::text = %s
+                WHERE (v.youtube_video_id = %s OR v.id::text = %s)
+                  AND (
+                    %s::uuid IS NULL
+                    OR EXISTS (
+                      SELECT 1
+                      FROM collection_target_videos membership
+                      JOIN collection_subscriptions subscription ON subscription.target_id = membership.target_id
+                      WHERE membership.video_id = v.id AND subscription.user_id = %s::uuid
+                    )
+                  )
                 """,
-                (video_id, video_id),
+                (video_id, video_id, owner_id, owner_id),
             )
             row = cursor.fetchone()
             if not row:
@@ -1454,7 +1936,7 @@ class PostgresRepository(CollectionRepository):
             comments = self._comments(cursor, [video.youtube_video_id])
             return {"video": video, "comments": comments, "summary": build_summary([video], comments)}
 
-    def get_comment_detail(self, comment_id: str) -> dict[str, Any]:
+    def get_comment_detail(self, comment_id: str, *, owner_id: str | None = None) -> dict[str, Any]:
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -1470,7 +1952,16 @@ class PostgresRepository(CollectionRepository):
                 LEFT JOIN channels c ON c.id = v.channel_id
                 LEFT JOIN LATERAL (SELECT view_count, like_count, comment_count FROM video_stat_snapshots WHERE video_id = v.id ORDER BY fetched_at DESC LIMIT 1) stats ON TRUE
                 WHERE cm.youtube_comment_id = %s
-                """, (comment_id,),
+                  AND (
+                    %s::uuid IS NULL
+                    OR EXISTS (
+                      SELECT 1
+                      FROM collection_target_videos membership
+                      JOIN collection_subscriptions subscription ON subscription.target_id = membership.target_id
+                      WHERE membership.video_id = v.id AND subscription.user_id = %s::uuid
+                    )
+                  )
+                """, (comment_id, owner_id, owner_id),
             )
             row = cursor.fetchone()
             if not row:
@@ -1493,9 +1984,18 @@ class PostgresRepository(CollectionRepository):
                     LEFT JOIN channels c ON c.id = v.channel_id
                     LEFT JOIN LATERAL (SELECT view_count, like_count, comment_count FROM video_stat_snapshots WHERE video_id = v.id ORDER BY fetched_at DESC LIMIT 1) stats ON TRUE
                     WHERE cm.author_channel_id = %s AND cm.youtube_comment_id <> %s
+                      AND (
+                        %s::uuid IS NULL
+                        OR EXISTS (
+                          SELECT 1
+                          FROM collection_target_videos membership
+                          JOIN collection_subscriptions subscription ON subscription.target_id = membership.target_id
+                          WHERE membership.video_id = v.id AND subscription.user_id = %s::uuid
+                        )
+                      )
                     ORDER BY cm.published_at DESC NULLS LAST, cm.source_fetched_at DESC
                     LIMIT 50
-                    """, (comment.author_channel_id, comment_id),
+                    """, (comment.author_channel_id, comment_id, owner_id, owner_id),
                 )
                 for related in cursor.fetchall():
                     author_comments.append({
@@ -1539,7 +2039,13 @@ class PostgresRepository(CollectionRepository):
                 """
                 SELECT target_id::text, interval_minutes
                 FROM collection_target_pins
-                WHERE enabled = TRUE AND next_run_at <= now()
+                WHERE enabled = TRUE
+                  AND next_run_at <= now()
+                  AND EXISTS (
+                    SELECT 1 FROM collection_subscriptions subscription
+                    WHERE subscription.target_id = collection_target_pins.target_id
+                      AND subscription.enabled = TRUE
+                  )
                 ORDER BY next_run_at FOR UPDATE SKIP LOCKED LIMIT %s
                 """,
                 (limit,),
@@ -1568,7 +2074,9 @@ class PostgresRepository(CollectionRepository):
                 )
             return dispatched
 
-    def list_explore(self, *, limit: int = 60, channel_id: str | None = None) -> dict[str, Any]:
+    def list_explore(
+        self, *, limit: int = 60, channel_id: str | None = None, owner_id: str | None = None
+    ) -> dict[str, Any]:
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -1582,8 +2090,32 @@ class PostgresRepository(CollectionRepository):
                        target.id::text AS target_id, pin.enabled AS pin_enabled, pin.interval_minutes AS pin_interval_minutes,
                        pin.next_run_at AS pin_next_run_at, pin.last_dispatched_at AS pin_last_dispatched_at
                 FROM channels c
-                LEFT JOIN LATERAL (SELECT count(*) AS video_count, max(source_fetched_at) AS last_fetched_at FROM videos WHERE channel_id = c.id) video_counts ON TRUE
-                LEFT JOIN LATERAL (SELECT count(*) AS comment_count FROM comments cm JOIN videos v ON v.id = cm.video_id WHERE v.channel_id = c.id) comment_counts ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT count(*) AS video_count, max(v.source_fetched_at) AS last_fetched_at
+                    FROM videos v
+                    WHERE v.channel_id = c.id
+                      AND (
+                        %s::uuid IS NULL
+                        OR EXISTS (
+                          SELECT 1 FROM collection_target_videos membership
+                          JOIN collection_subscriptions subscription ON subscription.target_id = membership.target_id
+                          WHERE membership.video_id = v.id AND subscription.user_id = %s::uuid
+                        )
+                      )
+                ) video_counts ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT count(*) AS comment_count
+                    FROM comments cm JOIN videos v ON v.id = cm.video_id
+                    WHERE v.channel_id = c.id
+                      AND (
+                        %s::uuid IS NULL
+                        OR EXISTS (
+                          SELECT 1 FROM collection_target_videos membership
+                          JOIN collection_subscriptions subscription ON subscription.target_id = membership.target_id
+                          WHERE membership.video_id = v.id AND subscription.user_id = %s::uuid
+                        )
+                      )
+                ) comment_counts ON TRUE
                 LEFT JOIN LATERAL (
                     SELECT sum(COALESCE(latest_stats.comment_count, 0)) AS youtube_comment_count
                     FROM videos v
@@ -1594,12 +2126,35 @@ class PostgresRepository(CollectionRepository):
                         LIMIT 1
                     ) latest_stats ON TRUE
                     WHERE v.channel_id = c.id
+                      AND (
+                        %s::uuid IS NULL
+                        OR EXISTS (
+                          SELECT 1 FROM collection_target_videos membership
+                          JOIN collection_subscriptions subscription ON subscription.target_id = membership.target_id
+                          WHERE membership.video_id = v.id AND subscription.user_id = %s::uuid
+                        )
+                      )
                 ) video_stats ON TRUE
                 LEFT JOIN LATERAL (SELECT subscriber_count, view_count, video_count, hidden_subscriber_count FROM channel_snapshots WHERE channel_id = c.id AND (subscriber_count IS NOT NULL OR view_count IS NOT NULL OR video_count IS NOT NULL OR hidden_subscriber_count IS NOT NULL) ORDER BY fetched_at DESC LIMIT 1) channel_stats ON TRUE
                 LEFT JOIN collection_targets target ON target.resolved_channel_id = c.id
+                    AND (
+                      %s::uuid IS NULL
+                      OR EXISTS (SELECT 1 FROM collection_subscriptions subscription WHERE subscription.target_id = target.id AND subscription.user_id = %s::uuid)
+                    )
                 LEFT JOIN collection_target_pins pin ON pin.target_id = target.id
+                WHERE (
+                    %s::uuid IS NULL
+                    OR EXISTS (
+                      SELECT 1
+                      FROM videos visible_video
+                      JOIN collection_target_videos membership ON membership.video_id = visible_video.id
+                      JOIN collection_subscriptions subscription ON subscription.target_id = membership.target_id
+                      WHERE visible_video.channel_id = c.id AND subscription.user_id = %s::uuid
+                    )
+                )
                 ORDER BY GREATEST(c.source_fetched_at, video_counts.last_fetched_at) DESC NULLS LAST, c.title
-                """
+                """,
+                (owner_id, owner_id, owner_id, owner_id, owner_id, owner_id, owner_id, owner_id, owner_id, owner_id),
             )
             channels = []
             for row in cursor.fetchall():
@@ -1625,7 +2180,15 @@ class PostgresRepository(CollectionRepository):
                     LEFT JOIN channels c ON c.id = v.channel_id
                     LEFT JOIN source_videos source_video ON source_video.video_id = v.id
                     LEFT JOIN LATERAL (SELECT view_count, like_count, comment_count FROM video_stat_snapshots WHERE video_id = v.id ORDER BY fetched_at DESC LIMIT 1) stats ON TRUE
-                    WHERE (%s::text IS NULL OR c.youtube_channel_id = %s)
+                    WHERE (
+                      %s::uuid IS NULL
+                      OR EXISTS (
+                        SELECT 1 FROM collection_target_videos membership
+                        JOIN collection_subscriptions subscription ON subscription.target_id = membership.target_id
+                        WHERE membership.video_id = v.id AND subscription.user_id = %s::uuid
+                      )
+                    )
+                      AND (%s::text IS NULL OR c.youtube_channel_id = %s)
                 ), deduplicated AS (
                     SELECT DISTINCT ON (id) *
                     FROM source_ranked
@@ -1638,11 +2201,13 @@ class PostgresRepository(CollectionRepository):
                 ORDER BY source_rank ASC, source_fetched_at DESC NULLS LAST, published_at DESC NULLS LAST
                 LIMIT %s
                 """,
-                (channel_id, channel_id, channel_id, 10_000 if channel_id else limit),
+                (owner_id, owner_id, channel_id, channel_id, channel_id, 10_000 if channel_id else limit),
             )
             return {"channels": channels, "videos": [self._video(row) for row in cursor.fetchall()]}
 
-    def list_channel_subscriber_history(self, *, youtube_channel_id: str, limit: int = 180) -> list[dict[str, Any]]:
+    def list_channel_subscriber_history(
+        self, *, youtube_channel_id: str, limit: int = 180, owner_id: str | None = None
+    ) -> list[dict[str, Any]]:
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -1651,17 +2216,27 @@ class PostgresRepository(CollectionRepository):
                 JOIN channels channel ON channel.id = snapshot.channel_id
                 WHERE channel.youtube_channel_id = %s
                   AND (snapshot.subscriber_count IS NOT NULL OR snapshot.hidden_subscriber_count IS NOT NULL)
+                  AND (
+                    %s::uuid IS NULL
+                    OR EXISTS (
+                      SELECT 1
+                      FROM videos v
+                      JOIN collection_target_videos membership ON membership.video_id = v.id
+                      JOIN collection_subscriptions subscription ON subscription.target_id = membership.target_id
+                      WHERE v.channel_id = channel.id AND subscription.user_id = %s::uuid
+                    )
+                  )
                 ORDER BY snapshot.fetched_at DESC
                 LIMIT %s
                 """,
-                (youtube_channel_id, limit),
+                (youtube_channel_id, owner_id, owner_id, limit),
             )
             return [
                 {"fetchedAt": row["fetched_at"], "subscriberCount": row["subscriber_count"], "hiddenSubscriberCount": row["hidden_subscriber_count"]}
                 for row in reversed(cursor.fetchall())
             ]
 
-    def search_collected(self, *, query: str, limit: int = 20) -> dict[str, Any]:
+    def search_collected(self, *, query: str, limit: int = 20, owner_id: str | None = None) -> dict[str, Any]:
         """Search persisted public data with a Jaro-Winkler tolerance layer.
 
         Search scoring deliberately runs in the application so results are
@@ -1693,16 +2268,26 @@ class PostgresRepository(CollectionRepository):
                   SELECT view_count, like_count, comment_count FROM video_stat_snapshots
                   WHERE video_id = v.id ORDER BY fetched_at DESC LIMIT 1
                 ) stats ON TRUE
-                WHERE concat_ws(' ', v.title, v.description, c.title, c.handle) ILIKE ALL(%s)
-                   OR (
-                     concat_ws(' ', v.title, v.description, c.title, c.handle) ILIKE ALL(%s)
-                     AND concat_ws(' ', v.title, v.description, c.title, c.handle) ILIKE ALL(%s)
-                   )
+                WHERE (
+                    %s::uuid IS NULL
+                    OR EXISTS (
+                      SELECT 1 FROM collection_target_videos membership
+                      JOIN collection_subscriptions subscription ON subscription.target_id = membership.target_id
+                      WHERE membership.video_id = v.id AND subscription.user_id = %s::uuid
+                    )
+                  )
+                  AND (
+                    concat_ws(' ', v.title, v.description, c.title, c.handle) ILIKE ALL(%s)
+                    OR (
+                      concat_ws(' ', v.title, v.description, c.title, c.handle) ILIKE ALL(%s)
+                      AND concat_ws(' ', v.title, v.description, c.title, c.handle) ILIKE ALL(%s)
+                    )
+                  )
                 ORDER BY CASE WHEN concat_ws(' ', v.title, v.description, c.title, c.handle) ILIKE ALL(%s) THEN 0 ELSE 1 END,
                          v.source_fetched_at DESC NULLS LAST
                 LIMIT %s
                 """,
-                (exact_patterns, first_patterns, last_patterns, exact_patterns, candidate_limit),
+                (owner_id, owner_id, exact_patterns, first_patterns, last_patterns, exact_patterns, candidate_limit),
             )
             video_results: list[dict[str, Any]] = []
             for row in cursor.fetchall():
@@ -1730,16 +2315,26 @@ class PostgresRepository(CollectionRepository):
                   SELECT view_count, like_count, comment_count FROM video_stat_snapshots
                   WHERE video_id = v.id ORDER BY fetched_at DESC LIMIT 1
                 ) stats ON TRUE
-                WHERE cm.text_display ILIKE ALL(%s)
-                   OR (
-                     cm.text_display ILIKE ALL(%s)
-                     AND cm.text_display ILIKE ALL(%s)
-                   )
+                WHERE (
+                    %s::uuid IS NULL
+                    OR EXISTS (
+                      SELECT 1 FROM collection_target_videos membership
+                      JOIN collection_subscriptions subscription ON subscription.target_id = membership.target_id
+                      WHERE membership.video_id = v.id AND subscription.user_id = %s::uuid
+                    )
+                  )
+                  AND (
+                    cm.text_display ILIKE ALL(%s)
+                    OR (
+                      cm.text_display ILIKE ALL(%s)
+                      AND cm.text_display ILIKE ALL(%s)
+                    )
+                  )
                 ORDER BY CASE WHEN cm.text_display ILIKE ALL(%s) THEN 0 ELSE 1 END,
                          cm.source_fetched_at DESC NULLS LAST
                 LIMIT %s
                 """,
-                (exact_patterns, first_patterns, last_patterns, exact_patterns, candidate_limit),
+                (owner_id, owner_id, exact_patterns, first_patterns, last_patterns, exact_patterns, candidate_limit),
             )
             comment_results: list[dict[str, Any]] = []
             for row in cursor.fetchall():

@@ -495,6 +495,26 @@ export async function createSource(requestBody: CreateCollectionSourceRequest) {
   return source;
 }
 
+/**
+ * Update the current user's subscription settings for a collection target.
+ *
+ * A source ID in the browser API is deliberately a user-scoped subscription
+ * ID.  Toggling it must not change another user's shared collection target or
+ * its worker schedule.
+ */
+export async function updateSource(
+  sourceId: string,
+  payload: { enabled?: boolean },
+): Promise<SourceSummary> {
+  const response = await request<unknown>(`/v1/sources/${encodeURIComponent(sourceId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+  const source = normalizeSource(response);
+  if (!source) throw new ApiError("수집 대상 업데이트 응답을 해석하지 못했습니다.", 502);
+  return source;
+}
+
 export async function startJob(sourceId: string, requestBody: StartJobRequest) {
   return request<JobStatus>(
     `/v1/sources/${encodeURIComponent(sourceId)}/jobs`,

@@ -152,8 +152,6 @@ class CollectionService:
         self.repository = repository
         self.runtime_config_id = runtime_config_id
 
-    _DEFAULT_CHANNEL_REFRESH_MINUTES = 360
-
     def resolve_channel(self, input_value: str) -> ChannelResolutionResponse:
         resolution = resolve_channel_input(input_value)
         return ChannelResolutionResponse(
@@ -224,18 +222,41 @@ class CollectionService:
         )
 
     def create_source(self, request: CollectionSourceCreate, *, owner_id: str | None = None) -> CollectionSource:
+        """Compatibility endpoint that creates a subscription, never a worker source.
+
+        Older clients still use ``POST /sources``.  Route that intent through the
+        same canonical target coordinator as ``POST /collection-requests`` so it
+        cannot create an owner-bound physical source or bypass shared coverage.
+        """
         config = self._canonical_config(request.type, request.config)
-        return _source_contract(
-            self.repository.create_source(
-                source_type=request.type,
-                config=config.model_dump(mode="json", exclude_none=True),
-                owner_id=owner_id,
-            )
+        canonical_key, aliases = self._canonical_target(request.type, config)
+        submission = self.repository.submit_collection_request(
+            source_type=request.type,
+            config=config.model_dump(mode="json", exclude_none=True),
+            canonical_key=canonical_key,
+            aliases=aliases,
+            force_refresh=False,
+            idempotency_key=None,
+            owner_id=owner_id,
+            runtime_config_id=self.runtime_config_id,
         )
+        return _source_contract(submission.source)
 
     def submit_collection_request(
-        self, request: CollectionRequestCreate, *, idempotency_key: str | None = None
+        self,
+        request: CollectionRequestCreate,
+        *,
+        owner_id: str | None = None,
+        idempotency_key: str | None = None,
     ) -> CollectionRequestResponse:
+        """Submit a user subscription intent against a shared canonical target.
+
+        ``owner_id`` identifies the caller's subscription only.  The target, its
+        worker source, jobs, and public YouTube data remain shared across users.
+        The repository performs target lookup plus subscription creation in one
+        transaction, which makes duplicate requests safe without a post-hoc
+        ownership assignment.
+        """
         config = self._canonical_config(request.type, request.config)
         canonical_key, aliases = self._canonical_target(request.type, config)
         submission = self.repository.submit_collection_request(
@@ -245,27 +266,21 @@ class CollectionService:
             aliases=aliases,
             force_refresh=request.forceRefresh,
             idempotency_key=idempotency_key.strip() if idempotency_key else None,
+            owner_id=owner_id,
             runtime_config_id=self.runtime_config_id,
         )
-        # Channels are subscriptions by default.  The initial request still starts
-        # immediately; this durable target-level pin schedules later refreshes of
-        # the same canonical channel without creating duplicate user requests.
-        if request.type is SourceType.CHANNEL:
-            self.repository.set_target_pin(
-                target_id=submission.target.id,
-                enabled=True,
-                interval_minutes=self._DEFAULT_CHANNEL_REFRESH_MINUTES,
-            )
         return self._submission_contract(submission)
 
     def list_sources(self, *, owner_id: str | None = None) -> list[CollectionSource]:
         return [_source_contract(record) for record in self.repository.list_sources(owner_id=owner_id)]
 
-    def get_source(self, source_id: str) -> CollectionSource:
-        return _source_contract(self.repository.get_source(source_id))
+    def get_source(self, source_id: str, *, owner_id: str | None = None) -> CollectionSource:
+        return _source_contract(self.repository.get_source(source_id, owner_id=owner_id))
 
-    def update_source(self, source_id: str, request: CollectionSourceUpdate) -> CollectionSource:
-        existing = self.repository.get_source(source_id)
+    def update_source(
+        self, source_id: str, request: CollectionSourceUpdate, *, owner_id: str | None = None
+    ) -> CollectionSource:
+        existing = self.repository.get_source(source_id, owner_id=owner_id)
         changes: dict[str, object] = {}
         if request.enabled is not None:
             changes["enabled"] = request.enabled
@@ -276,29 +291,35 @@ class CollectionService:
             changes["next_run_at"] = request.nextRunAt
         if not changes:
             return _source_contract(existing)
-        return _source_contract(self.repository.update_source(source_id, **changes))
+        return _source_contract(self.repository.update_source(source_id, owner_id=owner_id, **changes))
 
-    def delete_source(self, source_id: str) -> None:
-        self.repository.delete_source(source_id)
+    def delete_source(self, source_id: str, *, owner_id: str | None = None) -> None:
+        self.repository.delete_source(source_id, owner_id=owner_id)
 
-    def create_job(self, source_id: str, request: JobCreate) -> JobStatus:
+    def create_job(self, source_id: str, request: JobCreate, *, owner_id: str | None = None) -> JobStatus:
         record = self.repository.create_job(
             source_id=source_id,
             include_comments=request.include_comments,
             max_videos=request.max_videos,
             max_comments_per_video=request.max_comments_per_video,
+            owner_id=owner_id,
             runtime_config_id=self.runtime_config_id,
         )
         return _job_contract(record)
 
-    def get_job(self, job_id: str) -> JobStatus:
-        return _job_contract(self.repository.get_job(job_id))
+    def get_job(self, job_id: str, *, owner_id: str | None = None) -> JobStatus:
+        return _job_contract(self.repository.get_job(job_id, owner_id=owner_id))
 
-    def list_source_jobs(self, source_id: str, *, limit: int = 20) -> list[JobStatus]:
-        return [_job_contract(record) for record in self.repository.list_jobs_for_source(source_id, limit=limit)]
+    def list_source_jobs(
+        self, source_id: str, *, owner_id: str | None = None, limit: int = 20
+    ) -> list[JobStatus]:
+        return [
+            _job_contract(record)
+            for record in self.repository.list_jobs_for_source(source_id, limit=limit, owner_id=owner_id)
+        ]
 
-    def get_source_results(self, source_id: str) -> SourceResultsResponse:
-        result = self.repository.get_source_results(source_id)
+    def get_source_results(self, source_id: str, *, owner_id: str | None = None) -> SourceResultsResponse:
+        result = self.repository.get_source_results(source_id, owner_id=owner_id)
         source = _source_contract(result["source"])
         latest_job = _job_contract(result["latest_job"]) if result.get("latest_job") else None
         summary = result["analysis"]
@@ -310,16 +331,16 @@ class CollectionService:
             analysis=AnalysisSummary.model_validate(summary),
         )
 
-    def get_video_comments(self, video_id: str) -> VideoCommentsResponse:
-        result = self.repository.get_video_comments(video_id)
+    def get_video_comments(self, video_id: str, *, owner_id: str | None = None) -> VideoCommentsResponse:
+        result = self.repository.get_video_comments(video_id, owner_id=owner_id)
         return VideoCommentsResponse(
             video=_video_contract(result["video"]),
             comments=[_comment_contract(comment) for comment in result["comments"]],
             summary=_comment_summary(result["summary"]),
         )
 
-    def get_comment_detail(self, comment_id: str) -> CommentDetailResponse:
-        result = self.repository.get_comment_detail(comment_id)
+    def get_comment_detail(self, comment_id: str, *, owner_id: str | None = None) -> CommentDetailResponse:
+        result = self.repository.get_comment_detail(comment_id, owner_id=owner_id)
         return CommentDetailResponse(
             comment=_comment_contract(result["comment"]), video=_video_contract(result["video"]),
             authorComments=[AuthorCommentResult(
@@ -345,19 +366,29 @@ class CollectionService:
         pin = self.repository.get_target_pin(target_id=target_id)
         return self._pin_contract(pin) if pin else None
 
-    def explore(self, *, channel_id: str | None = None) -> ExploreResponse:
-        result = self.repository.list_explore(channel_id=channel_id)
+    def explore(self, *, owner_id: str | None = None, channel_id: str | None = None) -> ExploreResponse:
+        result = self.repository.list_explore(channel_id=channel_id, owner_id=owner_id)
         channels = []
         for channel in result["channels"]:
             pin = channel.pop("pin", None)
             channels.append({**channel, "pin": self._pin_contract(pin) if pin else None})
         return ExploreResponse(channels=channels, videos=[_video_contract(video) for video in result["videos"]])
 
-    def channel_subscriber_history(self, youtube_channel_id: str) -> list[ChannelSubscriberSnapshot]:
-        return [ChannelSubscriberSnapshot.model_validate(item) for item in self.repository.list_channel_subscriber_history(youtube_channel_id=youtube_channel_id)]
+    def channel_subscriber_history(
+        self, youtube_channel_id: str, *, owner_id: str | None = None
+    ) -> list[ChannelSubscriberSnapshot]:
+        return [
+            ChannelSubscriberSnapshot.model_validate(item)
+            for item in self.repository.list_channel_subscriber_history(
+                youtube_channel_id=youtube_channel_id,
+                owner_id=owner_id,
+            )
+        ]
 
-    def search_collected(self, query: str, *, limit: int = 20) -> UnifiedSearchResponse:
-        result = self.repository.search_collected(query=query, limit=limit)
+    def search_collected(
+        self, query: str, *, owner_id: str | None = None, limit: int = 20
+    ) -> UnifiedSearchResponse:
+        result = self.repository.search_collected(query=query, limit=limit, owner_id=owner_id)
         return UnifiedSearchResponse(
             query=query,
             videos=[

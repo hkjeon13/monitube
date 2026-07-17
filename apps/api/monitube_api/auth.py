@@ -65,10 +65,37 @@ class AuthStore:
                 (username, _hash_password(password)),
             )
             row = cursor.fetchone()
-            # Legacy rows have no owner until the first browser registration.
-            # The WHERE clause makes the claim one-time and transactional.
-            cursor.execute("UPDATE collection_sources SET owner_id = %s WHERE owner_id IS NULL", (row["id"],))
-            cursor.execute("UPDATE collection_targets SET owner_id = %s WHERE owner_id IS NULL", (row["id"],))
+            # Historical data is intentionally reserved for the established
+            # ``psyche`` account.  Do not let the first later registration claim
+            # all previously collected public data just because it happened to
+            # arrive before that account.  New users create their own
+            # subscriptions through the collection flow instead.
+            if row["username"] == "psyche":
+                cursor.execute("UPDATE collection_sources SET owner_id = %s WHERE owner_id IS NULL", (row["id"],))
+                cursor.execute("UPDATE collection_targets SET owner_id = %s WHERE owner_id IS NULL", (row["id"],))
+                # During a rolling upgrade the psyche account may be registered
+                # after migration 010 ran. Backfill its claimed legacy rows here
+                # so subscription-based Sources reads work immediately.  This is
+                # idempotent and does not copy targets, videos, comments, or jobs.
+                cursor.execute(
+                    """
+                    INSERT INTO collection_subscriptions (
+                        user_id, target_id, display_config, enabled, created_at, updated_at
+                    )
+                    SELECT
+                        %s,
+                        source.target_id,
+                        source.config,
+                        source.enabled,
+                        source.created_at,
+                        source.updated_at
+                    FROM collection_sources source
+                    WHERE source.owner_id = %s
+                      AND source.target_id IS NOT NULL
+                    ON CONFLICT (user_id, target_id) DO NOTHING
+                    """,
+                    (row["id"], row["id"]),
+                )
             return AuthUser(id=str(row["id"]), username=str(row["username"]))
 
     def authenticate(self, username: str, password: str) -> AuthUser | None:

@@ -1,6 +1,6 @@
 # 사용자별 수집 대상과 공유 데이터 분리 설계
 
-> 상태: 제안 (구현 전)  
+> 상태: 구현 완료 (초기 다중 사용자 모델)
 > 작성일: 2026-07-17  
 > 대상: 로그인 사용자, Sources/Channels/Explore, 수집 작업 및 PostgreSQL 모델
 
@@ -178,11 +178,10 @@ SELECT v.*
 FROM collection_subscriptions s
 JOIN collection_target_videos tv ON tv.target_id = s.target_id
 JOIN videos v ON v.id = tv.video_id
-WHERE s.user_id = :current_user_id
-  AND s.enabled;
+WHERE s.user_id = :current_user_id;
 ```
 
-댓글 검색도 같은 video/target membership으로 제한한다. 동일 영상이 여러 구독 target에 속하면 video ID 기준으로 dedupe한다.
+댓글 검색도 같은 video/target membership으로 제한한다. 동일 영상이 여러 구독 target에 속하면 video ID 기준으로 dedupe한다. `enabled = false`인 일시정지 subscription도 기존 수집 데이터의 조회 권한은 유지하며, 자동 갱신 pin 계산에만 제외한다. 완전히 삭제한 subscription만 그 target의 조회 범위에서 제외된다.
 
 동일 작성자의 다른 댓글 상세는 현재 사용자가 접근 가능한 target들의 콘텐츠에서만 조회한다. “전체 DB”는 **그 사용자가 구독한 전체 데이터**라는 뜻으로 정의한다.
 
@@ -204,7 +203,40 @@ WHERE s.user_id = :current_user_id
 1. 신규 `collection_subscriptions`, request 컬럼·index를 추가한다.
 2. `collection_targets.owner_id`는 제거하지 않고 deprecated로 표시한다.
 3. 기존 `collection_sources(owner_id, target_id)`에서 subscription을 backfill한다.
-4. 소유자 없는 legacy source/target은 현재 `psyche` 계정에 한 번만 귀속한다. 대상 사용자가 없으면 migration을 중단하지 않고 unclaimed 상태로 남긴다.
+4. `psyche` 계정이 이미 있으면 소유자 없는 target-backed legacy source와
+   연결된 target을 그 계정에 한 번만 귀속한다. 해당 계정이 없으면 migration을
+   중단하지 않고 unclaimed 상태로 남긴다.
+
+#### Phase 1 schema migration
+
+`database/migrations/010_user_collection_subscriptions.sql`은 다음의
+expand-only 변경을 적용한다.
+
+- `(user_id, target_id)`가 유일한 `collection_subscriptions`를 생성한다.
+- `collection_requests`에 nullable `user_id`, `subscription_id`를 추가하고
+  사용자/구독 이력 조회용 index를 만든다. 기존 target-global idempotency index는
+  `(user_id, target_id, idempotency_key)` partial unique index로 교체해 같은
+  요청 키가 서로 다른 사용자에게 충돌하지 않게 한다.
+- `collection_sources.owner_id`와 `target_id`가 모두 있는 기존 행을 한
+  사용자 구독으로 backfill한다. 같은 사용자·대상에 legacy source가 여러 개면
+  하나의 subscription만 만들며, 하나라도 enabled인 source가 있으면 구독도
+  enabled로 둔다.
+- 기존 `collection_sources.owner_id`, `collection_targets.owner_id`, source,
+  target, job, video, comment 행은 삭제하지 않는다. 기존 `psyche` 계정이 있을
+  때에만 owner가 없는 target-backed legacy source와 그 target의 owner를 한 번
+  채우며, 이미 다른 owner가 있는 행은 덮어쓰지 않는다. `psyche` 계정이 없거나
+  source가 없는 orphan target은 unclaimed 상태로 둔다.
+- legacy `collection_requests.source_id`가 해당 owned source를 가리키는 경우,
+  새 user/subscription 포인터도 함께 backfill한다. `source_id`가 없는 joined
+  요청은 기존 target owner가 가리키는 subscription으로 보완한다.
+
+배포 뒤에는 다음 read-only 검증 스크립트로 schema와 backfill 불변식을
+확인할 수 있다.
+
+```sh
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
+  -f database/tests/010_user_collection_subscriptions_verify.sql
+```
 
 ### Phase 2 — Dual read / single write
 

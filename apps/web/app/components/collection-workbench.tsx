@@ -48,7 +48,7 @@ import {
   listSources,
   login,
   register,
-  updateTargetPin,
+  updateSource,
   type CollectedComment,
   type CollectedVideo,
   type CollectionRequestDisposition,
@@ -413,6 +413,7 @@ function sourceTargetValue(source: SourceSummary) {
 }
 
 function sourceCollectionState(source: SourceSummary) {
+  if (!source.enabled) return { label: "일시 정지", tone: "idle" };
   const job = source.latestJob;
   if (!job) return { label: "정지", tone: "idle" };
   if (job.state === "failed") return { label: "실패", tone: "failed" };
@@ -513,7 +514,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   const [explore, setExplore] = useState<ExploreData>({ channels: [], videos: [] });
   const [isExploreLoading, setIsExploreLoading] = useState(false);
   const [exploreError, setExploreError] = useState<string | null>(null);
-  const [pinningTargetId, setPinningTargetId] = useState<string | null>(null);
+  const [updatingSourceId, setUpdatingSourceId] = useState<string | null>(null);
   const [deletingSourceId, setDeletingSourceId] = useState<string | null>(null);
   const [openSourceMenuId, setOpenSourceMenuId] = useState<string | null>(null);
   const [exploreChannelId, setExploreChannelId] = useState<string | null>(null);
@@ -594,11 +595,6 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   }, [explore.channels, sources]);
   const displayedSources = page === "keywords" ? sources.filter((source) => source.type === "keyword") : sources;
   const hasSearchQuery = submittedSearchQuery.length >= 2;
-  const pinsByTargetId = useMemo(
-    () => new Map(explore.channels.flatMap((channel) => channel.targetId && channel.pin ? [[channel.targetId, channel.pin] as const] : [])),
-    [explore.channels],
-  );
-
   const update = <K extends keyof FormState>(key: K, value: FormState[K]) => {
     setForm((current) => ({ ...current, [key]: value }));
     setError(null);
@@ -691,18 +687,20 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
       });
   }, [page, searchRun, submittedSearchQuery]);
 
-  const togglePin = useCallback(async (targetId: string, pinned: boolean) => {
-    setPinningTargetId(targetId);
+  const toggleSubscriptionRefresh = useCallback(async (source: SourceSummary) => {
+    setUpdatingSourceId(source.id);
     try {
-      await updateTargetPin(targetId, { enabled: !pinned, intervalMinutes: 360 });
-      await refreshExplore();
-      setNotice(pinned ? "자동 갱신을 멈췄습니다. 저장된 데이터는 유지됩니다." : "핀을 설정했습니다. 6시간마다 신규 영상과 댓글을 확인합니다.");
+      await updateSource(source.id, { enabled: !source.enabled });
+      await Promise.all([refreshSources(), refreshExplore()]);
+      setNotice(source.enabled
+        ? "이 수집 대상의 자동 갱신을 멈췄습니다. 다른 사용자의 수집에는 영향을 주지 않습니다."
+        : "이 수집 대상의 자동 갱신을 다시 시작했습니다.");
     } catch (caught) {
-      setExploreError(caught instanceof Error ? caught.message : "핀 상태를 변경하지 못했습니다.");
+      setExploreError(caught instanceof Error ? caught.message : "수집 상태를 변경하지 못했습니다.");
     } finally {
-      setPinningTargetId(null);
+      setUpdatingSourceId(null);
     }
-  }, [exploreChannelId, refreshExplore]);
+  }, [refreshExplore, refreshSources]);
 
   const removeSource = useCallback(async (source: SourceSummary) => {
     const confirmed = window.confirm(`“${sourceLabel(source)}” 수집 대상을 삭제할까요? 자동 수집은 중지되지만 이미 저장된 채널·영상·댓글 데이터는 Explore에서 유지됩니다.`);
@@ -1084,7 +1082,6 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
             </div>
             {displayedSources.map((source) => {
               const canToggleRefresh = source.type === "channel" && Boolean(source.targetId);
-              const pinned = source.targetId ? pinsByTargetId.get(source.targetId)?.enabled !== false : false;
               const menuOpen = openSourceMenuId === source.id;
               const channel = source.targetId ? explore.channels.find((item) => item.targetId === source.targetId) : undefined;
               const targetValue = sourceTargetValue(source);
@@ -1104,7 +1101,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
                   <div className="source-card-actions">
                     <button className="source-more-button" type="button" disabled={deletingSourceId === source.id} onClick={() => setOpenSourceMenuId((current) => current === source.id ? null : source.id)} aria-label={`${sourceLabel(source)} 관리 메뉴`} aria-expanded={menuOpen} aria-haspopup="menu"><EllipsisHorizontalIcon aria-hidden="true" /></button>
                     {menuOpen && <div className="source-action-menu" role="menu" aria-label={`${sourceLabel(source)} 관리`}>
-                      {canToggleRefresh && <button type="button" role="menuitem" disabled={pinningTargetId === source.targetId} onClick={() => { setOpenSourceMenuId(null); source.targetId && void togglePin(source.targetId, pinned); }}>{pinned ? "수집 일시정지" : "수집 재개"}</button>}
+                      {canToggleRefresh && <button type="button" role="menuitem" disabled={updatingSourceId === source.id} onClick={() => { setOpenSourceMenuId(null); void toggleSubscriptionRefresh(source); }}>{source.enabled ? "수집 일시정지" : "수집 재개"}</button>}
                       <button className="source-action-menu-delete" type="button" role="menuitem" onClick={() => void removeSource(source)}>삭제</button>
                     </div>}
                   </div>

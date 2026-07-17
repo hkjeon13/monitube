@@ -113,6 +113,24 @@ class CollectionTargetRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class CollectionSubscriptionRecord:
+    """A user's visible link to a shared canonical collection target.
+
+    The subscription deliberately owns no public YouTube content.  It is the
+    durable boundary for Sources visibility and per-user enablement, while the
+    target continues to own coverage, jobs and target/video membership.
+    """
+
+    id: str
+    user_id: str
+    target_id: str
+    display_config: dict[str, Any]
+    enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class TargetPinRecord:
     target_id: str
     enabled: bool
@@ -134,6 +152,11 @@ class CollectionRequestRecord:
     status: str
     created_at: datetime
     updated_at: datetime
+    # Requests retain their legacy worker source reference, but user-facing
+    # authorization is based on the subscription created atomically with the
+    # request.
+    user_id: str | None = None
+    subscription_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

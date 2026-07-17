@@ -13,6 +13,7 @@ from .analysis import build_summary
 from .domain import (
     CollectionRequestRecord,
     CollectionSubmission,
+    CollectionSubscriptionRecord,
     CollectionTargetRecord,
     CommentRecord,
     JobRecord,
@@ -42,13 +43,13 @@ class InvalidStateTransitionError(RepositoryError):
 class SourceRepository(Protocol):
     def create_source(self, *, source_type: SourceType, config: dict[str, Any], owner_id: str | None = None) -> SourceRecord: ...
 
-    def get_source(self, source_id: str) -> SourceRecord: ...
+    def get_source(self, source_id: str, *, owner_id: str | None = None) -> SourceRecord: ...
 
     def list_sources(self, *, owner_id: str | None = None) -> list[SourceRecord]: ...
 
-    def update_source(self, source_id: str, **changes: Any) -> SourceRecord: ...
+    def update_source(self, source_id: str, *, owner_id: str | None = None, **changes: Any) -> SourceRecord: ...
 
-    def delete_source(self, source_id: str) -> None: ...
+    def delete_source(self, source_id: str, *, owner_id: str | None = None) -> None: ...
 
 
 class JobRepository(Protocol):
@@ -59,12 +60,13 @@ class JobRepository(Protocol):
         include_comments: bool,
         max_videos: int | None,
         max_comments_per_video: int | None,
+        owner_id: str | None = None,
         runtime_config_id: str | None = None,
     ) -> JobRecord: ...
 
-    def get_job(self, job_id: str) -> JobRecord: ...
+    def get_job(self, job_id: str, *, owner_id: str | None = None) -> JobRecord: ...
 
-    def list_jobs_for_source(self, source_id: str, *, limit: int = 20) -> list[JobRecord]: ...
+    def list_jobs_for_source(self, source_id: str, *, limit: int = 20, owner_id: str | None = None) -> list[JobRecord]: ...
 
     def transition_job(self, job_id: str, state: JobState, **changes: Any) -> JobRecord: ...
 
@@ -79,6 +81,7 @@ class CollectionRequestRepository(Protocol):
         aliases: list[tuple[str, str]],
         force_refresh: bool,
         idempotency_key: str | None,
+        owner_id: str | None = None,
         runtime_config_id: str | None = None,
     ) -> CollectionSubmission: ...
 
@@ -90,15 +93,27 @@ class CollectionRequestRepository(Protocol):
 
     def dispatch_due_pins(self, *, runtime_config_id: str | None = None, limit: int = 10) -> int: ...
 
-    def list_explore(self, *, limit: int = 60, channel_id: str | None = None) -> dict[str, Any]: ...
+    def list_explore(self, *, limit: int = 60, channel_id: str | None = None, owner_id: str | None = None) -> dict[str, Any]: ...
 
-    def list_channel_subscriber_history(self, *, youtube_channel_id: str, limit: int = 180) -> list[dict[str, Any]]: ...
+    def list_channel_subscriber_history(
+        self, *, youtube_channel_id: str, limit: int = 180, owner_id: str | None = None
+    ) -> list[dict[str, Any]]: ...
 
-    def search_collected(self, *, query: str, limit: int = 20) -> dict[str, Any]: ...
+    def search_collected(self, *, query: str, limit: int = 20, owner_id: str | None = None) -> dict[str, Any]: ...
 
 
 class CollectionRepository(SourceRepository, JobRepository, CollectionRequestRepository, Protocol):
     """Methods used by the API service and the polling collection worker."""
+
+    def get_subscription(
+        self, subscription_id: str, *, owner_id: str | None = None
+    ) -> CollectionSubscriptionRecord: ...
+
+    def list_subscriptions(self, *, owner_id: str) -> list[CollectionSubscriptionRecord]: ...
+
+    def ensure_subscription(
+        self, *, owner_id: str, target_id: str, display_config: dict[str, Any]
+    ) -> CollectionSubscriptionRecord: ...
 
     def bootstrap_runtime_config(
         self, *, environment: str, google_project_number: str, secret_ref: str, key_fingerprint: str | None
@@ -138,11 +153,21 @@ class CollectionRepository(SourceRepository, JobRepository, CollectionRequestRep
 
     def save_analysis_summary(self, source_id: str) -> dict[str, Any]: ...
 
-    def get_source_results(self, source_id: str) -> dict[str, Any]: ...
+    def get_source_results(self, source_id: str, *, owner_id: str | None = None) -> dict[str, Any]: ...
 
-    def get_video_comments(self, video_id: str) -> dict[str, Any]: ...
+    def get_video_comments(self, video_id: str, *, owner_id: str | None = None) -> dict[str, Any]: ...
 
-    def get_comment_detail(self, comment_id: str) -> dict[str, Any]: ...
+    def get_comment_detail(self, comment_id: str, *, owner_id: str | None = None) -> dict[str, Any]: ...
+
+    def source_owned_by(self, *, source_id: str, owner_id: str) -> bool: ...
+
+    def target_owned_by(self, *, target_id: str, owner_id: str) -> bool: ...
+
+    def job_owned_by(self, *, job_id: str, owner_id: str) -> bool: ...
+
+    def owner_has_sources(self, *, owner_id: str) -> bool: ...
+
+    def subscription_target_ids(self, *, owner_id: str, enabled_only: bool = True) -> set[str]: ...
 
 
 _ALLOWED_TRANSITIONS: dict[JobState, frozenset[JobState]] = {
@@ -177,6 +202,11 @@ class InMemoryRepository(CollectionRepository):
     def __init__(self) -> None:
         self._lock = RLock()
         self._sources: dict[str, SourceRecord] = {}
+        # Physical sources remain worker-facing compatibility records.  Sources
+        # returned to an authenticated browser are subscriptions below.
+        self._source_owners: dict[str, str] = {}
+        self._subscriptions: dict[str, CollectionSubscriptionRecord] = {}
+        self._subscription_ids_by_user_target: dict[tuple[str, str], str] = {}
         self._jobs: dict[str, JobRecord] = {}
         self._targets: dict[str, CollectionTargetRecord] = {}
         self._target_ids_by_key: dict[tuple[SourceType, str], str] = {}
@@ -213,6 +243,10 @@ class InMemoryRepository(CollectionRepository):
     def _clone_request(record: CollectionRequestRecord) -> CollectionRequestRecord:
         return replace(record, request_config=deepcopy(record.request_config))
 
+    @staticmethod
+    def _clone_subscription(record: CollectionSubscriptionRecord) -> CollectionSubscriptionRecord:
+        return replace(record, display_config=deepcopy(record.display_config))
+
     def _source_with_target(self, record: SourceRecord) -> SourceRecord:
         latest_candidates = [
             job
@@ -231,6 +265,85 @@ class InMemoryRepository(CollectionRepository):
             coverage=deepcopy(target.coverage),
             last_completed_at=target.last_completed_at,
         )
+
+    def _subscription_source_locked(self, subscription: CollectionSubscriptionRecord) -> SourceRecord:
+        """Project a user subscription into the stable public ``SourceRecord`` DTO."""
+
+        target = self._targets.get(subscription.target_id)
+        if not target:
+            raise NotFoundError(f"Collection target '{subscription.target_id}' was not found")
+        latest_job = max(
+            (job for job in self._jobs.values() if job.target_id == target.id),
+            key=lambda job: job.created_at,
+            default=None,
+        )
+        # Store the complete request config in display_config.  Older/backfilled
+        # rows can be empty, in which case target config is the safe fallback.
+        config = subscription.display_config or target.config
+        return SourceRecord(
+            id=subscription.id,
+            type=target.type,
+            config=deepcopy(config),
+            enabled=subscription.enabled,
+            created_at=subscription.created_at,
+            updated_at=subscription.updated_at,
+            target_id=target.id,
+            canonical_key=target.canonical_key,
+            coverage=deepcopy(target.coverage),
+            last_completed_at=target.last_completed_at,
+            latest_job=self._clone_job(latest_job) if latest_job else None,
+        )
+
+    def _subscription_for_source_locked(
+        self, source_id: str, *, owner_id: str | None = None
+    ) -> CollectionSubscriptionRecord | None:
+        subscription = self._subscriptions.get(source_id)
+        if subscription and (owner_id is None or subscription.user_id == owner_id):
+            return subscription
+        return None
+
+    def _worker_source_id_locked(self, source_id: str, *, owner_id: str | None = None) -> str:
+        subscription = self._subscription_for_source_locked(source_id, owner_id=owner_id)
+        if subscription:
+            primary = self._primary_source_for_target_locked(subscription.target_id)
+            if primary:
+                return primary
+            raise RepositoryError(f"Target '{subscription.target_id}' has no worker source")
+        if source_id not in self._sources:
+            raise NotFoundError(f"Source '{source_id}' was not found")
+        if owner_id is not None and (
+            self._sources[source_id].target_id is not None
+            or self._source_owners.get(source_id) not in {None, owner_id}
+        ):
+            raise NotFoundError(f"Source '{source_id}' was not found")
+        return source_id
+
+    def _sync_pin_for_target_locked(self, target_id: str) -> None:
+        """Keep target refresh active only while someone has it enabled."""
+
+        target = self._targets.get(target_id)
+        if not target:
+            return
+        has_enabled_subscription = any(
+            subscription.target_id == target_id and subscription.enabled
+            for subscription in self._subscriptions.values()
+        )
+        pin = self._pins.get(target_id)
+        if not has_enabled_subscription:
+            if pin:
+                pin["enabled"] = False
+            return
+        if pin:
+            pin["enabled"] = True
+            pin["next_run_at"] = utcnow()
+        elif target.type is SourceType.CHANNEL:
+            self._pins[target_id] = {
+                "target_id": target_id,
+                "enabled": True,
+                "interval_minutes": 360,
+                "next_run_at": utcnow(),
+                "last_dispatched_at": None,
+            }
 
     @staticmethod
     def _source_coverage_rank(record: SourceRecord) -> tuple[int, int, int, int, datetime]:
@@ -279,6 +392,59 @@ class InMemoryRepository(CollectionRepository):
     def record_runtime_key_state(self, *, runtime_config_id: str | None, key_fingerprint: str, error_reason: str | None = None) -> None:
         return None
 
+    def get_subscription(
+        self, subscription_id: str, *, owner_id: str | None = None
+    ) -> CollectionSubscriptionRecord:
+        with self._lock:
+            subscription = self._subscription_for_source_locked(subscription_id, owner_id=owner_id)
+            if not subscription:
+                raise NotFoundError(f"Subscription '{subscription_id}' was not found")
+            return self._clone_subscription(subscription)
+
+    def list_subscriptions(self, *, owner_id: str) -> list[CollectionSubscriptionRecord]:
+        with self._lock:
+            return [
+                self._clone_subscription(subscription)
+                for subscription in sorted(self._subscriptions.values(), key=lambda item: item.created_at)
+                if subscription.user_id == owner_id
+            ]
+
+    def ensure_subscription(
+        self, *, owner_id: str, target_id: str, display_config: dict[str, Any]
+    ) -> CollectionSubscriptionRecord:
+        with self._lock:
+            if target_id not in self._targets:
+                raise NotFoundError(f"Collection target '{target_id}' was not found")
+            key = (owner_id, target_id)
+            subscription_id = self._subscription_ids_by_user_target.get(key)
+            if subscription_id:
+                existing = self._subscriptions[subscription_id]
+                # Preserve a user's original display choices unless a new request
+                # supplies a non-empty config (for example a normalized handle).
+                updated = replace(
+                    existing,
+                    display_config=deepcopy(display_config) if display_config else existing.display_config,
+                    enabled=True,
+                    updated_at=utcnow(),
+                )
+                self._subscriptions[subscription_id] = updated
+                self._sync_pin_for_target_locked(target_id)
+                return self._clone_subscription(updated)
+            now = utcnow()
+            created = CollectionSubscriptionRecord(
+                id=new_id(),
+                user_id=owner_id,
+                target_id=target_id,
+                display_config=deepcopy(display_config),
+                enabled=True,
+                created_at=now,
+                updated_at=now,
+            )
+            self._subscriptions[created.id] = created
+            self._subscription_ids_by_user_target[key] = created.id
+            self._sync_pin_for_target_locked(target_id)
+            return self._clone_subscription(created)
+
     def create_source(self, *, source_type: SourceType, config: dict[str, Any], owner_id: str | None = None) -> SourceRecord:
         with self._lock:
             now = utcnow()
@@ -286,18 +452,50 @@ class InMemoryRepository(CollectionRepository):
                 id=new_id(), type=source_type, config=deepcopy(config), enabled=True, created_at=now, updated_at=now
             )
             self._sources[record.id] = record
+            if owner_id:
+                self._source_owners[record.id] = owner_id
             self._source_videos[record.id] = set()
             return self._clone_source(record)
 
-    def get_source(self, source_id: str) -> SourceRecord:
+    def get_source(self, source_id: str, *, owner_id: str | None = None) -> SourceRecord:
         with self._lock:
+            subscription = self._subscription_for_source_locked(source_id, owner_id=owner_id)
+            if subscription:
+                return self._subscription_source_locked(subscription)
+            if source_id in self._subscriptions:
+                raise NotFoundError(f"Source '{source_id}' was not found")
             try:
+                if owner_id is not None and (
+                    self._sources[source_id].target_id is not None
+                    or self._source_owners.get(source_id) not in {None, owner_id}
+                ):
+                    raise KeyError(source_id)
                 return self._source_with_target(self._sources[source_id])
             except KeyError as exc:
                 raise NotFoundError(f"Source '{source_id}' was not found") from exc
 
     def list_sources(self, *, owner_id: str | None = None) -> list[SourceRecord]:
         with self._lock:
+            if owner_id is not None:
+                visible = [
+                    self._subscription_source_locked(subscription)
+                    for subscription in sorted(self._subscriptions.values(), key=lambda item: item.created_at)
+                    if subscription.user_id == owner_id
+                ]
+                # Untargeted legacy sources are still user-owned objects.  A
+                # target-backed worker source is intentionally never exposed by
+                # an authenticated Source route; its subscription is the DTO.
+                legacy = [
+                    record
+                    for record in self._sources.values()
+                    if self._source_owners.get(record.id) == owner_id
+                    and record.target_id is None
+                ]
+                visible.extend(
+                    self._source_with_target(record)
+                    for record in sorted(legacy, key=lambda item: item.created_at)
+                )
+                return visible
             records = sorted(self._sources.values(), key=lambda item: item.created_at)
             # A target may retain several legacy source rows for audit history.  The
             # first source linked to it is the stable compatibility source exposed to
@@ -319,13 +517,28 @@ class InMemoryRepository(CollectionRepository):
                 visible.append(self._source_with_target(record))
             return visible
 
-    def update_source(self, source_id: str, **changes: Any) -> SourceRecord:
+    def update_source(self, source_id: str, *, owner_id: str | None = None, **changes: Any) -> SourceRecord:
         allowed = {"enabled", "config", "next_run_at"}
         unknown = changes.keys() - allowed
         if unknown:
             raise RepositoryError(f"Unsupported source changes: {', '.join(sorted(unknown))}")
         with self._lock:
-            record = self.get_source(source_id)
+            subscription = self._subscription_for_source_locked(source_id, owner_id=owner_id)
+            if subscription:
+                values: dict[str, Any] = {"updated_at": utcnow()}
+                if "enabled" in changes:
+                    values["enabled"] = bool(changes["enabled"])
+                if "config" in changes:
+                    values["display_config"] = deepcopy(changes["config"])
+                # next_run_at is target scheduling state, never a per-user
+                # subscription setting.  Preserve API compatibility as a no-op.
+                updated_subscription = replace(subscription, **values)
+                self._subscriptions[source_id] = updated_subscription
+                self._sync_pin_for_target_locked(subscription.target_id)
+                return self._subscription_source_locked(updated_subscription)
+            if source_id in self._subscriptions:
+                raise NotFoundError(f"Source '{source_id}' was not found")
+            record = self.get_source(source_id, owner_id=owner_id)
             values = dict(changes)
             if "config" in values:
                 values["config"] = deepcopy(values["config"])
@@ -334,10 +547,33 @@ class InMemoryRepository(CollectionRepository):
             self._sources[source_id] = updated
             return self._source_with_target(updated)
 
-    def delete_source(self, source_id: str) -> None:
+    def delete_source(self, source_id: str, *, owner_id: str | None = None) -> None:
         with self._lock:
+            subscription = self._subscription_for_source_locked(source_id, owner_id=owner_id)
+            if subscription:
+                # A removed subscription must not let a later browser retry
+                # replay the old request into a now-inaccessible worker source.
+                # Keep the audit row and user attribution, but consume its
+                # idempotency key so an explicit re-add creates a fresh
+                # subscription/request pair.
+                for identifier, request in list(self._requests.items()):
+                    if request.subscription_id == subscription.id:
+                        self._requests[identifier] = replace(
+                            request,
+                            subscription_id=None,
+                            idempotency_key=None,
+                            updated_at=utcnow(),
+                        )
+                self._subscriptions.pop(source_id, None)
+                self._subscription_ids_by_user_target.pop((subscription.user_id, subscription.target_id), None)
+                self._sync_pin_for_target_locked(subscription.target_id)
+                return
+            if source_id in self._subscriptions:
+                raise NotFoundError(f"Source '{source_id}' was not found")
             source = self._sources.get(source_id)
             if not source:
+                raise NotFoundError(f"Source '{source_id}' was not found")
+            if owner_id is not None and (source.target_id is not None or self._source_owners.get(source_id) not in {None, owner_id}):
                 raise NotFoundError(f"Source '{source_id}' was not found")
             source_ids = [
                 identifier for identifier, candidate in self._sources.items()
@@ -345,6 +581,7 @@ class InMemoryRepository(CollectionRepository):
             ] if source.target_id else [source_id]
             for identifier in source_ids:
                 self._sources.pop(identifier, None)
+                self._source_owners.pop(identifier, None)
                 self._source_videos.pop(identifier, None)
                 self._analysis.pop(identifier, None)
             for job_id in [job.id for job in self._jobs.values() if job.source_id in source_ids]:
@@ -362,6 +599,56 @@ class InMemoryRepository(CollectionRepository):
                     if request.target_id == source.target_id:
                         del self._requests[request_id]
 
+    def source_owned_by(self, *, source_id: str, owner_id: str) -> bool:
+        with self._lock:
+            subscription = self._subscriptions.get(source_id)
+            if subscription:
+                return subscription.user_id == owner_id
+            source = self._sources.get(source_id)
+            return bool(source and source.target_id is None and self._source_owners.get(source_id) == owner_id)
+
+    def target_owned_by(self, *, target_id: str, owner_id: str) -> bool:
+        with self._lock:
+            return (owner_id, target_id) in self._subscription_ids_by_user_target
+
+    def job_owned_by(self, *, job_id: str, owner_id: str) -> bool:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job:
+                return False
+            if job.target_id:
+                return self.target_owned_by(target_id=job.target_id, owner_id=owner_id)
+            source = self._sources.get(job.source_id)
+            return bool(source and source.target_id is None and self._source_owners.get(job.source_id) == owner_id)
+
+    def owner_has_sources(self, *, owner_id: str) -> bool:
+        with self._lock:
+            return any(subscription.user_id == owner_id for subscription in self._subscriptions.values()) or any(
+                value == owner_id and self._sources.get(source_id) and self._sources[source_id].target_id is None
+                for source_id, value in self._source_owners.items()
+            )
+
+    def subscription_target_ids(self, *, owner_id: str, enabled_only: bool = True) -> set[str]:
+        with self._lock:
+            return {
+                subscription.target_id
+                for subscription in self._subscriptions.values()
+                if subscription.user_id == owner_id and (subscription.enabled or not enabled_only)
+            }
+
+    def assign_source_owner(self, *, source_id: str, owner_id: str) -> None:
+        """Compatibility shim for older route code.
+
+        New submissions create the subscription atomically.  We retain this for
+        legacy ``POST /sources`` callers without changing shared target ownership.
+        """
+
+        with self._lock:
+            if source_id in self._subscriptions:
+                return
+            if source_id in self._sources:
+                self._source_owners.setdefault(source_id, owner_id)
+
     def create_job(
         self,
         *,
@@ -369,11 +656,13 @@ class InMemoryRepository(CollectionRepository):
         include_comments: bool,
         max_videos: int | None,
         max_comments_per_video: int | None,
+        owner_id: str | None = None,
         runtime_config_id: str | None = None,
     ) -> JobRecord:
         with self._lock:
-            self.get_source(source_id)
-            target_id = self._sources[source_id].target_id
+            worker_source_id = self._worker_source_id_locked(source_id, owner_id=owner_id)
+            self.get_source(worker_source_id)
+            target_id = self._sources[worker_source_id].target_id
             if target_id:
                 active = next(
                     (
@@ -388,7 +677,7 @@ class InMemoryRepository(CollectionRepository):
             now = utcnow()
             record = JobRecord(
                 id=new_id(),
-                source_id=source_id,
+                source_id=worker_source_id,
                 state=JobState.QUEUED,
                 current_stage="queued",
                 progress_completed=0,
@@ -505,12 +794,18 @@ class InMemoryRepository(CollectionRepository):
 
     def _submission_from_request_locked(self, request: CollectionRequestRecord) -> CollectionSubmission:
         target = self._targets[request.target_id]
-        source_id = request.source_id
-        if source_id is None:
-            source_id = self._primary_source_for_target_locked(target.id)
-        if source_id is None:
-            raise RepositoryError(f"Target '{target.id}' has no worker source")
-        source = self._source_with_target(self._sources[source_id])
+        if request.subscription_id:
+            subscription = self._subscriptions.get(request.subscription_id)
+            if not subscription:
+                raise RepositoryError(f"Request '{request.id}' points to a missing subscription")
+            source = self._subscription_source_locked(subscription)
+        else:
+            source_id = request.source_id
+            if source_id is None:
+                source_id = self._primary_source_for_target_locked(target.id)
+            if source_id is None:
+                raise RepositoryError(f"Target '{target.id}' has no worker source")
+            source = self._source_with_target(self._sources[source_id])
         job = self._clone_job(self._jobs[request.job_id]) if request.job_id and request.job_id in self._jobs else None
         if request.job_id is None and request.status == "queued":
             disposition = "successor_queued"
@@ -537,16 +832,10 @@ class InMemoryRepository(CollectionRepository):
         aliases: list[tuple[str, str]],
         force_refresh: bool,
         idempotency_key: str | None,
+        owner_id: str | None = None,
         runtime_config_id: str | None = None,
     ) -> CollectionSubmission:
         with self._lock:
-            # A retry is returned before any state is changed.  The public endpoint
-            # documents an idempotency key as unique for a logical client action.
-            if idempotency_key:
-                existing = next((item for item in self._requests.values() if item.idempotency_key == idempotency_key), None)
-                if existing:
-                    return self._submission_from_request_locked(existing)
-
             target_id = next(
                 (self._target_aliases[(source_type, kind, value)] for kind, value in aliases if (source_type, kind, value) in self._target_aliases),
                 None,
@@ -569,6 +858,23 @@ class InMemoryRepository(CollectionRepository):
                 self._target_ids_by_key[(source_type, canonical_key)] = target.id
             else:
                 target = self._targets[target_id]
+
+            # Idempotency is scoped to a user's logical action for one canonical
+            # target.  The same header value must not replay a different target
+            # or another user's request.
+            if idempotency_key:
+                existing = next(
+                    (
+                        item
+                        for item in self._requests.values()
+                        if item.idempotency_key == idempotency_key
+                        and item.user_id == owner_id
+                        and item.target_id == target.id
+                    ),
+                    None,
+                )
+                if existing:
+                    return self._submission_from_request_locked(existing)
 
             for kind, value in aliases:
                 self._target_aliases[(source_type, kind, value)] = target.id
@@ -597,6 +903,16 @@ class InMemoryRepository(CollectionRepository):
             target = replace(target, config=deepcopy(merged_config), updated_at=utcnow())
             self._targets[target.id] = target
 
+            subscription: CollectionSubscriptionRecord | None = None
+            if owner_id:
+                # This runs under the target lock, mirroring the database's
+                # INSERT .. ON CONFLICT (user_id, target_id) contract.
+                subscription = self.ensure_subscription(
+                    owner_id=owner_id,
+                    target_id=target.id,
+                    display_config=config,
+                )
+
             desired = self._desired_coverage(source_type, config)
             active = next(
                 (job for job in sorted(self._jobs.values(), key=lambda item: item.created_at) if job.target_id == target.id and not job.state.is_terminal),
@@ -606,13 +922,15 @@ class InMemoryRepository(CollectionRepository):
             request = CollectionRequestRecord(
                 id=new_id(),
                 target_id=target.id,
-                source_id=primary.id if not any(item.target_id == target.id and item.source_id for item in self._requests.values()) else None,
+                source_id=primary.id,
                 request_config=deepcopy(config),
                 idempotency_key=idempotency_key,
                 job_id=None,
                 status="queued",
                 created_at=now,
                 updated_at=now,
+                user_id=owner_id,
+                subscription_id=subscription.id if subscription else None,
             )
 
             if not force_refresh and self._coverage_satisfies(target.coverage, desired):
@@ -662,9 +980,47 @@ class InMemoryRepository(CollectionRepository):
                 for identifier, candidate in list(self._sources.items()):
                     if candidate.target_id == current.id:
                         self._sources[identifier] = replace(candidate, target_id=target.id, updated_at=utcnow())
+                merged_subscription_ids: dict[str, str] = {}
+                for identifier, subscription in list(self._subscriptions.items()):
+                    if subscription.target_id != current.id:
+                        continue
+                    existing_identifier = self._subscription_ids_by_user_target.get((subscription.user_id, target.id))
+                    if existing_identifier and existing_identifier != identifier:
+                        existing = self._subscriptions[existing_identifier]
+                        self._subscriptions[existing_identifier] = replace(
+                            existing,
+                            enabled=existing.enabled or subscription.enabled,
+                            updated_at=utcnow(),
+                        )
+                        self._subscriptions.pop(identifier, None)
+                        self._subscription_ids_by_user_target.pop((subscription.user_id, current.id), None)
+                        merged_subscription_ids[identifier] = existing_identifier
+                    else:
+                        self._subscriptions[identifier] = replace(subscription, target_id=target.id, updated_at=utcnow())
+                        self._subscription_ids_by_user_target.pop((subscription.user_id, current.id), None)
+                        self._subscription_ids_by_user_target[(subscription.user_id, target.id)] = identifier
+                canonical_idempotency_keys = {
+                    (candidate.user_id, candidate.idempotency_key)
+                    for candidate in self._requests.values()
+                    if candidate.target_id == target.id and candidate.idempotency_key
+                }
                 for identifier, candidate in list(self._requests.items()):
                     if candidate.target_id == current.id:
-                        self._requests[identifier] = replace(candidate, target_id=target.id, updated_at=utcnow())
+                        # A handle target and an already-resolved UC target can
+                        # each have accepted the same user retry key before
+                        # promotion.  Keep the canonical target's key and make
+                        # the older provisional audit row non-replayable, just
+                        # as the PostgreSQL promotion transaction does.
+                        idempotency_key = candidate.idempotency_key
+                        if (candidate.user_id, idempotency_key) in canonical_idempotency_keys:
+                            idempotency_key = None
+                        self._requests[identifier] = replace(
+                            candidate,
+                            target_id=target.id,
+                            subscription_id=merged_subscription_ids.get(candidate.subscription_id, candidate.subscription_id),
+                            idempotency_key=idempotency_key,
+                            updated_at=utcnow(),
+                        )
                 for identifier, candidate in list(self._jobs.items()):
                     if candidate.target_id == current.id:
                         self._jobs[identifier] = replace(
@@ -676,8 +1032,12 @@ class InMemoryRepository(CollectionRepository):
                     if value == current.id:
                         self._target_aliases[alias] = target.id
                 self._target_videos.setdefault(target.id, set()).update(self._target_videos.pop(current.id, set()))
+                current_pin = self._pins.pop(current.id, None)
+                if current_pin and target.id not in self._pins:
+                    self._pins[target.id] = {**current_pin, "target_id": target.id}
                 self._target_ids_by_key.pop((current.type, current.canonical_key), None)
                 self._targets.pop(current.id, None)
+                self._sync_pin_for_target_locked(target.id)
             else:
                 self._target_ids_by_key.pop((current.type, current.canonical_key), None)
                 target = replace(current, canonical_key=canonical_key, updated_at=utcnow())
@@ -688,16 +1048,20 @@ class InMemoryRepository(CollectionRepository):
                 self._target_aliases[(SourceType.CHANNEL, "handle", handle.casefold())] = target.id
             return self._clone_target(target)
 
-    def get_job(self, job_id: str) -> JobRecord:
+    def get_job(self, job_id: str, *, owner_id: str | None = None) -> JobRecord:
         with self._lock:
             try:
+                if owner_id is not None and not self.job_owned_by(job_id=job_id, owner_id=owner_id):
+                    raise KeyError(job_id)
                 return self._clone_job(self._jobs[job_id])
             except KeyError as exc:
                 raise NotFoundError(f"Job '{job_id}' was not found") from exc
 
-    def list_jobs_for_source(self, source_id: str, *, limit: int = 20) -> list[JobRecord]:
+    def list_jobs_for_source(
+        self, source_id: str, *, limit: int = 20, owner_id: str | None = None
+    ) -> list[JobRecord]:
         with self._lock:
-            source = self.get_source(source_id)
+            source = self.get_source(source_id, owner_id=owner_id)
             jobs = [
                 job for job in self._jobs.values()
                 if (source.target_id and job.target_id == source.target_id)
@@ -862,10 +1226,13 @@ class InMemoryRepository(CollectionRepository):
             self._comments[comment.youtube_comment_id] = stored
             return stored
 
-    def get_comment_detail(self, comment_id: str) -> dict[str, Any]:
+    def get_comment_detail(self, comment_id: str, *, owner_id: str | None = None) -> dict[str, Any]:
         with self._lock:
             comment = self._comments.get(comment_id)
             if not comment:
+                raise NotFoundError(f"Comment '{comment_id}' was not found")
+            visible_video_ids = self._visible_video_ids_locked(owner_id)
+            if visible_video_ids is not None and comment.youtube_video_id not in visible_video_ids:
                 raise NotFoundError(f"Comment '{comment_id}' was not found")
             video = self._videos.get(comment.youtube_video_id)
             if not video:
@@ -874,6 +1241,8 @@ class InMemoryRepository(CollectionRepository):
             if comment.author_channel_id:
                 for item in self._comments.values():
                     if item.youtube_comment_id == comment.youtube_comment_id or item.author_channel_id != comment.author_channel_id:
+                        continue
+                    if visible_video_ids is not None and item.youtube_video_id not in visible_video_ids:
                         continue
                     related_video = self._videos.get(item.youtube_video_id)
                     if related_video:
@@ -938,6 +1307,12 @@ class InMemoryRepository(CollectionRepository):
             for target_id, pin in sorted(self._pins.items(), key=lambda item: item[1]["next_run_at"]):
                 if dispatched >= limit or not pin["enabled"] or pin["next_run_at"] > now:
                     continue
+                if not any(
+                    subscription.target_id == target_id and subscription.enabled
+                    for subscription in self._subscriptions.values()
+                ):
+                    pin["enabled"] = False
+                    continue
                 active = any(job.target_id == target_id and not job.state.is_terminal for job in self._jobs.values())
                 if not active:
                     source_id = self._primary_source_for_target_locked(target_id)
@@ -948,20 +1323,41 @@ class InMemoryRepository(CollectionRepository):
                 pin["next_run_at"] = now + timedelta(minutes=int(pin["interval_minutes"]))
             return dispatched
 
-    def list_explore(self, *, limit: int = 60, channel_id: str | None = None) -> dict[str, Any]:
+    def list_explore(
+        self, *, limit: int = 60, channel_id: str | None = None, owner_id: str | None = None
+    ) -> dict[str, Any]:
         with self._lock:
+            visible_video_ids = self._visible_video_ids_locked(owner_id)
+            visible_target_ids = (
+                self.subscription_target_ids(owner_id=owner_id, enabled_only=False) if owner_id is not None else None
+            )
             channels: list[dict[str, Any]] = []
-            for channel_id, channel in self._channels.items():
-                channel_videos = [video for video in self._videos.values() if video.youtube_channel_id == channel_id]
+            for current_channel_id, channel in self._channels.items():
+                channel_videos = [
+                    video
+                    for video in self._videos.values()
+                    if video.youtube_channel_id == current_channel_id
+                    and (visible_video_ids is None or video.youtube_video_id in visible_video_ids)
+                ]
+                if owner_id is not None and not channel_videos:
+                    continue
                 ids = {video.youtube_video_id for video in channel_videos}
-                target = next((target for target in self._targets.values() if target.resolved_channel_id == channel.get("id")), None)
+                target = next(
+                    (
+                        target
+                        for target in self._targets.values()
+                        if target.resolved_channel_id == channel.get("id")
+                        and (visible_target_ids is None or target.id in visible_target_ids)
+                    ),
+                    None,
+                )
                 pin = self._pins.get(target.id) if target else None
                 collected_video_count = len(channel_videos)
                 youtube_video_count = int((channel.get("statistics") or {}).get("videoCount") or 0)
                 collected_comment_count = sum(1 for comment in self._comments.values() if comment.youtube_video_id in ids)
                 youtube_comment_count = sum(int((video.statistics or {}).get("commentCount") or 0) for video in channel_videos)
                 channels.append({
-                    "youtubeChannelId": channel_id, "handle": channel.get("handle"), "title": channel.get("title"),
+                    "youtubeChannelId": current_channel_id, "handle": channel.get("handle"), "title": channel.get("title"),
                     "description": channel.get("description"), "thumbnailUrl": channel.get("thumbnail_url"),
                     "subscriberCount": (channel.get("statistics") or {}).get("subscriberCount"),
                     "viewCount": (channel.get("statistics") or {}).get("viewCount"),
@@ -976,7 +1372,12 @@ class InMemoryRepository(CollectionRepository):
                     "targetId": target.id if target else None, "pin": deepcopy(pin) if pin else None,
                 })
             channels.sort(key=lambda item: item["lastFetchedAt"] or utcnow(), reverse=True)
-            videos = [video for video in self._videos.values() if channel_id is None or video.youtube_channel_id == channel_id]
+            videos = [
+                video
+                for video in self._videos.values()
+                if (visible_video_ids is None or video.youtube_video_id in visible_video_ids)
+                and (channel_id is None or video.youtube_channel_id == channel_id)
+            ]
             videos_by_channel: dict[str, list[VideoRecord]] = {}
             for video in videos:
                 videos_by_channel.setdefault(video.youtube_channel_id, []).append(video)
@@ -993,8 +1394,16 @@ class InMemoryRepository(CollectionRepository):
                 ordered_buckets = next_buckets
             return {"channels": channels, "videos": videos}
 
-    def list_channel_subscriber_history(self, *, youtube_channel_id: str, limit: int = 180) -> list[dict[str, Any]]:
+    def list_channel_subscriber_history(
+        self, *, youtube_channel_id: str, limit: int = 180, owner_id: str | None = None
+    ) -> list[dict[str, Any]]:
         with self._lock:
+            visible_video_ids = self._visible_video_ids_locked(owner_id)
+            if visible_video_ids is not None and not any(
+                video.youtube_channel_id == youtube_channel_id and video.youtube_video_id in visible_video_ids
+                for video in self._videos.values()
+            ):
+                raise NotFoundError(f"Channel '{youtube_channel_id}' was not found")
             channel = self._channels.get(youtube_channel_id)
             if not channel or not channel.get("statistics"):
                 return []
@@ -1004,11 +1413,14 @@ class InMemoryRepository(CollectionRepository):
                 "hiddenSubscriberCount": channel["statistics"].get("hiddenSubscriberCount"),
             }]
 
-    def search_collected(self, *, query: str, limit: int = 20) -> dict[str, Any]:
+    def search_collected(self, *, query: str, limit: int = 20, owner_id: str | None = None) -> dict[str, Any]:
         with self._lock:
+            visible_video_ids = self._visible_video_ids_locked(owner_id)
             video_results: list[dict[str, Any]] = []
             comment_results: list[dict[str, Any]] = []
             for video in self._videos.values():
+                if visible_video_ids is not None and video.youtube_video_id not in visible_video_ids:
+                    continue
                 channel = self._channels.get(video.youtube_channel_id or "", {})
                 score, matched_fields = rank_text_fields(query, {
                     "title": video.title,
@@ -1023,6 +1435,8 @@ class InMemoryRepository(CollectionRepository):
                 video = self._videos.get(comment.youtube_video_id)
                 if not video:
                     continue
+                if visible_video_ids is not None and video.youtube_video_id not in visible_video_ids:
+                    continue
                 channel = self._channels.get(video.youtube_channel_id or "", {})
                 score, matched_fields = rank_text_fields(query, {"comment": comment.text_display})
                 if matched_fields:
@@ -1036,12 +1450,29 @@ class InMemoryRepository(CollectionRepository):
             return {"videos": video_results[:limit], "comments": comment_results[:limit]}
 
     def _source_video_records(self, source_id: str) -> list[VideoRecord]:
+        subscription = self._subscriptions.get(source_id)
         source = self._sources.get(source_id)
-        if source and source.target_id:
+        if subscription:
+            ids = self._target_videos.get(subscription.target_id, set())
+        elif source and source.target_id:
             ids = self._target_videos.get(source.target_id, set())
         else:
             ids = self._source_videos.get(source_id, set())
         return sorted((self._videos[item] for item in ids if item in self._videos), key=lambda item: item.source_fetched_at, reverse=True)
+
+    def _target_video_ids_locked(self, target_ids: Iterable[str]) -> set[str]:
+        return {
+            youtube_video_id
+            for target_id in target_ids
+            for youtube_video_id in self._target_videos.get(target_id, set())
+        }
+
+    def _visible_video_ids_locked(self, owner_id: str | None) -> set[str] | None:
+        if owner_id is None:
+            return None
+        # Pausing a subscription stops target refresh only; it must not hide
+        # previously collected public data from that same user.
+        return self._target_video_ids_locked(self.subscription_target_ids(owner_id=owner_id, enabled_only=False))
 
     def _comments_for_video_ids(self, video_ids: set[str]) -> list[CommentRecord]:
         return sorted(
@@ -1058,13 +1489,24 @@ class InMemoryRepository(CollectionRepository):
             self._analysis[source_id] = deepcopy(summary)
             return deepcopy(summary)
 
-    def get_source_results(self, source_id: str) -> dict[str, Any]:
+    def get_source_results(self, source_id: str, *, owner_id: str | None = None) -> dict[str, Any]:
         with self._lock:
-            source = self.get_source(source_id)
+            source = self.get_source(source_id, owner_id=owner_id)
             videos = self._source_video_records(source_id)
             comments = self._comments_for_video_ids({video.youtube_video_id for video in videos})
             latest_job = next(
-                iter(sorted((job for job in self._jobs.values() if job.source_id == source_id), key=lambda item: item.created_at, reverse=True)),
+                iter(
+                    sorted(
+                        (
+                            job
+                            for job in self._jobs.values()
+                            if (source.target_id and job.target_id == source.target_id)
+                            or (not source.target_id and job.source_id == source_id)
+                        ),
+                        key=lambda item: item.created_at,
+                        reverse=True,
+                    )
+                ),
                 None,
             )
             summary = deepcopy(self._analysis.get(source_id) or build_summary(videos, comments))
@@ -1076,10 +1518,13 @@ class InMemoryRepository(CollectionRepository):
                 "analysis": summary,
             }
 
-    def get_video_comments(self, video_id: str) -> dict[str, Any]:
+    def get_video_comments(self, video_id: str, *, owner_id: str | None = None) -> dict[str, Any]:
         with self._lock:
             video = self._videos.get(video_id)
             if not video:
+                raise NotFoundError(f"Video '{video_id}' was not found")
+            visible_video_ids = self._visible_video_ids_locked(owner_id)
+            if visible_video_ids is not None and video_id not in visible_video_ids:
                 raise NotFoundError(f"Video '{video_id}' was not found")
             comments = self._comments_for_video_ids({video_id})
             return {"video": video, "comments": comments, "summary": build_summary([video], comments)}

@@ -2,17 +2,30 @@ from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 
-from monitube_api.domain import CommentRecord, SourceType, VideoRecord
+from monitube_api.domain import CommentRecord, VideoRecord
 from monitube_api.main import create_app
 from monitube_api.repositories import InMemoryRepository
 
 
+def _subscribed_video_source(repository: InMemoryRepository, video_id: str) -> tuple[TestClient, str, str]:
+    """Create the public subscription plus its internal worker source for fixtures."""
+
+    client = TestClient(create_app(repository=repository))
+    response = client.post(
+        "/v1/collection-requests",
+        json={"type": "video", "config": {"input": video_id, "includeComments": True}},
+    )
+    assert response.status_code == 201
+    body = response.json()
+    worker_source_id = next(
+        source.id for source in repository._sources.values() if source.target_id == body["targetId"]
+    )
+    return client, body["source"]["id"], worker_source_id
+
+
 def test_source_results_and_video_comments_are_queryable() -> None:
     repository = InMemoryRepository()
-    source = repository.create_source(
-        source_type=SourceType.VIDEO,
-        config={"input": "dQw4w9WgXcQ", "includeComments": True, "maxCommentPagesPerVideo": 1},
-    )
+    client, source_id, worker_source_id = _subscribed_video_source(repository, "dQw4w9WgXcQ")
     video = repository.upsert_video(
         VideoRecord(
             id="video-row",
@@ -28,7 +41,7 @@ def test_source_results_and_video_comments_are_queryable() -> None:
             source_fetched_at=datetime(2025, 1, 3, tzinfo=UTC),
         )
     )
-    repository.link_source_video(source.id, video.youtube_video_id)
+    repository.link_source_video(worker_source_id, video.youtube_video_id)
     repository.upsert_comment(
         CommentRecord(
             id="comment-row",
@@ -43,10 +56,9 @@ def test_source_results_and_video_comments_are_queryable() -> None:
             source_fetched_at=datetime(2025, 1, 4, tzinfo=UTC),
         )
     )
-    repository.save_analysis_summary(source.id)
-    client = TestClient(create_app(repository=repository))
+    repository.save_analysis_summary(worker_source_id)
 
-    results = client.get(f"/v1/sources/{source.id}/results")
+    results = client.get(f"/v1/sources/{source_id}/results")
     comments = client.get(f"/v1/videos/{video.youtube_video_id}/comments")
 
     assert results.status_code == 200
@@ -59,6 +71,7 @@ def test_source_results_and_video_comments_are_queryable() -> None:
 
 def test_comment_detail_includes_other_comments_from_the_same_author() -> None:
     repository = InMemoryRepository()
+    client, _, worker_source_id = _subscribed_video_source(repository, "dQw4w9WgXcQ")
     video = repository.upsert_video(
         VideoRecord(
             id="video-row", youtube_video_id="dQw4w9WgXcQ", youtube_channel_id="UCabcdefghijklmnopqrstuv",
@@ -67,6 +80,7 @@ def test_comment_detail_includes_other_comments_from_the_same_author() -> None:
             source_fetched_at=datetime(2025, 1, 3, tzinfo=UTC),
         )
     )
+    repository.link_source_video(worker_source_id, video.youtube_video_id)
     for comment_id, text in (("comment-1", "첫 댓글"), ("comment-2", "다른 댓글")):
         repository.upsert_comment(
             CommentRecord(
@@ -77,8 +91,6 @@ def test_comment_detail_includes_other_comments_from_the_same_author() -> None:
                 source_fetched_at=datetime(2025, 1, 4, tzinfo=UTC),
             )
         )
-    client = TestClient(create_app(repository=repository))
-
     detail = client.get("/v1/comments/comment-1")
 
     assert detail.status_code == 200
@@ -88,6 +100,7 @@ def test_comment_detail_includes_other_comments_from_the_same_author() -> None:
 
 def test_unified_search_finds_titles_and_tolerates_a_comment_typo() -> None:
     repository = InMemoryRepository()
+    client, _, worker_source_id = _subscribed_video_source(repository, "dQw4w9WgXcQ")
     channel_id = "UCabcdefghijklmnopqrstuv"
     repository.upsert_channel({
         "id": "channel-row", "youtube_channel_id": channel_id, "handle": "@fastapi",
@@ -102,6 +115,7 @@ def test_unified_search_finds_titles_and_tolerates_a_comment_typo() -> None:
             statistics={"viewCount": 12, "likeCount": 3, "commentCount": 1}, source_fetched_at=datetime(2025, 1, 3, tzinfo=UTC),
         )
     )
+    repository.link_source_video(worker_source_id, video.youtube_video_id)
     repository.upsert_comment(
         CommentRecord(
             id="comment-row", youtube_comment_id="comment-1", youtube_video_id=video.youtube_video_id,
@@ -110,8 +124,6 @@ def test_unified_search_finds_titles_and_tolerates_a_comment_typo() -> None:
             source_fetched_at=datetime(2025, 1, 4, tzinfo=UTC),
         )
     )
-    client = TestClient(create_app(repository=repository))
-
     title = client.get("/v1/search", params={"q": "배포"})
     typo = client.get("/v1/search", params={"q": "설먕이"})
     title_only_comment = client.get("/v1/search", params={"q": "FastAPI"})
