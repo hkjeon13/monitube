@@ -72,6 +72,36 @@ class DirectVideoClient:
         raise AssertionError(f"Unexpected endpoint: {endpoint}")
 
 
+class PaginatedRepliesClient:
+    def __init__(self) -> None:
+        self.reply_requests: list[dict[str, object]] = []
+
+    @staticmethod
+    def bucket_for(_endpoint: str) -> QuotaBucket:
+        return QuotaBucket.CORE
+
+    def request(self, endpoint: str, params: dict[str, object]):
+        if endpoint == "videos":
+            return {"items": [{
+                "id": "dQw4w9WgXcQ",
+                "snippet": {"channelId": "UCabcdefghijklmnopqrstuv", "channelTitle": "Example", "title": "Demo", "publishedAt": "2025-01-02T03:04:05Z"},
+                "contentDetails": {"duration": "PT1M2S"}, "status": {"privacyStatus": "public", "madeForKids": False},
+                "statistics": {"viewCount": "12", "likeCount": "3", "commentCount": "3"},
+            }]}
+        if endpoint == "commentThreads":
+            return {"items": [{
+                "id": "thread-1",
+                "snippet": {"totalReplyCount": 2, "topLevelComment": {"id": "comment-1", "snippet": {"textDisplay": "Top level", "publishedAt": "2025-01-03T00:00:00Z"}}},
+                "replies": {"comments": [{"id": "reply-1", "snippet": {"textDisplay": "Inline reply", "parentId": "comment-1", "publishedAt": "2025-01-03T00:01:00Z"}}]},
+            }]}
+        if endpoint == "comments":
+            self.reply_requests.append(params)
+            if params.get("pageToken") is None:
+                return {"items": [{"id": "reply-1", "snippet": {"textDisplay": "Inline reply", "parentId": "comment-1", "publishedAt": "2025-01-03T00:01:00Z"}}], "nextPageToken": "more-replies"}
+            return {"items": [{"id": "reply-2", "snippet": {"textDisplay": "Later reply", "parentId": "comment-1", "publishedAt": "2025-01-03T00:02:00Z"}}]}
+        raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+
 def test_quota_error_logs_checkpoint_and_due_job_resumes_from_same_cursor() -> None:
     repository = InMemoryRepository()
     source = repository.create_source(
@@ -415,3 +445,22 @@ def test_direct_video_collection_persists_video_comments_and_summary() -> None:
     assert result["videos"][0].title == "Demo"
     assert result["comments"][0].youtube_comment_id == "comment-1"
     assert result["analysis"]["topWords"][0]["word"] == "demo"
+
+
+def test_comment_collection_follows_every_reply_page() -> None:
+    repository = InMemoryRepository()
+    source = repository.create_source(
+        source_type=SourceType.VIDEO,
+        config={"input": "dQw4w9WgXcQ", "includeComments": True, "maxCommentPagesPerVideo": 1},
+    )
+    job = repository.create_job(source_id=source.id, include_comments=True, max_videos=None, max_comments_per_video=None)
+    client = PaginatedRepliesClient()
+
+    completed = JobRunner(repository, YouTubeCollector(repository, client)).run(job.id)
+    result = repository.get_source_results(source.id)
+
+    assert completed.state is JobState.COMPLETED
+    assert [request["pageToken"] for request in client.reply_requests] == [None, "more-replies"]
+    assert {comment.youtube_comment_id for comment in result["comments"]} == {"comment-1", "reply-1", "reply-2"}
+    replies = [comment for comment in result["comments"] if comment.youtube_parent_comment_id]
+    assert {comment.youtube_parent_comment_id for comment in replies} == {"comment-1"}

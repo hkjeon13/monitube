@@ -414,6 +414,49 @@ class YouTubeCollector:
             author_display_name=snippet.get("authorDisplayName"),
         )
 
+    def _collect_remaining_replies(
+        self,
+        job: JobRecord,
+        *,
+        video_id: str,
+        thread_id: str,
+        parent_comment_id: str,
+    ) -> int:
+        """Fetch every reply page for a top-level comment.
+
+        ``commentThreads.list`` only embeds a limited reply subset.  The
+        separate ``comments.list(parentId=...)`` traversal is therefore needed
+        for the advertised public-comment count and coverage rate to be honest.
+        Upserts make replaying this traversal safe when a quota pause occurs.
+        """
+
+        count = 0
+        page_token: str | None = None
+        while True:
+            payload = self._call(
+                job,
+                "comments",
+                part="snippet",
+                parentId=parent_comment_id,
+                maxResults=100,
+                textFormat="plainText",
+                pageToken=page_token,
+            )
+            for reply in payload.get("items", []):
+                if reply.get("id"):
+                    self.repository.upsert_comment(
+                        self._comment_from_item(
+                            video_id=video_id,
+                            thread_id=thread_id,
+                            item=reply,
+                            parent_id=parent_comment_id,
+                        )
+                    )
+                    count += 1
+            page_token = payload.get("nextPageToken")
+            if not page_token:
+                return count
+
     def _collect_comments(
         self, job: JobRecord, video: VideoRecord, max_pages: int | None, *, incremental_refresh: bool
     ) -> int:
@@ -456,12 +499,22 @@ class YouTubeCollector:
                 if top and top.get("id"):
                     persisted = self.repository.upsert_comment(self._comment_from_item(video_id=video.youtube_video_id, thread_id=thread_id, item=top))
                     count += 1
-                    for reply in ((thread.get("replies") or {}).get("comments") or []):
-                        if reply.get("id"):
-                            self.repository.upsert_comment(
-                                self._comment_from_item(video_id=video.youtube_video_id, thread_id=thread_id, item=reply, parent_id=persisted.youtube_comment_id)
-                            )
-                            count += 1
+                    inline_replies = ((thread.get("replies") or {}).get("comments") or [])
+                    total_replies = as_int((thread.get("snippet") or {}).get("totalReplyCount"))
+                    if total_replies > len(inline_replies):
+                        count += self._collect_remaining_replies(
+                            job,
+                            video_id=video.youtube_video_id,
+                            thread_id=thread_id,
+                            parent_comment_id=persisted.youtube_comment_id,
+                        )
+                    else:
+                        for reply in inline_replies:
+                            if reply.get("id"):
+                                self.repository.upsert_comment(
+                                    self._comment_from_item(video_id=video.youtube_video_id, thread_id=thread_id, item=reply, parent_id=persisted.youtube_comment_id)
+                                )
+                                count += 1
             page_token = payload.get("nextPageToken")
             self._checkpoint(job, stage="comments", scope_key=video.youtube_video_id, page_token=page_token, batch_cursor=page)
             # ``order=time`` makes the first all-known page the incremental
