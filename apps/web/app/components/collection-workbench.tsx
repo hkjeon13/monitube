@@ -292,14 +292,6 @@ function sourceCoverage(source?: SourceSummary) {
     : "동영상 메타데이터";
 }
 
-function sourceRowStatus(source: SourceSummary) {
-  const config = source.config;
-  if (source.type === "channel" && (config.collectAllVideos === true || source.coverage?.collectAllVideos === true)) {
-    return "전체 수집";
-  }
-  return source.type === "keyword" ? "검색 수집" : source.type === "video" ? "영상 수집" : "수집 대상";
-}
-
 function normalizedSourceIdentity(source: SourceSummary) {
   if (source.targetId) return `target:${source.targetId}`;
   if (source.canonicalKey) return `key:${source.canonicalKey}`;
@@ -413,9 +405,21 @@ function StatusPill({ job }: { job?: JobStatus | null }) {
   );
 }
 
+function sourceTargetValue(source: SourceSummary) {
+  const input = source.config.input;
+  const query = source.config.query;
+  return typeof query === "string" ? query : typeof input === "string" ? input : source.canonicalKey ?? "—";
+}
+
 function SourceProgress({ source }: { source: SourceSummary }) {
   const job = source.latestJob;
-  if (!job) return <div className="source-progress source-progress-idle"><span>기록 없음</span></div>;
+  if (!job) return (
+    <>
+      <span className="source-progress source-progress-state source-progress-idle">기록 없음</span>
+      <span className="source-progress source-progress-idle">—</span>
+      <span className="source-progress source-progress-idle">—</span>
+    </>
+  );
 
   const commentsRequested = source.config.includeComments === true || source.coverage?.includeComments === true;
   const phase = (prefix: string, progress: JobStatus["progress"] | undefined, disabled = false) => {
@@ -430,11 +434,11 @@ function SourceProgress({ source }: { source: SourceSummary }) {
   const status = fullyCovered ? "완료" : job.state === "completed" ? "종료" : statusCopy(job).replace("수집 ", "");
 
   return (
-    <div className="source-progress" aria-label={`${sourceLabel(source)} 수집 진행률`}>
-      <span className={`source-progress-state source-progress-state-${job.state}`}>{status}</span>
-      <span>{phase("영상", job.videoProgress)}</span>
-      {commentsRequested && <span>{phase("댓글", job.commentProgress)}</span>}
-    </div>
+    <>
+      <span className={`source-progress source-progress-state source-progress-state-${job.state}`}>{status}</span>
+      <span className="source-progress">{phase("영상", job.videoProgress).replace("영상 ", "")}</span>
+      <span className="source-progress">{commentsRequested ? phase("댓글", job.commentProgress).replace("댓글 ", "") : "미수집"}</span>
+    </>
   );
 }
 
@@ -959,17 +963,29 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
 
         <section className="sources-page" aria-labelledby="sources-page-title">
           <div className="workspace-page-heading"><p className="section-kicker">COLLECTION TARGETS</p><h1 id="sources-page-title">Sources</h1><p>중복 없이 정규화된 수집 대상을 관리하고, 선택한 대상의 수집 범위를 확인합니다.</p></div>
-          <div className="sources-page-list">
+          <div className="sources-table-wrap">
+          <div className="sources-page-list" aria-label="수집 대상 목록">
+            <div className="source-table-header">
+              <span>배지</span>
+              <span>채널명</span>
+              <span>채널 ID · 대상</span>
+              <span>상태</span>
+              <span>영상 수집</span>
+              <span>댓글 수집</span>
+              <span className="source-table-actions-header">관리</span>
+            </div>
             {sources.map((source) => {
               const canToggleRefresh = source.type === "channel" && Boolean(source.targetId);
               const pinned = source.targetId ? pinsByTargetId.get(source.targetId)?.enabled !== false : false;
               const menuOpen = openSourceMenuId === source.id;
+              const channel = source.targetId ? explore.channels.find((item) => item.targetId === source.targetId) : undefined;
+              const channelName = channel?.title ?? channel?.handle ?? (source.type === "channel" ? "채널 정보 확인 중" : sourceTypeCopy(source.type));
               return (
                 <article key={source.id} className={`source-page-card${source.id === activeSourceId ? " source-page-card-active" : ""}${menuOpen ? " source-page-card-menu-open" : ""}`}>
                   <button type="button" className="source-page-select" onClick={() => { setOpenSourceMenuId(null); openSourceWorkspace(source.id); }} aria-label={`${sourceLabel(source)} 작업 공간 열기`}>
                     <span className="source-type-chip">{sourceTypeCopy(source.type)}</span>
-                    <strong>{typeof source.config.query === "string" ? source.config.query : typeof source.config.input === "string" ? source.config.input : sourceLabel(source)}</strong>
-                    <small>{sourceRowStatus(source)}</small>
+                    <strong>{channelName}</strong>
+                    <small title={sourceTargetValue(source)}>{sourceTargetValue(source)}</small>
                   </button>
                   <SourceProgress source={source} />
                   <div className="source-card-actions">
@@ -983,6 +999,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
               );
             })}
             {sources.length === 0 && <div className="explore-empty">아직 등록된 수집 대상이 없습니다.</div>}
+          </div>
           </div>
         </section>
 
