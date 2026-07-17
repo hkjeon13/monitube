@@ -509,6 +509,14 @@ export async function getJob(jobId: string) {
   return request<JobStatus>(`/v1/jobs/${encodeURIComponent(jobId)}`, { method: "GET" });
 }
 
+export async function listSourceJobs(sourceId: string): Promise<JobStatus[]> {
+  const response = await request<unknown>(`/v1/sources/${encodeURIComponent(sourceId)}/jobs`, { method: "GET" });
+  return (Array.isArray(response) ? response : []).flatMap((job) => {
+    const normalized = normalizeJob(job);
+    return normalized ? [normalized] : [];
+  });
+}
+
 export async function listSources() {
   const response = await request<unknown>("/v1/sources", { method: "GET" });
   const record = asRecord(response);

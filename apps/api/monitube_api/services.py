@@ -289,6 +289,9 @@ class CollectionService:
     def get_job(self, job_id: str) -> JobStatus:
         return _job_contract(self.repository.get_job(job_id))
 
+    def list_source_jobs(self, source_id: str, *, limit: int = 20) -> list[JobStatus]:
+        return [_job_contract(record) for record in self.repository.list_jobs_for_source(source_id, limit=limit)]
+
     def get_source_results(self, source_id: str) -> SourceResultsResponse:
         result = self.repository.get_source_results(source_id)
         source = _source_contract(result["source"])

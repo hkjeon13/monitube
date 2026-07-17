@@ -858,6 +858,18 @@ class PostgresRepository(CollectionRepository):
                 raise NotFoundError(f"Job '{job_id}' was not found")
             return self._job(row)
 
+    def list_jobs_for_source(self, source_id: str, *, limit: int = 20) -> list[JobRecord]:
+        with self._connection() as connection, connection.cursor() as cursor:
+            source_row = self._select_source(cursor, source_id)
+            if not source_row:
+                raise NotFoundError(f"Source '{source_id}' was not found")
+            source = self._source(source_row)
+            if source.target_id:
+                cursor.execute("SELECT * FROM sync_jobs WHERE target_id = %s ORDER BY updated_at DESC LIMIT %s", (source.target_id, limit))
+            else:
+                cursor.execute("SELECT * FROM sync_jobs WHERE source_id = %s ORDER BY updated_at DESC LIMIT %s", (source_id, limit))
+            return [self._job(row) for row in cursor.fetchall()]
+
     def transition_job(self, job_id: str, state: JobState, **changes: Any) -> JobRecord:
         allowed = {
             "current_stage",

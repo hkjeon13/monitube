@@ -193,6 +193,10 @@ def create_app(repository: CollectionRepository | None = None, settings: Setting
     def get_source_results(source_id: str, service: Service) -> SourceResultsResponse:
         return service.get_source_results(source_id)
 
+    @router.get("/sources/{source_id}/jobs", response_model=list[JobStatus], tags=["jobs"])
+    def list_source_jobs(source_id: str, service: Service, limit: int = Query(default=20, ge=1, le=50)) -> list[JobStatus]:
+        return service.list_source_jobs(source_id, limit=limit)
+
     @router.patch("/sources/{source_id}", response_model=CollectionSource, tags=["sources"])
     def update_source(source_id: str, payload: CollectionSourceUpdate, service: Service) -> CollectionSource:
         return service.update_source(source_id, payload)

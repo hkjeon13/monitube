@@ -38,6 +38,7 @@ import {
   deleteSource,
   getChannelSubscriberHistory,
   getJob,
+  listSourceJobs,
   getExplore,
   searchCollected,
   getSourceResults,
@@ -443,6 +444,7 @@ function MetricCard({
   icon,
   accent = false,
   failure = false,
+  onClick,
 }: {
   label: string;
   value: string;
@@ -450,16 +452,12 @@ function MetricCard({
   icon: ReactNode;
   accent?: boolean;
   failure?: boolean;
+  onClick?: () => void;
 }) {
+  const className = `${accent ? "metric-card metric-card-accent" : "metric-card"}${failure ? " metric-card-failure" : ""}`;
+  const content = <><div className="metric-card-head"><span>{label}</span><span className="metric-icon" aria-hidden="true">{icon}</span></div><strong>{value}</strong><small>{detail}</small></>;
   return (
-    <article className={`${accent ? "metric-card metric-card-accent" : "metric-card"}${failure ? " metric-card-failure" : ""}`}>
-      <div className="metric-card-head">
-        <span>{label}</span>
-        <span className="metric-icon" aria-hidden="true">{icon}</span>
-      </div>
-      <strong>{value}</strong>
-      <small>{detail}</small>
-    </article>
+    onClick ? <button type="button" className={`${className} metric-card-button`} onClick={onClick}>{content}</button> : <article className={className}>{content}</article>
   );
 }
 
@@ -530,6 +528,18 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     ? Math.min(100, Math.round((activeJob.progress.completed / activeJob.progress.total) * 100))
     : 0;
   const failureReason = jobFailureReason(activeJob);
+  const openFailureHistory = useCallback(async () => {
+    if (!activeSourceId) return;
+    try {
+      const failed = (await listSourceJobs(activeSourceId)).filter((item) => item.state === "failed");
+      const history = failed.length
+        ? failed.map((item, index) => `${index + 1}. ${jobFailureReason(item) ?? "실패 사유가 기록되지 않았습니다."}\n작업 ID: ${item.id}`).join("\n\n")
+        : "기록된 실패 이력이 없습니다.";
+      window.alert(`수집 실패 이력\n\n${history}`);
+    } catch (caught) {
+      window.alert(caught instanceof Error ? caught.message : "실패 이력을 불러오지 못했습니다.");
+    }
+  }, [activeSourceId]);
   const exploreVideos = useMemo(() => {
     const scoped = exploreChannelId ? explore.videos.filter((video) => video.channelId === exploreChannelId) : explore.videos;
     return [...scoped].sort((left, right) => new Date(right.publishedAt ?? right.fetchedAt ?? 0).getTime() - new Date(left.publishedAt ?? left.fetchedAt ?? 0).getTime());
@@ -1162,6 +1172,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
                 icon={<QueueListIcon />}
                 accent={Boolean(activeJob && !isTerminalJob(activeJob))}
                 failure={Boolean(failureReason)}
+                onClick={failureReason ? () => { void openFailureHistory(); } : undefined}
               />
             </section>
 

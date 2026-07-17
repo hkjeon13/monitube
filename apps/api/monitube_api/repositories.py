@@ -64,6 +64,8 @@ class JobRepository(Protocol):
 
     def get_job(self, job_id: str) -> JobRecord: ...
 
+    def list_jobs_for_source(self, source_id: str, *, limit: int = 20) -> list[JobRecord]: ...
+
     def transition_job(self, job_id: str, state: JobState, **changes: Any) -> JobRecord: ...
 
 
@@ -686,6 +688,16 @@ class InMemoryRepository(CollectionRepository):
                 return self._clone_job(self._jobs[job_id])
             except KeyError as exc:
                 raise NotFoundError(f"Job '{job_id}' was not found") from exc
+
+    def list_jobs_for_source(self, source_id: str, *, limit: int = 20) -> list[JobRecord]:
+        with self._lock:
+            source = self.get_source(source_id)
+            jobs = [
+                job for job in self._jobs.values()
+                if (source.target_id and job.target_id == source.target_id)
+                or (not source.target_id and job.source_id == source_id)
+            ]
+            return [self._clone_job(job) for job in sorted(jobs, key=lambda item: item.updated_at, reverse=True)[:limit]]
 
     def transition_job(self, job_id: str, state: JobState, **changes: Any) -> JobRecord:
         allowed = {
