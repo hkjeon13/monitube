@@ -150,16 +150,10 @@ export interface CollectedSearchData {
 }
 
 const defaultApiBaseUrl = "http://localhost:8000";
-const defaultTimeoutMs = 10_000;
 
 function configuredBaseUrl() {
   const value = process.env.NEXT_PUBLIC_API_BASE_URL?.trim() || defaultApiBaseUrl;
   return value.replace(/\/+$/, "");
-}
-
-function configuredTimeout() {
-  const value = Number(process.env.NEXT_PUBLIC_API_REQUEST_TIMEOUT_MS);
-  return Number.isFinite(value) && value > 0 ? value : defaultTimeoutMs;
 }
 
 export function apiBaseUrl() {
@@ -425,38 +419,30 @@ function normalizeComment(value: unknown): CollectedComment | null {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), configuredTimeout());
+  const response = await fetch(`${configuredBaseUrl()}${path}`, {
+    ...init,
+    credentials: "include",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      ...init?.headers,
+    },
+  });
 
-  try {
-    const response = await fetch(`${configuredBaseUrl()}${path}`, {
-      ...init,
-      credentials: "include",
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/json",
-        ...init?.headers,
-      },
-      signal: controller.signal,
-    });
+  const contentType = response.headers.get("content-type") ?? "";
+  const body: unknown = contentType.includes("application/json")
+    ? await response.json()
+    : await response.text();
 
-    const contentType = response.headers.get("content-type") ?? "";
-    const body: unknown = contentType.includes("application/json")
-      ? await response.json()
-      : await response.text();
-
-    if (!response.ok) {
-      const detail =
-        typeof body === "object" && body !== null && "detail" in body
-          ? String(body.detail)
-          : `요청에 실패했습니다. (HTTP ${response.status})`;
-      throw new ApiError(detail, response.status);
-    }
-
-    return body as T;
-  } finally {
-    window.clearTimeout(timeout);
+  if (!response.ok) {
+    const detail =
+      typeof body === "object" && body !== null && "detail" in body
+        ? String(body.detail)
+        : `요청에 실패했습니다. (HTTP ${response.status})`;
+    throw new ApiError(detail, response.status);
   }
+
+  return body as T;
 }
 
 export async function getCurrentUser(): Promise<AuthUser | null> {

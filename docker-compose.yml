@@ -156,14 +156,12 @@ services:
       dockerfile: infra/docker/web.Dockerfile
       args:
         NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-/api}
-        NEXT_PUBLIC_API_REQUEST_TIMEOUT_MS: ${NEXT_PUBLIC_API_REQUEST_TIMEOUT_MS:-10000}
         MONITUBE_WEB_API_PROXY_TARGET: ${MONITUBE_WEB_API_PROXY_TARGET_DOCKER:-http://api:8000}
     restart: unless-stopped
     environment:
       NODE_ENV: production
       NEXT_TELEMETRY_DISABLED: "1"
       NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-/api}
-      NEXT_PUBLIC_API_REQUEST_TIMEOUT_MS: ${NEXT_PUBLIC_API_REQUEST_TIMEOUT_MS:-10000}
       MONITUBE_WEB_API_PROXY_TARGET: ${MONITUBE_WEB_API_PROXY_TARGET_DOCKER:-http://api:8000}
     command: ["npm", "run", "start", "--", "--hostname", "0.0.0.0", "--port", "3000"]
     ports:
