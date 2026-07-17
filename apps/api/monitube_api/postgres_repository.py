@@ -1510,7 +1510,11 @@ class PostgresRepository(CollectionRepository):
                 pin = None
                 if row.get("pin_enabled") is not None:
                     pin = {"target_id": str(row["target_id"]), "enabled": bool(row["pin_enabled"]), "interval_minutes": int(row["pin_interval_minutes"]), "next_run_at": row["pin_next_run_at"], "last_dispatched_at": row["pin_last_dispatched_at"]}
-                channels.append({"youtubeChannelId": row["youtube_channel_id"], "handle": row["handle"], "title": row["title"], "description": row["description"], "thumbnailUrl": row["thumbnail_url"], "subscriberCount": row["subscriber_count"], "viewCount": row["view_count"], "youtubeVideoCount": row["youtube_video_count"], "hiddenSubscriberCount": row["hidden_subscriber_count"], "videoCount": int(row["video_count"]), "commentCount": int(row["comment_count"]), "youtubeCommentCount": int(row["youtube_comment_count"]), "lastFetchedAt": row["last_fetched_at"], "targetId": str(row["target_id"]) if row.get("target_id") else None, "pin": pin})
+                video_count = int(row["video_count"])
+                youtube_video_count = int(row["youtube_video_count"] or 0)
+                comment_count = int(row["comment_count"])
+                youtube_comment_count = int(row["youtube_comment_count"])
+                channels.append({"youtubeChannelId": row["youtube_channel_id"], "handle": row["handle"], "title": row["title"], "description": row["description"], "thumbnailUrl": row["thumbnail_url"], "subscriberCount": row["subscriber_count"], "viewCount": row["view_count"], "youtubeVideoCount": row["youtube_video_count"], "hiddenSubscriberCount": row["hidden_subscriber_count"], "videoCount": video_count, "commentCount": comment_count, "youtubeCommentCount": youtube_comment_count, "videoCollectionRate": min(100, round((video_count / youtube_video_count) * 100)) if youtube_video_count else 0, "commentCollectionRate": min(100, round((comment_count / youtube_comment_count) * 100)) if youtube_comment_count else 0, "lastFetchedAt": row["last_fetched_at"], "targetId": str(row["target_id"]) if row.get("target_id") else None, "pin": pin})
             cursor.execute(
                 """
                 SELECT v.id::text, v.youtube_video_id, c.youtube_channel_id, v.title, v.description, v.published_at,

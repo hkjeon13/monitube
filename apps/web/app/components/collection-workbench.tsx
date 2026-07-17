@@ -1001,18 +1001,8 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
               const targetValue = sourceTargetValue(source);
               const channelName = channel?.title ?? channel?.handle ?? (source.type === "channel" ? "채널 정보 확인 중" : targetValue);
               const channelId = channel?.youtubeChannelId ?? targetValue;
-              const collectedVideoCount = channel?.videoCount;
-              const totalVideoCount = channel?.youtubeVideoCount;
-              const videoCollectionRate = collectedVideoCount !== undefined && totalVideoCount !== undefined && totalVideoCount > 0
-                ? Math.min(100, Math.round((collectedVideoCount / totalVideoCount) * 100))
-                : undefined;
-              const collectedCommentCount = channel?.commentCount;
-              const totalCommentCount = channel?.youtubeCommentCount ?? 0;
-              const commentCollectionRate = collectedCommentCount === undefined
-                ? undefined
-                : totalCommentCount > 0
-                  ? Math.min(100, Math.round((collectedCommentCount / totalCommentCount) * 100))
-                  : 0;
+              const videoCollectionRate = channel?.videoCollectionRate;
+              const commentCollectionRate = channel?.commentCollectionRate;
               return (
                 <article key={source.id} className={`source-page-card${source.id === activeSourceId ? " source-page-card-active" : ""}${menuOpen ? " source-page-card-menu-open" : ""}`}>
                   <button type="button" className="source-page-select" onClick={() => { setOpenSourceMenuId(null); openSourceWorkspace(source.id); }} aria-label={`${sourceLabel(source)} 작업 공간 열기`}>

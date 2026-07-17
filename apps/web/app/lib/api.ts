@@ -109,6 +109,8 @@ export interface ExploreChannel {
   videoCount: number;
   commentCount: number;
   youtubeCommentCount: number;
+  videoCollectionRate: number;
+  commentCollectionRate: number;
   lastFetchedAt?: string;
   targetId?: string;
   pin?: TargetPin;
@@ -263,6 +265,8 @@ function normalizeExploreChannel(value: unknown): ExploreChannel | null {
     youtubeChannelId, videoCount: asNumber(record.videoCount ?? record.video_count) ?? 0,
     commentCount: asNumber(record.commentCount ?? record.comment_count) ?? 0,
     youtubeCommentCount: asNumber(record.youtubeCommentCount ?? record.youtube_comment_count) ?? 0,
+    videoCollectionRate: asNumber(record.videoCollectionRate ?? record.video_collection_rate) ?? 0,
+    commentCollectionRate: asNumber(record.commentCollectionRate ?? record.comment_collection_rate) ?? 0,
     ...(asText(record.handle) ? { handle: asText(record.handle) } : {}),
     ...(asText(record.title) ? { title: asText(record.title) } : {}),
     ...(asText(record.description) ? { description: asText(record.description) } : {}),

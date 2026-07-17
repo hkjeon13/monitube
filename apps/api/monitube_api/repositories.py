@@ -922,16 +922,22 @@ class InMemoryRepository(CollectionRepository):
                 ids = {video.youtube_video_id for video in channel_videos}
                 target = next((target for target in self._targets.values() if target.resolved_channel_id == channel.get("id")), None)
                 pin = self._pins.get(target.id) if target else None
+                collected_video_count = len(channel_videos)
+                youtube_video_count = int((channel.get("statistics") or {}).get("videoCount") or 0)
+                collected_comment_count = sum(1 for comment in self._comments.values() if comment.youtube_video_id in ids)
+                youtube_comment_count = sum(int((video.statistics or {}).get("commentCount") or 0) for video in channel_videos)
                 channels.append({
                     "youtubeChannelId": channel_id, "handle": channel.get("handle"), "title": channel.get("title"),
                     "description": channel.get("description"), "thumbnailUrl": channel.get("thumbnail_url"),
                     "subscriberCount": (channel.get("statistics") or {}).get("subscriberCount"),
                     "viewCount": (channel.get("statistics") or {}).get("viewCount"),
-                    "youtubeVideoCount": (channel.get("statistics") or {}).get("videoCount"),
+                    "youtubeVideoCount": youtube_video_count,
                     "hiddenSubscriberCount": (channel.get("statistics") or {}).get("hiddenSubscriberCount"),
-                    "videoCount": len(channel_videos),
-                    "commentCount": sum(1 for comment in self._comments.values() if comment.youtube_video_id in ids),
-                    "youtubeCommentCount": sum(int((video.statistics or {}).get("commentCount") or 0) for video in channel_videos),
+                    "videoCount": collected_video_count,
+                    "commentCount": collected_comment_count,
+                    "youtubeCommentCount": youtube_comment_count,
+                    "videoCollectionRate": min(100, round((collected_video_count / youtube_video_count) * 100)) if youtube_video_count else 0,
+                    "commentCollectionRate": min(100, round((collected_comment_count / youtube_comment_count) * 100)) if youtube_comment_count else 0,
                     "lastFetchedAt": max((video.source_fetched_at for video in channel_videos), default=channel.get("source_fetched_at")),
                     "targetId": target.id if target else None, "pin": deepcopy(pin) if pin else None,
                 })

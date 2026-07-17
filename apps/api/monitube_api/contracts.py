@@ -210,6 +210,8 @@ class ExploreChannel(ApiModel):
     videoCount: int = Field(ge=0)
     commentCount: int = Field(ge=0)
     youtubeCommentCount: int = Field(default=0, ge=0)
+    videoCollectionRate: int = Field(default=0, ge=0, le=100)
+    commentCollectionRate: int = Field(default=0, ge=0, le=100)
     lastFetchedAt: datetime | None = None
     targetId: str | None = None
     pin: TargetPin | None = None
