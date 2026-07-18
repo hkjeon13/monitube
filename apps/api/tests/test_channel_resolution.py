@@ -21,6 +21,22 @@ def test_resolves_handle_from_direct_input_and_url() -> None:
     assert url == direct
 
 
+def test_resolves_unicode_handle_from_direct_input_and_encoded_url() -> None:
+    direct = resolve_channel_input("@우정잉")
+    encoded_url = resolve_channel_input("https://youtube.com/@%EC%9A%B0%EC%A0%95%EC%9E%89/videos")
+
+    assert direct.kind is ChannelInputKind.HANDLE
+    assert direct.normalized == "@우정잉"
+    assert direct.lookup_parameter == "forHandle"
+    assert encoded_url == direct
+
+
+@pytest.mark.parametrize("value", ["@", "@ invalid", "@.leading", "@trailing-", "@handle/path"])
+def test_rejects_malformed_unicode_handle(value: str) -> None:
+    with pytest.raises(ChannelInputError):
+        resolve_channel_input(value)
+
+
 def test_legacy_and_ambiguous_names_are_distinguished() -> None:
     legacy = resolve_channel_input("https://youtube.com/user/GoogleDevelopers")
     ambiguous = resolve_channel_input("Google Developers")

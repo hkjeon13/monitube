@@ -43,3 +43,11 @@ likeCount DESC → publishedAt DESC → commentId DESC
 - 배포 후 세 정렬의 선택값과 첫 댓글 순서
 - 무한 스크롤 시 선택 정렬 유지
 - 브라우저 console warning/error
+
+## 함께 반영한 수집 상태 개선
+
+- `waiting_quota` 상태는 진행률 `0%` 대신 `할당량 대기`로 표시한다.
+- API가 제공하는 `resumeAt`을 한국 시간으로 변환해 다음 자동 재시도 시각을 표시한다.
+- quota 재시도는 첫 대기 1시간 후, 이후 2시간, 최대 3시간 간격으로 자동 수행한다.
+- 채널 핸들은 ASCII 전용 검증을 제거하고 한글을 포함한 YouTube 유니코드 핸들을 허용한다.
+- `@우정잉`과 URL 인코딩된 동일 핸들을 API 파서 테스트에 포함한다.

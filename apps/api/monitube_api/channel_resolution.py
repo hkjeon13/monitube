@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from enum import Enum
 from urllib.parse import unquote, urlsplit
@@ -28,7 +29,6 @@ class ChannelResolution:
 
 
 _CHANNEL_ID = re.compile(r"^UC[A-Za-z0-9_-]{22}$")
-_HANDLE = re.compile(r"^@[A-Za-z0-9._-]{3,30}$")
 _LEGACY_USERNAME = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
 _YOUTUBE_HOSTS = frozenset({"youtube.com", "www.youtube.com", "m.youtube.com"})
 _URL_PREFIX = re.compile(r"^(?:https?://)?(?:www\.|m\.)?youtube\.com(?:/|$)", re.IGNORECASE)
@@ -42,9 +42,23 @@ def _clean(value: str) -> str:
 
 
 def _validate_handle(value: str) -> str:
-    if not _HANDLE.fullmatch(value):
+    normalized = unicodedata.normalize("NFC", value)
+    if not normalized.startswith("@"):
         raise ChannelInputError("Invalid YouTube handle")
-    return value
+    body = normalized[1:]
+    separators = frozenset("._-·")
+    if not 1 <= len(body) <= 30 or body[0] in separators or body[-1] in separators:
+        raise ChannelInputError("Invalid YouTube handle")
+    if any(
+        not (
+            character.isalnum()
+            or unicodedata.category(character).startswith("M")
+            or character in separators
+        )
+        for character in body
+    ):
+        raise ChannelInputError("Invalid YouTube handle")
+    return normalized
 
 
 def _from_youtube_url(value: str) -> ChannelResolution:

@@ -113,6 +113,11 @@ const stageLabels: Record<string, string> = {
   fetching_comments: "공개 댓글을 불러오는 중",
   persisting: "결과를 저장하는 중",
   analyzing: "분석을 준비하는 중",
+  collecting: "수집을 진행하는 중",
+  waiting_for_quota: "YouTube API 할당량을 기다리는 중",
+  waiting_to_retry: "일시 오류 후 재시도를 기다리는 중",
+  completed: "수집 완료",
+  failed: "수집 실패",
 };
 
 const sourceTypeChoices = [
@@ -160,6 +165,30 @@ function formatKpiDate(value?: string) {
 
 function formatReset(value?: string) {
   return value ? formatDate(value) : "다음 quota window 확인 후";
+}
+
+function collectionStatusValue(job?: JobStatus | null) {
+  if (!job) return "대기";
+  if (job.state === "waiting_quota") return "할당량 대기";
+  if (job.state === "waiting_retry") return "재시도 대기";
+  return job.progress.total
+    ? `${Math.min(100, Math.round((job.progress.completed / job.progress.total) * 100))}%`
+    : statusCopy(job);
+}
+
+function collectionStatusDetail(job?: JobStatus | null) {
+  if (!job) return "아직 실행 기록 없음";
+  if (job.state === "waiting_quota") {
+    return job.resumeIsAutomatic
+      ? `${formatReset(job.resumeAt)} 자동 재시도`
+      : "관리자 확인 후 재개";
+  }
+  if (job.state === "waiting_retry") {
+    return job.resumeIsAutomatic
+      ? `${formatReset(job.resumeAt)} 자동 재시도`
+      : "수동 재시도 필요";
+  }
+  return stageLabels[job.currentStage] ?? job.currentStage;
 }
 
 function formatCount(value?: number) {
@@ -1386,8 +1415,8 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
               />
               <MetricCard
                 label="수집 상태"
-                value={failureReason ? "실패" : activeJob?.progress.total ? `${progressPercent}%` : activeJob ? statusCopy(activeJob) : "대기"}
-                detail={failureReason ? `실패 사유: ${failureReason}` : activeJob ? stageLabels[activeJob.currentStage] ?? activeJob.currentStage : "아직 실행 기록 없음"}
+                value={failureReason ? "실패" : collectionStatusValue(activeJob)}
+                detail={failureReason ? `실패 사유: ${failureReason}` : collectionStatusDetail(activeJob)}
                 icon={<QueueListIcon />}
                 accent={Boolean(activeJob && !isTerminalJob(activeJob))}
                 failure={Boolean(failureReason)}
@@ -1481,7 +1510,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
                         <div>
                           <strong>{activeJob.quotaBucket ? bucketLabels[activeJob.quotaBucket] : "Quota"} 대기</strong>
                           <p>{activeJob.pauseReason ?? "일일 quota가 소진되었습니다."}</p>
-                          <small>{activeJob.resumeIsAutomatic ? "자동 재개" : "수동 확인 필요"} · {formatReset(activeJob.resumeAt)}</small>
+                          <small>{activeJob.resumeIsAutomatic ? "자동 재개 예정" : "수동 확인 필요"} · {formatReset(activeJob.resumeAt)}</small>
                         </div>
                       </div>
                     )}
@@ -1615,8 +1644,8 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
               {form.sourceType === "channel" ? (
                 <label className="drawer-field drawer-field-wide">
                   <span>채널 URL, @handle 또는 채널 ID</span>
-                  <input value={form.channelInput} onChange={(event) => update("channelInput", event.target.value)} placeholder="예: @GoogleDevelopers" autoComplete="off" />
-                  <small>채널 전체 업로드는 업로드 재생목록을 기준으로 수집합니다.</small>
+                  <input value={form.channelInput} onChange={(event) => update("channelInput", event.target.value)} placeholder="예: @GoogleDevelopers 또는 @우정잉" autoComplete="off" />
+                  <small>한글·유니코드 핸들도 지원합니다. 채널 전체 업로드는 업로드 재생목록을 기준으로 수집합니다.</small>
                 </label>
               ) : (
                 <div className="drawer-field-grid">
