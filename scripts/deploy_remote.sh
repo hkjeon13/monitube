@@ -610,7 +610,7 @@ if [[ "$PROMOTE_SAFE_FLAGS" == "true" && "$foundation_schema_ready" == "t" ]]; t
   set_env_setting ENABLE_COMMENT_BATCH_WRITE true
   set_env_setting ENABLE_COMMENT_ROLLUP_DUAL_WRITE true
 
-  summary_read_ready="$(database_boolean 'SELECT NOT EXISTS (SELECT 1 FROM collection_targets target WHERE EXISTS (SELECT 1 FROM collection_sources source WHERE source.target_id = target.id) AND NOT EXISTS (SELECT 1 FROM analysis_runs run WHERE run.target_id = target.id AND run.data_version = target.data_version AND run.state = '"'"'completed'"'"'));')"
+  summary_read_ready="$(database_boolean 'SELECT NOT EXISTS (SELECT 1 FROM collection_targets target WHERE EXISTS (SELECT 1 FROM collection_sources source WHERE source.target_id = target.id) AND NOT EXISTS (SELECT 1 FROM analysis_runs run JOIN analysis_results result ON result.analysis_run_id = run.id WHERE run.target_id = target.id AND run.data_version = target.data_version AND run.pipeline_version = '"'"'deterministic-v2'"'"' AND run.state = '"'"'completed'"'"' AND result.result_kind = '"'"'basic_summary'"'"' AND result.deleted_at IS NULL AND (result.expires_at IS NULL OR result.expires_at > now())));')"
   if [[ "$summary_read_ready" == "t" ]]; then
     set_env_setting ENABLE_TARGET_SUMMARY_READ true
   else

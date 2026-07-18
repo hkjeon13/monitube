@@ -2641,6 +2641,7 @@ class PostgresRepository(CollectionRepository):
                     FROM analysis_runs run
                     JOIN analysis_results result ON result.analysis_run_id = run.id
                     WHERE run.target_id = %s AND run.state = 'completed'
+                      AND run.pipeline_version = 'deterministic-v2'
                       AND result.result_kind = 'basic_summary'
                       AND result.deleted_at IS NULL
                       AND (result.expires_at IS NULL OR result.expires_at > now())
@@ -2658,7 +2659,9 @@ class PostgresRepository(CollectionRepository):
                     FROM analysis_runs run
                     JOIN analysis_results result ON result.analysis_run_id = run.id
                     WHERE run.target_id IS NULL AND run.source_id = %s
-                      AND run.state = 'completed' AND result.result_kind = 'basic_summary'
+                      AND run.state = 'completed'
+                      AND run.pipeline_version = 'deterministic-v2'
+                      AND result.result_kind = 'basic_summary'
                       AND result.deleted_at IS NULL
                       AND (result.expires_at IS NULL OR result.expires_at > now())
                     ORDER BY run.data_version DESC, run.completed_at DESC
@@ -2673,18 +2676,21 @@ class PostgresRepository(CollectionRepository):
             if target_id:
                 cursor.execute(
                     """
-                    SELECT state, coverage FROM analysis_runs
-                    WHERE target_id = %s AND data_version = %s
-                    ORDER BY created_at DESC LIMIT 1
+                    SELECT run.state, run.coverage FROM analysis_runs run
+                    WHERE run.target_id = %s AND run.data_version = %s
+                      AND run.pipeline_version = 'deterministic-v2'
+                    ORDER BY run.created_at DESC LIMIT 1
                     """,
                     (target_id, data_version),
                 )
             else:
                 cursor.execute(
                     """
-                    SELECT state, coverage FROM analysis_runs
-                    WHERE target_id IS NULL AND source_id = %s AND data_version = %s
-                    ORDER BY created_at DESC LIMIT 1
+                    SELECT run.state, run.coverage FROM analysis_runs run
+                    WHERE run.target_id IS NULL AND run.source_id = %s
+                      AND run.data_version = %s
+                      AND run.pipeline_version = 'deterministic-v2'
+                    ORDER BY run.created_at DESC LIMIT 1
                     """,
                     (membership_id, data_version),
                 )

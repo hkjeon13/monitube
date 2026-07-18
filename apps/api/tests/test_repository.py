@@ -1,8 +1,11 @@
 from datetime import UTC, datetime
+from inspect import getsource
+from pathlib import Path
 
 import pytest
 
 from monitube_api.domain import CommentRecord, JobState, SourceType
+from monitube_api.postgres_repository import PostgresRepository
 from monitube_api.repositories import InMemoryRepository, InvalidStateTransitionError
 
 
@@ -87,3 +90,18 @@ def test_comment_page_persists_rows_and_checkpoint_together() -> None:
     assert [item.youtube_comment_id for item in stored] == ["comment-id"]
     assert repository.existing_comment_ids(["comment-id"]) == {"comment-id"}
     assert repository.get_job(job.id).checkpoint == {"commentPageToken": "next"}
+
+
+def test_summary_reads_and_cutover_gate_reject_legacy_analysis_runs() -> None:
+    overview_sql = getsource(PostgresRepository.get_source_overview)
+    assert overview_sql.count("run.pipeline_version = 'deterministic-v2'") == 4
+
+    deploy_script = (
+        Path(__file__).resolve().parents[3] / "scripts" / "deploy_remote.sh"
+    ).read_text()
+    assert "run.pipeline_version = 'deterministic-v2'" in deploy_script.replace(
+        "'\"'\"'", "'"
+    )
+    assert "result.result_kind = 'basic_summary'" in deploy_script.replace(
+        "'\"'\"'", "'"
+    )
