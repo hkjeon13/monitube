@@ -212,7 +212,7 @@ svg { display: block; width: 1.125rem; height: 1.125rem; stroke-width: 1.7; }
 .explore-loading { margin: 1.25rem 0 0; color: var(--muted); font-size: 0.75rem; }
 .explore-search { display: flex; align-items: center; gap: 0.625rem; width: 100%; min-height: 3rem; margin-top: 1.5rem; padding: 0 0.875rem; border: 0.0625rem solid var(--line); border-radius: 0.875rem; color: #7a8178; background: rgba(255, 255, 255, 0.72); box-shadow: 0 0.5rem 1.5rem rgba(51, 55, 43, 0.04); }
 .explore-search:focus-within { border-color: #d78a63; box-shadow: 0 0 0 0.1875rem var(--orange-soft); }
-.explore-search-scope { height: 2rem; flex: 0 0 auto; padding: 0 1.75rem 0 0.625rem; border: 0; border-right: 0.0625rem solid var(--line); outline: 0; color: var(--ink); background: transparent; font: inherit; font-size: 0.8125rem; font-weight: 700; cursor: pointer; }
+.explore-search-scope { height: 2rem; flex: 0 0 auto; padding: 0 1.75rem 0 0.625rem; border: 0; outline: 0; color: var(--ink); background: transparent; font: inherit; font-size: 0.8125rem; font-weight: 700; cursor: pointer; }
 .explore-search-scope:focus-visible { outline: 0.125rem solid var(--orange); outline-offset: 0.125rem; border-radius: 0.25rem; }
 .explore-search input { width: 100%; min-width: 0; border: 0; outline: 0; color: var(--ink); background: transparent; font: inherit; font-size: 0.8125rem; font-weight: 650; }
 .explore-search input::placeholder { color: #9a9a92; font-weight: 550; }
