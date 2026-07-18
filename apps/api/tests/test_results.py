@@ -69,6 +69,30 @@ def test_source_results_and_video_comments_are_queryable() -> None:
     assert comments.json()["comments"][0]["text"] == "Great FastAPI video"
 
 
+def test_explore_videos_are_ordered_by_latest_published_date() -> None:
+    repository = InMemoryRepository()
+    older = repository.upsert_video(
+        VideoRecord(
+            id="older-video-row", youtube_video_id="older-video", youtube_channel_id="UCone",
+            title="Older", description=None, published_at=datetime(2025, 1, 1, tzinfo=UTC),
+            duration_seconds=None, privacy_status="public", made_for_kids=False, statistics={},
+            source_fetched_at=datetime(2025, 1, 5, tzinfo=UTC),
+        )
+    )
+    newer = repository.upsert_video(
+        VideoRecord(
+            id="newer-video-row", youtube_video_id="newer-video", youtube_channel_id="UCtwo",
+            title="Newer", description=None, published_at=datetime(2025, 2, 1, tzinfo=UTC),
+            duration_seconds=None, privacy_status="public", made_for_kids=False, statistics={},
+            source_fetched_at=datetime(2025, 1, 2, tzinfo=UTC),
+        )
+    )
+
+    result = repository.list_explore()
+
+    assert [video.youtube_video_id for video in result["videos"]] == [newer.youtube_video_id, older.youtube_video_id]
+
+
 def test_comment_detail_includes_replies_and_other_comments_from_the_same_author() -> None:
     repository = InMemoryRepository()
     client, _, worker_source_id = _subscribed_video_source(repository, "dQw4w9WgXcQ")

@@ -1397,21 +1397,11 @@ class InMemoryRepository(CollectionRepository):
                 if (visible_video_ids is None or video.youtube_video_id in visible_video_ids)
                 and (channel_id is None or video.youtube_channel_id == channel_id)
             ]
-            videos_by_channel: dict[str, list[VideoRecord]] = {}
-            for video in videos:
-                videos_by_channel.setdefault(video.youtube_channel_id, []).append(video)
-            ordered_buckets = [sorted(bucket, key=lambda item: item.source_fetched_at, reverse=True) for bucket in videos_by_channel.values()]
-            videos = []
-            while ordered_buckets and len(videos) < limit:
-                next_buckets: list[list[VideoRecord]] = []
-                for bucket in ordered_buckets:
-                    videos.append(bucket.pop(0))
-                    if len(videos) >= limit:
-                        break
-                    if bucket:
-                        next_buckets.append(bucket)
-                ordered_buckets = next_buckets
-            return {"channels": channels, "videos": videos}
+            videos.sort(
+                key=lambda item: (item.published_at or item.source_fetched_at, item.source_fetched_at),
+                reverse=True,
+            )
+            return {"channels": channels, "videos": videos[:limit]}
 
     def list_channel_subscriber_history(
         self, *, youtube_channel_id: str, limit: int = 180, owner_id: str | None = None

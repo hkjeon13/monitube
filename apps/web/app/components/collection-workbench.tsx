@@ -582,7 +582,12 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   }, [activeSourceId]);
   const exploreVideos = useMemo(() => {
     const scoped = exploreChannelId ? explore.videos.filter((video) => video.channelId === exploreChannelId) : explore.videos;
-    return [...scoped].sort((left, right) => new Date(right.publishedAt ?? right.fetchedAt ?? 0).getTime() - new Date(left.publishedAt ?? left.fetchedAt ?? 0).getTime());
+    return [...scoped].sort((left, right) => {
+      const rightPublished = new Date(right.publishedAt ?? 0).getTime();
+      const leftPublished = new Date(left.publishedAt ?? 0).getTime();
+      if (rightPublished !== leftPublished) return rightPublished - leftPublished;
+      return new Date(right.fetchedAt ?? 0).getTime() - new Date(left.fetchedAt ?? 0).getTime();
+    });
   }, [explore.videos, exploreChannelId]);
   const visibleExploreVideos = exploreVideos.slice(0, exploreVisibleCount);
   const selectedExploreChannel = useMemo(
