@@ -51,6 +51,7 @@ import {
   register,
   updateSource,
   type CommentThreadItem,
+  type CommentThreadSort,
   type CollectedVideo,
   type CollectionRequestDisposition,
   type CollectedSearchData,
@@ -65,6 +66,11 @@ import { CommentRow, CommentThread } from "./comment-thread";
 
 type ViewMetric = "views" | "likes" | "comments";
 const searchScopeLabels: Record<CollectedSearchScope, string> = { all: "전체", videos: "영상", comments: "댓글" };
+const commentSortLabels: Record<CommentThreadSort, string> = {
+  newest: "최신순",
+  oldest: "오래된 순",
+  recommended: "추천순",
+};
 export type WorkspacePage = "overview" | "explore" | "sources" | "keywords" | "jobs" | "insights";
 type FormState = {
   sourceType: CollectionSourceType;
@@ -506,6 +512,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   const [resultsError, setResultsError] = useState<string | null>(null);
   const [selectedVideo, setSelectedVideo] = useState<CollectedVideo | null>(null);
   const [commentThreads, setCommentThreads] = useState<CommentThreadItem[]>([]);
+  const [commentSort, setCommentSort] = useState<CommentThreadSort>("newest");
   const [nextCommentsCursor, setNextCommentsCursor] = useState<string | undefined>();
   const [isCommentsLoading, setIsCommentsLoading] = useState(false);
   const [commentsError, setCommentsError] = useState<string | null>(null);
@@ -756,13 +763,17 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     }
   }, [activeSourceId, exploreChannelId, refreshExplore, refreshSources]);
 
-  const loadComments = useCallback(async (video: CollectedVideo, cursor?: string) => {
+  const loadComments = useCallback(async (
+    video: CollectedVideo,
+    cursor?: string,
+    sort: CommentThreadSort = commentSort,
+  ) => {
     const requestId = ++commentsRequest.current;
     setSelectedVideo(video);
     setIsCommentsLoading(true);
     setCommentsError(null);
     try {
-      const response = await getVideoCommentThreads(video.id, cursor);
+      const response = await getVideoCommentThreads(video.id, sort, cursor);
       if (requestId !== commentsRequest.current) return;
       setCommentThreads((current) => cursor ? mergeCommentThreads(current, response.items) : response.items);
       setNextCommentsCursor(response.nextCursor);
@@ -776,7 +787,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     } finally {
       if (requestId === commentsRequest.current) setIsCommentsLoading(false);
     }
-  }, []);
+  }, [commentSort]);
 
   const restoreFocus = useCallback((trigger: HTMLElement | null) => {
     window.requestAnimationFrame(() => trigger?.focus());
@@ -792,6 +803,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     setSelectedCommentId(null);
     setSelectedCommentDetail(null);
     setCommentThreads([]);
+    setCommentSort("newest");
     setNextCommentsCursor(undefined);
     setCommentsError(null);
     restoreFocus(videoTriggerRef.current);
@@ -815,8 +827,20 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     setSelectedCommentId(null);
     setSelectedCommentDetail(null);
     setCommentDetailError(null);
-    void loadComments(video);
+    setCommentSort("newest");
+    setCommentThreads([]);
+    setNextCommentsCursor(undefined);
+    void loadComments(video, undefined, "newest");
   }, [loadComments]);
+
+  const changeCommentSort = useCallback((sort: CommentThreadSort) => {
+    if (!selectedVideo || sort === commentSort) return;
+    setCommentSort(sort);
+    setCommentThreads([]);
+    setNextCommentsCursor(undefined);
+    setCommentsError(null);
+    void loadComments(selectedVideo, undefined, sort);
+  }, [commentSort, loadComments, selectedVideo]);
 
   const openCommentDetail = useCallback(async (commentId: string, trigger: HTMLElement) => {
     commentTriggerRef.current = trigger;
@@ -916,6 +940,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     setSelectedCommentId(null);
     setSelectedCommentDetail(null);
     setCommentThreads([]);
+    setCommentSort("newest");
     setNextCommentsCursor(undefined);
     setCommentsError(null);
     void refreshResults(activeSourceId);
@@ -1673,7 +1698,22 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
                     </div>
                   </header>
                   <section className="video-comments" aria-labelledby="comments-title" aria-busy={isCommentsLoading}>
-                    <div className="video-comments-heading"><div><p className="section-kicker">PUBLIC COMMENTS</p><h3 id="comments-title">수집된 공개 댓글</h3></div><button className="icon-button" type="button" aria-label="댓글 새로고침" disabled={isCommentsLoading} onClick={() => void loadComments(selectedVideo)}><ArrowPathIcon aria-hidden="true" /></button></div>
+                    <div className="video-comments-heading">
+                      <div><p className="section-kicker">PUBLIC COMMENTS</p><h3 id="comments-title">수집된 공개 댓글</h3></div>
+                      <div className="video-comments-actions">
+                        <label className="comment-sort-select">
+                          <span>댓글 정렬</span>
+                          <select
+                            aria-label="댓글 정렬"
+                            value={commentSort}
+                            onChange={(event) => changeCommentSort(event.target.value as CommentThreadSort)}
+                          >
+                            {(Object.entries(commentSortLabels) as Array<[CommentThreadSort, string]>).map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+                          </select>
+                        </label>
+                        <button className="icon-button" type="button" aria-label="댓글 새로고침" disabled={isCommentsLoading} onClick={() => void loadComments(selectedVideo)}><ArrowPathIcon aria-hidden="true" /></button>
+                      </div>
+                    </div>
                     {commentsError && <div className="comment-load-error" role="status"><span>{commentsError}</span><button type="button" onClick={() => void loadComments(selectedVideo)}>다시 시도</button></div>}
                     {isCommentsLoading && commentThreads.length === 0 && <div className="comments-loading" role="status"><span className="loading-spinner" aria-hidden="true" />공개 댓글을 불러오는 중입니다.</div>}
                     {!isCommentsLoading && !commentsError && commentThreads.length === 0 && <p className="comments-loading">저장된 공개 댓글이 없거나 댓글 수집이 선택되지 않았습니다.</p>}

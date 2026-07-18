@@ -403,6 +403,7 @@ class CommentThreadItem(ApiModel):
 
 class VideoCommentThreadsResponse(ApiModel):
     video: CollectedVideo
+    sort: Literal["newest", "oldest", "recommended"] = "newest"
     items: list[CommentThreadItem] = Field(default_factory=list)
     nextCursor: str | None = None
 

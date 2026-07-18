@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 import hashlib
 import json
 from threading import RLock
-from typing import Any, Iterable, Protocol
+from typing import Any, Iterable, Literal, Protocol
 
 from .analysis import build_summary
 from .domain import (
@@ -63,6 +63,51 @@ def decode_comment_cursor(cursor: str | None) -> tuple[datetime, str] | None:
         return datetime.fromisoformat(str(payload["at"])), str(payload["id"])
     except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
         raise RepositoryError("Invalid comment cursor") from exc
+
+
+CommentThreadSort = Literal["newest", "oldest", "recommended"]
+
+
+def _comment_thread_sort_key(
+    comment: CommentRecord, sort: CommentThreadSort
+) -> tuple[int, datetime, str] | tuple[datetime, str]:
+    published_key, comment_id = _comment_sort_key(comment)
+    if sort == "recommended":
+        return (comment.like_count or 0, published_key, comment_id)
+    return (published_key, comment_id)
+
+
+def encode_comment_thread_cursor(comment: CommentRecord, sort: CommentThreadSort) -> str:
+    published_key, comment_id = _comment_sort_key(comment)
+    payload: dict[str, Any] = {
+        "sort": sort,
+        "at": published_key.isoformat(),
+        "id": comment_id,
+    }
+    if sort == "recommended":
+        payload["likes"] = comment.like_count or 0
+    encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(encoded).decode("ascii").rstrip("=")
+
+
+def decode_comment_thread_cursor(
+    cursor: str | None, sort: CommentThreadSort
+) -> tuple[int, datetime, str] | tuple[datetime, str] | None:
+    if not cursor:
+        return None
+    try:
+        padding = "=" * (-len(cursor) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(cursor + padding).decode("utf-8"))
+        cursor_sort = str(payload.get("sort", "newest"))
+        if cursor_sort != sort:
+            raise ValueError("cursor sort does not match request")
+        published_key = datetime.fromisoformat(str(payload["at"]))
+        comment_id = str(payload["id"])
+        if sort == "recommended":
+            return int(payload["likes"]), published_key, comment_id
+        return published_key, comment_id
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+        raise RepositoryError("Invalid comment thread cursor") from exc
 
 
 class SourceRepository(Protocol):
@@ -183,7 +228,8 @@ class CollectionRepository(SourceRepository, JobRepository, CollectionRequestRep
     def get_video_comments(self, video_id: str, *, owner_id: str | None = None) -> dict[str, Any]: ...
 
     def get_video_comment_threads(
-        self, video_id: str, *, owner_id: str | None = None, cursor: str | None = None, limit: int = 20
+        self, video_id: str, *, owner_id: str | None = None, cursor: str | None = None,
+        limit: int = 20, sort: CommentThreadSort = "newest"
     ) -> dict[str, Any]: ...
 
     def get_comment_replies(
@@ -1594,7 +1640,8 @@ class InMemoryRepository(CollectionRepository):
             return {"video": video, "comments": comments, "summary": build_summary([video], comments)}
 
     def get_video_comment_threads(
-        self, video_id: str, *, owner_id: str | None = None, cursor: str | None = None, limit: int = 20
+        self, video_id: str, *, owner_id: str | None = None, cursor: str | None = None,
+        limit: int = 20, sort: CommentThreadSort = "newest"
     ) -> dict[str, Any]:
         with self._lock:
             video = self._videos.get(video_id)
@@ -1604,18 +1651,28 @@ class InMemoryRepository(CollectionRepository):
             if visible_video_ids is not None and video_id not in visible_video_ids:
                 raise NotFoundError(f"Video '{video_id}' was not found")
 
-            cursor_key = decode_comment_cursor(cursor)
+            cursor_key = decode_comment_thread_cursor(cursor, sort)
+            descending = sort != "oldest"
             top_level = sorted(
                 (
                     comment
                     for comment in self._comments.values()
                     if comment.youtube_video_id == video_id and not comment.youtube_parent_comment_id
                 ),
-                key=_comment_sort_key,
-                reverse=True,
+                key=lambda comment: _comment_thread_sort_key(comment, sort),
+                reverse=descending,
             )
             if cursor_key:
-                top_level = [comment for comment in top_level if _comment_sort_key(comment) < cursor_key]
+                if descending:
+                    top_level = [
+                        comment for comment in top_level
+                        if _comment_thread_sort_key(comment, sort) < cursor_key
+                    ]
+                else:
+                    top_level = [
+                        comment for comment in top_level
+                        if _comment_thread_sort_key(comment, sort) > cursor_key
+                    ]
             page = top_level[: limit + 1]
             has_more = len(page) > limit
             page = page[:limit]
@@ -1638,7 +1695,7 @@ class InMemoryRepository(CollectionRepository):
             return {
                 "video": video,
                 "items": items,
-                "next_cursor": encode_comment_cursor(page[-1]) if has_more and page else None,
+                "next_cursor": encode_comment_thread_cursor(page[-1], sort) if has_more and page else None,
             }
 
     def get_comment_replies(

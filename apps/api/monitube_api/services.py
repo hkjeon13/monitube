@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from typing import Literal
 
 from .channel_resolution import resolve_channel_input
 from .contracts import (
@@ -343,13 +344,15 @@ class CollectionService:
         )
 
     def get_video_comment_threads(
-        self, video_id: str, *, owner_id: str | None = None, cursor: str | None = None, limit: int = 20
+        self, video_id: str, *, owner_id: str | None = None, cursor: str | None = None,
+        limit: int = 20, sort: Literal["newest", "oldest", "recommended"] = "newest"
     ) -> VideoCommentThreadsResponse:
         result = self.repository.get_video_comment_threads(
-            video_id, owner_id=owner_id, cursor=cursor, limit=limit
+            video_id, owner_id=owner_id, cursor=cursor, limit=limit, sort=sort
         )
         return VideoCommentThreadsResponse(
             video=_video_contract(result["video"]),
+            sort=sort,
             items=[
                 CommentThreadItem(
                     comment=_comment_contract(item["comment"]),

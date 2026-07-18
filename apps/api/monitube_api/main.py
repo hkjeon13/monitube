@@ -360,9 +360,10 @@ def create_app(repository: CollectionRepository | None = None, settings: Setting
         user: User,
         cursor: str | None = Query(default=None, max_length=512),
         limit: int = Query(default=20, ge=1, le=100),
+        sort: Literal["newest", "oldest", "recommended"] = Query(default="newest"),
     ) -> VideoCommentThreadsResponse:
         return service.get_video_comment_threads(
-            video_id, owner_id=user.id, cursor=cursor, limit=limit
+            video_id, owner_id=user.id, cursor=cursor, limit=limit, sort=sort
         )
 
     @router.get("/comments/{comment_id}/replies", response_model=CommentRepliesResponse, tags=["results"])

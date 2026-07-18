@@ -96,7 +96,10 @@ export interface CommentThreadItem {
   storedReplyCount: number;
 }
 
+export type CommentThreadSort = "newest" | "oldest" | "recommended";
+
 export interface PagedCommentThreads {
+  sort: CommentThreadSort;
   items: CommentThreadItem[];
   nextCursor?: string;
 }
@@ -679,16 +682,22 @@ export async function getSourceResults(sourceId: string): Promise<SourceResults>
   };
 }
 
-export async function getVideoCommentThreads(videoId: string, cursor?: string): Promise<PagedCommentThreads> {
-  const query = new URLSearchParams({ limit: "20" });
+export async function getVideoCommentThreads(
+  videoId: string,
+  sort: CommentThreadSort = "newest",
+  cursor?: string,
+): Promise<PagedCommentThreads> {
+  const query = new URLSearchParams({ limit: "20", sort });
   if (cursor) query.set("cursor", cursor);
   const response = await request<unknown>(`/v1/videos/${encodeURIComponent(videoId)}/comment-threads?${query.toString()}`, {
     method: "GET",
   });
   const record = asRecord(response) ?? {};
   const nextCursor = asText(record?.nextCursor ?? record?.next_cursor ?? record?.nextPageToken ?? record?.next_page_token);
+  const responseSort = asText(record.sort);
 
   return {
+    sort: responseSort === "oldest" || responseSort === "recommended" ? responseSort : "newest",
     items: firstArray(record, ["items", "threads", "results"]).flatMap((item) => {
       const itemRecord = asRecord(item);
       const comment = normalizeComment(itemRecord?.comment);

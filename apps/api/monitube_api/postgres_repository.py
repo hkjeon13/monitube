@@ -39,12 +39,15 @@ from .domain import (
 )
 from .repositories import (
     CollectionRepository,
+    CommentThreadSort,
     InvalidStateTransitionError,
     NotFoundError,
     RepositoryError,
     _ALLOWED_TRANSITIONS,
     decode_comment_cursor,
+    decode_comment_thread_cursor,
     encode_comment_cursor,
+    encode_comment_thread_cursor,
 )
 
 
@@ -1945,9 +1948,10 @@ class PostgresRepository(CollectionRepository):
             return {"video": video, "comments": comments, "summary": build_summary([video], comments)}
 
     def get_video_comment_threads(
-        self, video_id: str, *, owner_id: str | None = None, cursor: str | None = None, limit: int = 20
+        self, video_id: str, *, owner_id: str | None = None, cursor: str | None = None,
+        limit: int = 20, sort: CommentThreadSort = "newest"
     ) -> dict[str, Any]:
-        cursor_key = decode_comment_cursor(cursor)
+        cursor_key = decode_comment_thread_cursor(cursor, sort)
         with self._connection() as connection, connection.cursor() as db_cursor:
             db_cursor.execute(
                 """
@@ -1977,12 +1981,42 @@ class PostgresRepository(CollectionRepository):
 
             params: list[Any] = [video_row["id"]]
             cursor_filter = ""
-            if cursor_key:
-                cursor_filter = """
-                  AND (COALESCE(cm.published_at, cm.source_fetched_at, 'epoch'::timestamptz), cm.youtube_comment_id)
-                      < (%s::timestamptz, %s)
+            if sort == "oldest":
+                order_by = """
+                  COALESCE(cm.published_at, cm.source_fetched_at, 'epoch'::timestamptz) ASC,
+                  cm.youtube_comment_id ASC
                 """
-                params.extend(cursor_key)
+                if cursor_key:
+                    cursor_filter = """
+                      AND (COALESCE(cm.published_at, cm.source_fetched_at, 'epoch'::timestamptz), cm.youtube_comment_id)
+                          > (%s::timestamptz, %s)
+                    """
+                    params.extend(cursor_key)
+            elif sort == "recommended":
+                order_by = """
+                  COALESCE(cm.like_count, 0) DESC,
+                  COALESCE(cm.published_at, cm.source_fetched_at, 'epoch'::timestamptz) DESC,
+                  cm.youtube_comment_id DESC
+                """
+                if cursor_key:
+                    cursor_filter = """
+                      AND (COALESCE(cm.like_count, 0),
+                           COALESCE(cm.published_at, cm.source_fetched_at, 'epoch'::timestamptz),
+                           cm.youtube_comment_id)
+                          < (%s::bigint, %s::timestamptz, %s)
+                    """
+                    params.extend(cursor_key)
+            else:
+                order_by = """
+                  COALESCE(cm.published_at, cm.source_fetched_at, 'epoch'::timestamptz) DESC,
+                  cm.youtube_comment_id DESC
+                """
+                if cursor_key:
+                    cursor_filter = """
+                      AND (COALESCE(cm.published_at, cm.source_fetched_at, 'epoch'::timestamptz), cm.youtube_comment_id)
+                          < (%s::timestamptz, %s)
+                    """
+                    params.extend(cursor_key)
             params.append(limit + 1)
             db_cursor.execute(
                 f"""
@@ -1993,8 +2027,7 @@ class PostgresRepository(CollectionRepository):
                 JOIN videos v ON v.id = cm.video_id
                 WHERE cm.video_id = %s AND cm.youtube_parent_comment_id IS NULL
                 {cursor_filter}
-                ORDER BY COALESCE(cm.published_at, cm.source_fetched_at, 'epoch'::timestamptz) DESC,
-                         cm.youtube_comment_id DESC
+                ORDER BY {order_by}
                 LIMIT %s
                 """,
                 tuple(params),
@@ -2044,7 +2077,7 @@ class PostgresRepository(CollectionRepository):
                     }
                     for comment in page
                 ],
-                "next_cursor": encode_comment_cursor(page[-1]) if has_more and page else None,
+                "next_cursor": encode_comment_thread_cursor(page[-1], sort) if has_more and page else None,
             }
 
     def get_comment_replies(

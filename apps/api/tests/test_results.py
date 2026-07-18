@@ -81,12 +81,14 @@ def test_comment_threads_use_stable_top_level_pages_and_reply_pages() -> None:
         )
     )
     repository.link_source_video(worker_source_id, video.youtube_video_id)
+    top_level_likes = {1: 10, 2: 1, 3: 10}
     for index in range(1, 4):
         repository.upsert_comment(
             CommentRecord(
                 id=f"top-row-{index}", youtube_comment_id=f"top-{index}", youtube_video_id=video.youtube_video_id,
                 youtube_parent_comment_id=None, youtube_thread_id=f"thread-{index}", text_display=f"원댓글 {index}",
-                author_channel_id=f"UCauthor{index}", author_display_name=f"작성자 {index}", like_count=index,
+                author_channel_id=f"UCauthor{index}", author_display_name=f"작성자 {index}",
+                like_count=top_level_likes[index],
                 published_at=datetime(2025, 1, index + 1, tzinfo=UTC), updated_at=None,
                 source_fetched_at=datetime(2025, 1, index + 1, tzinfo=UTC),
             )
@@ -105,6 +107,7 @@ def test_comment_threads_use_stable_top_level_pages_and_reply_pages() -> None:
     first = client.get("/v1/videos/threadVid01/comment-threads", params={"limit": 2})
     assert first.status_code == 200
     first_body = first.json()
+    assert first_body["sort"] == "newest"
     assert [item["comment"]["id"] for item in first_body["items"]] == ["top-3", "top-2"]
     assert first_body["items"][0]["storedReplyCount"] == 3
     assert [reply["id"] for reply in first_body["items"][0]["repliesPreview"]] == ["reply-1", "reply-2"]
@@ -117,6 +120,40 @@ def test_comment_threads_use_stable_top_level_pages_and_reply_pages() -> None:
     assert second.status_code == 200
     assert [item["comment"]["id"] for item in second.json()["items"]] == ["top-1"]
     assert second.json()["nextCursor"] is None
+
+    oldest_first = client.get(
+        "/v1/videos/threadVid01/comment-threads", params={"limit": 2, "sort": "oldest"}
+    )
+    assert oldest_first.status_code == 200
+    assert oldest_first.json()["sort"] == "oldest"
+    assert [item["comment"]["id"] for item in oldest_first.json()["items"]] == ["top-1", "top-2"]
+    oldest_second = client.get(
+        "/v1/videos/threadVid01/comment-threads",
+        params={"limit": 2, "sort": "oldest", "cursor": oldest_first.json()["nextCursor"]},
+    )
+    assert [item["comment"]["id"] for item in oldest_second.json()["items"]] == ["top-3"]
+
+    recommended_first = client.get(
+        "/v1/videos/threadVid01/comment-threads", params={"limit": 2, "sort": "recommended"}
+    )
+    assert recommended_first.status_code == 200
+    assert recommended_first.json()["sort"] == "recommended"
+    assert [item["comment"]["id"] for item in recommended_first.json()["items"]] == ["top-3", "top-1"]
+    recommended_second = client.get(
+        "/v1/videos/threadVid01/comment-threads",
+        params={
+            "limit": 2,
+            "sort": "recommended",
+            "cursor": recommended_first.json()["nextCursor"],
+        },
+    )
+    assert [item["comment"]["id"] for item in recommended_second.json()["items"]] == ["top-2"]
+
+    mismatched_cursor = client.get(
+        "/v1/videos/threadVid01/comment-threads",
+        params={"limit": 2, "sort": "oldest", "cursor": first_body["nextCursor"]},
+    )
+    assert mismatched_cursor.status_code == 409
 
     first_replies = client.get("/v1/comments/top-3/replies", params={"limit": 2})
     assert [comment["id"] for comment in first_replies.json()["comments"]] == ["reply-1", "reply-2"]
