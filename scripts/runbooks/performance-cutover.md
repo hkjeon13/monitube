@@ -23,6 +23,8 @@ a one-off worker. The durable cursor and advisory lock make this restart-safe:
 
 ```sh
 cd /data/psyche/Projects/monitube
+export MONITUBE_IMAGE_TAG="$(git rev-parse HEAD)"
+export MONITUBE_YOUTUBE_SECRET_ENV_FILE=/data/psyche/.config/monitube/youtube.env
 docker compose run --rm --no-deps worker python -m monitube_worker.rollup_backfill
 ```
 
@@ -81,11 +83,16 @@ SELECT count(*)
 FROM collection_targets target
 WHERE EXISTS (SELECT 1 FROM collection_sources source WHERE source.target_id = target.id)
   AND NOT EXISTS (
-    SELECT 1 FROM analysis_runs run
+    SELECT 1
+    FROM analysis_runs run
+    JOIN analysis_results result ON result.analysis_run_id = run.id
     WHERE run.target_id = target.id
       AND run.data_version = target.data_version
       AND run.pipeline_version = '"'"'deterministic-v2'"'"'
       AND run.state = '"'"'completed'"'"'
+      AND result.result_kind = '"'"'basic_summary'"'"'
+      AND result.deleted_at IS NULL
+      AND (result.expires_at IS NULL OR result.expires_at > now())
   );
 "'
 ```

@@ -105,3 +105,121 @@ def test_summary_reads_and_cutover_gate_reject_legacy_analysis_runs() -> None:
     assert "result.result_kind = 'basic_summary'" in deploy_script.replace(
         "'\"'\"'", "'"
     )
+
+
+def test_readiness_requires_latest_search_statistics_migration() -> None:
+    readiness_sql = getsource(PostgresRepository.check_readiness)
+
+    assert "016_search_planner_statistics.sql" in readiness_sql
+    assert "015_database_performance_foundation.sql" not in readiness_sql
+
+
+def test_indexed_search_materializes_candidates_before_acl_and_limit() -> None:
+    class RecordingCursor:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+        def __enter__(self) -> "RecordingCursor":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def execute(self, statement: str, params: tuple[object, ...]) -> None:
+            self.calls.append((statement, params))
+
+        @staticmethod
+        def fetchall() -> list[dict[str, object]]:
+            return []
+
+    class RecordingConnection:
+        def __init__(self) -> None:
+            self.db_cursor = RecordingCursor()
+
+        def cursor(self) -> RecordingCursor:
+            return self.db_cursor
+
+        @staticmethod
+        def commit() -> None:
+            return None
+
+        @staticmethod
+        def rollback() -> None:
+            return None
+
+        @staticmethod
+        def close() -> None:
+            return None
+
+    connection = RecordingConnection()
+    repository = PostgresRepository(
+        "postgresql://unused",
+        connect=lambda: connection,
+        enable_search_trigram=True,
+    )
+    owner_id = "00000000-0000-0000-0000-000000000001"
+
+    result = repository.search_collected(
+        query="video platform",
+        owner_id=owner_id,
+        limit=20,
+        scope="all",
+    )
+
+    assert result == {"videos": [], "comments": []}
+    assert len(connection.db_cursor.calls) == 2
+    (video_sql, video_params), (comment_sql, comment_params) = connection.db_cursor.calls
+
+    assert "matched_videos AS MATERIALIZED" in video_sql
+    assert "matched_comments AS MATERIALIZED" in comment_sql
+    assert "ILIKE ALL" not in video_sql
+    assert "ILIKE ALL" not in comment_sql
+    assert video_sql.count("search_document.document ILIKE %s") == 2
+    assert comment_sql.count("lower(COALESCE(cm.text_display, '')) ILIKE %s") == 2
+
+    # Candidate construction must precede ACL, while the parameterized LIMIT
+    # remains after ACL. Limiting the raw match CTE can hide authorized rows
+    # when higher-ranked matches belong to another user.
+    video_candidate_end = video_sql.index("authorized_videos AS MATERIALIZED")
+    video_detail_start = video_sql.index("SELECT v.id::text")
+    comment_candidate_end = comment_sql.index("authorized_comments AS MATERIALIZED")
+    comment_detail_start = comment_sql.index("SELECT cm.id::text AS comment_id")
+    assert "LIMIT %s" not in video_sql[:video_candidate_end]
+    assert "LIMIT %s" not in comment_sql[:comment_candidate_end]
+    assert (
+        video_candidate_end
+        < video_sql.index("subscription.user_id")
+        < video_sql.index("LIMIT %s")
+        < video_detail_start
+    )
+    assert (
+        comment_candidate_end
+        < comment_sql.index("subscription.user_id")
+        < comment_sql.index("LIMIT %s")
+        < comment_detail_start
+    )
+    assert "JOIN authorized_videos search_candidate" in video_sql
+    assert "JOIN comments cm ON cm.id = search_candidate.comment_id" in comment_sql
+
+    # The potentially large first materialization contains only narrow lookup
+    # and ranking columns; full comment data is fetched after ACL and LIMIT.
+    matched_comment_projection = comment_sql[
+        comment_sql.index("WITH matched_comments AS MATERIALIZED"):
+        comment_sql.index("FROM comments cm")
+    ]
+    assert "cm.youtube_comment_id" not in matched_comment_projection
+    assert "cm.author_display_name" not in matched_comment_projection
+
+    expected_params = (
+        "videoplatform",
+        "%video%",
+        "%platform%",
+        "videoplatform",
+        owner_id,
+        owner_id,
+        200,
+    )
+    assert video_params == expected_params
+    assert comment_params == expected_params
+    assert video_sql.count("%s") == len(video_params)
+    assert comment_sql.count("%s") == len(comment_params)

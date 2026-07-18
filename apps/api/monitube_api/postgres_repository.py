@@ -150,7 +150,7 @@ class PostgresRepository(CollectionRepository):
                 """
                 SELECT EXISTS (
                   SELECT 1 FROM monitube_schema_migrations
-                  WHERE filename = '015_database_performance_foundation.sql'
+                  WHERE filename = '016_search_planner_statistics.sql'
                 ) AS migration_current
                 """
             )
@@ -4055,34 +4055,106 @@ class PostgresRepository(CollectionRepository):
         # ACL is applied inside each candidate query, before this hard cap.
         candidate_limit = min(300, max(100, limit * 10))
 
+        # Scalar LIKE clauses are intentional. PostgreSQL cannot turn
+        # ``ILIKE ALL(array_parameter)`` into pg_trgm index conditions, which
+        # made a common term scan every visible video's comments. A fixed SQL
+        # fragment per term remains injection-safe because only the values are
+        # parameters, and is logically equivalent to ILIKE ALL.
+        video_indexed_contains = " AND ".join(
+            "search_document.document ILIKE %s" for _ in exact_patterns
+        ) or "TRUE"
+        comment_indexed_contains = " AND ".join(
+            "lower(COALESCE(cm.text_display, '')) ILIKE %s" for _ in exact_patterns
+        ) or "TRUE"
+
         with self._connection() as connection, connection.cursor() as cursor:
             video_results: list[dict[str, Any]] = []
             if scope in {"all", "videos"}:
                 if short_query:
+                    video_cte = ""
                     video_join = ""
+                    video_acl = """
+                      (%s::uuid IS NULL
+                       OR EXISTS (
+                         SELECT 1 FROM collection_target_videos membership
+                         JOIN collection_subscriptions subscription
+                           ON subscription.target_id = membership.target_id
+                         WHERE membership.video_id = v.id
+                           AND subscription.user_id = %s::uuid
+                       ))
+                    """
                     video_match = """
                       (v.youtube_video_id ILIKE %s ESCAPE '\\'
                        OR ltrim(COALESCE(c.handle, ''), '@') ILIKE %s ESCAPE '\\'
                        OR COALESCE(v.title, '') ILIKE %s ESCAPE '\\')
                     """
                     video_order = "v.source_fetched_at DESC NULLS LAST"
+                    video_limit = "LIMIT %s"
                     video_params: tuple[Any, ...] = (
                         owner_id, owner_id, prefix_pattern, prefix_pattern, prefix_pattern, candidate_limit
                     )
                 elif self.enable_search_trigram:
-                    video_join = "JOIN video_search_documents search_document ON search_document.video_id = v.id"
-                    video_match = "(search_document.document ILIKE ALL(%s) OR search_document.document %% %s)"
-                    video_order = "similarity(search_document.document, %s) DESC, v.source_fetched_at DESC NULLS LAST"
+                    # MATERIALIZED is an optimization barrier: build the
+                    # pg_trgm bitmap candidates first, then apply ACL and LIMIT.
+                    # There must be no LIMIT in this CTE because that could
+                    # discard authorized rows behind unauthorized candidates.
+                    video_cte = f"""
+                    WITH matched_videos AS MATERIALIZED (
+                      SELECT search_document.video_id,
+                             similarity(search_document.document, %s) AS search_score
+                      FROM video_search_documents search_document
+                      WHERE (({video_indexed_contains})
+                             OR search_document.document %% %s)
+                    ),
+                    authorized_videos AS MATERIALIZED (
+                      SELECT search_candidate.video_id, search_candidate.search_score,
+                             v.source_fetched_at
+                      FROM matched_videos search_candidate
+                      JOIN videos v ON v.id = search_candidate.video_id
+                      WHERE (
+                        %s::uuid IS NULL
+                        OR EXISTS (
+                          SELECT 1 FROM collection_target_videos membership
+                          JOIN collection_subscriptions subscription
+                            ON subscription.target_id = membership.target_id
+                          WHERE membership.video_id = search_candidate.video_id
+                            AND subscription.user_id = %s::uuid
+                        )
+                      )
+                      ORDER BY search_candidate.search_score DESC,
+                               v.source_fetched_at DESC NULLS LAST
+                      LIMIT %s
+                    )
+                    """
+                    video_join = "JOIN authorized_videos search_candidate ON search_candidate.video_id = v.id"
+                    video_acl = "TRUE"
+                    video_match = "TRUE"
+                    video_order = "search_candidate.search_score DESC, search_candidate.source_fetched_at DESC NULLS LAST"
+                    video_limit = ""
                     video_params = (
-                        owner_id, owner_id, exact_patterns, normalized_query, normalized_query, candidate_limit
+                        normalized_query, *exact_patterns, normalized_query,
+                        owner_id, owner_id, candidate_limit,
                     )
                 else:
+                    video_cte = ""
                     video_join = ""
+                    video_acl = """
+                      (%s::uuid IS NULL
+                       OR EXISTS (
+                         SELECT 1 FROM collection_target_videos membership
+                         JOIN collection_subscriptions subscription
+                           ON subscription.target_id = membership.target_id
+                         WHERE membership.video_id = v.id
+                           AND subscription.user_id = %s::uuid
+                       ))
+                    """
                     video_match = "lower(concat_ws(' ', v.title, v.description, c.title, c.handle)) ILIKE ALL(%s)"
                     video_order = "v.source_fetched_at DESC NULLS LAST"
+                    video_limit = "LIMIT %s"
                     video_params = (owner_id, owner_id, exact_patterns, candidate_limit)
                 cursor.execute(
                 f"""
+                {video_cte}
                 SELECT v.id::text, v.youtube_video_id, c.youtube_channel_id, c.title AS channel_title,
                        c.handle AS channel_handle, v.title, v.description, v.published_at,
                        v.duration_seconds, v.privacy_status, v.made_for_kids, v.source_fetched_at,
@@ -4094,17 +4166,10 @@ class PostgresRepository(CollectionRepository):
                   SELECT view_count, like_count, comment_count FROM video_stat_snapshots
                   WHERE video_id = v.id ORDER BY fetched_at DESC LIMIT 1
                 ) stats ON TRUE
-                WHERE (
-                    %s::uuid IS NULL
-                    OR EXISTS (
-                      SELECT 1 FROM collection_target_videos membership
-                      JOIN collection_subscriptions subscription ON subscription.target_id = membership.target_id
-                      WHERE membership.video_id = v.id AND subscription.user_id = %s::uuid
-                    )
-                  )
+                WHERE {video_acl}
                   AND {video_match}
                 ORDER BY {video_order}
-                LIMIT %s
+                {video_limit}
                 """,
                 video_params,
                 )
@@ -4134,20 +4199,69 @@ class PostgresRepository(CollectionRepository):
             comment_results: list[dict[str, Any]] = []
             if scope in {"all", "comments"} and not short_query:
                 if self.enable_search_trigram:
-                    comment_match = """
-                      (lower(COALESCE(cm.text_display, '')) ILIKE ALL(%s)
-                       OR lower(COALESCE(cm.text_display, '')) %% %s)
+                    # Keep every search match available until after ACL. This
+                    # forces the GIN BitmapOr path without changing per-owner
+                    # visibility or the existing ranking/candidate semantics.
+                    # Only narrow identifiers/ranking columns cross the first
+                    # barrier so a broad term cannot spill full comment rows.
+                    comment_cte = f"""
+                    WITH matched_comments AS MATERIALIZED (
+                      SELECT cm.id AS comment_id, cm.video_id, cm.source_fetched_at,
+                             similarity(lower(COALESCE(cm.text_display, '')), %s) AS search_score
+                      FROM comments cm
+                      WHERE cm.text_display IS NOT NULL
+                        AND (({comment_indexed_contains})
+                             OR lower(COALESCE(cm.text_display, '')) %% %s)
+                    ),
+                    authorized_comments AS MATERIALIZED (
+                      SELECT search_candidate.comment_id, search_candidate.video_id,
+                             search_candidate.source_fetched_at, search_candidate.search_score
+                      FROM matched_comments search_candidate
+                      WHERE (
+                        %s::uuid IS NULL
+                        OR EXISTS (
+                          SELECT 1 FROM collection_target_videos membership
+                          JOIN collection_subscriptions subscription
+                            ON subscription.target_id = membership.target_id
+                          WHERE membership.video_id = search_candidate.video_id
+                            AND subscription.user_id = %s::uuid
+                        )
+                      )
+                      ORDER BY search_candidate.search_score DESC,
+                               search_candidate.source_fetched_at DESC NULLS LAST
+                      LIMIT %s
+                    )
                     """
-                    comment_order = "similarity(lower(COALESCE(cm.text_display, '')), %s) DESC, cm.source_fetched_at DESC NULLS LAST"
+                    comment_from = """authorized_comments search_candidate
+                    JOIN comments cm ON cm.id = search_candidate.comment_id"""
+                    comment_acl = "TRUE"
+                    comment_match = "TRUE"
+                    comment_order = "search_candidate.search_score DESC, search_candidate.source_fetched_at DESC NULLS LAST"
+                    comment_limit = ""
                     comment_params: tuple[Any, ...] = (
-                        owner_id, owner_id, exact_patterns, normalized_query, normalized_query, candidate_limit
+                        normalized_query, *exact_patterns, normalized_query,
+                        owner_id, owner_id, candidate_limit,
                     )
                 else:
+                    comment_cte = ""
+                    comment_from = "comments cm"
+                    comment_acl = """
+                      (%s::uuid IS NULL
+                       OR EXISTS (
+                         SELECT 1 FROM collection_target_videos membership
+                         JOIN collection_subscriptions subscription
+                           ON subscription.target_id = membership.target_id
+                         WHERE membership.video_id = v.id
+                           AND subscription.user_id = %s::uuid
+                       ))
+                    """
                     comment_match = "lower(COALESCE(cm.text_display, '')) ILIKE ALL(%s)"
                     comment_order = "cm.source_fetched_at DESC NULLS LAST"
+                    comment_limit = "LIMIT %s"
                     comment_params = (owner_id, owner_id, exact_patterns, candidate_limit)
                 cursor.execute(
                 f"""
+                {comment_cte}
                 SELECT cm.id::text AS comment_id, cm.youtube_comment_id, cm.youtube_parent_comment_id,
                        cm.youtube_thread_id, cm.author_channel_id, cm.author_display_name, cm.text_display, cm.like_count, cm.published_at AS comment_published_at,
                        cm.updated_at AS comment_updated_at, cm.source_fetched_at AS comment_fetched_at,
@@ -4156,25 +4270,18 @@ class PostgresRepository(CollectionRepository):
                        v.published_at, v.duration_seconds, v.privacy_status, v.made_for_kids,
                        v.source_fetched_at,
                        jsonb_build_object('viewCount', COALESCE(stats.view_count, 0), 'likeCount', COALESCE(stats.like_count, 0), 'commentCount', COALESCE(stats.comment_count, 0)) AS statistics
-                FROM comments cm
+                FROM {comment_from}
                 JOIN videos v ON v.id = cm.video_id
                 LEFT JOIN channels c ON c.id = v.channel_id
                 LEFT JOIN LATERAL (
                   SELECT view_count, like_count, comment_count FROM video_stat_snapshots
                   WHERE video_id = v.id ORDER BY fetched_at DESC LIMIT 1
                 ) stats ON TRUE
-                WHERE (
-                    %s::uuid IS NULL
-                    OR EXISTS (
-                      SELECT 1 FROM collection_target_videos membership
-                      JOIN collection_subscriptions subscription ON subscription.target_id = membership.target_id
-                      WHERE membership.video_id = v.id AND subscription.user_id = %s::uuid
-                    )
-                  )
+                WHERE {comment_acl}
                   AND cm.text_display IS NOT NULL
                   AND {comment_match}
                 ORDER BY {comment_order}
-                LIMIT %s
+                {comment_limit}
                 """,
                 comment_params,
                 )
