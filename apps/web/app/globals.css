@@ -303,8 +303,6 @@ svg { display: block; width: 1.125rem; height: 1.125rem; stroke-width: 1.7; }
 .explore-video-card:hover { transform: translateY(-0.125rem); box-shadow: 0 0.875rem 1.75rem rgba(26, 31, 27, 0.16); }
 .explore-video-shade { position: absolute; inset: 0; background: linear-gradient(180deg, rgba(9, 15, 11, 0.04) 25%, rgba(9, 15, 11, 0.82) 100%); pointer-events: none; }
 .explore-video-card > * { position: relative; z-index: 1; }
-.explore-video-play { display: grid; width: 1.875rem; height: 1.875rem; place-items: center; margin-bottom: auto; border: 0.0625rem solid rgba(255,255,255,0.42); border-radius: 0.5625rem; background: rgba(255,255,255,0.15); }
-.explore-video-play svg { width: 0.875rem; height: 0.875rem; fill: currentColor; }
 .explore-video-date { margin-top: 1.25rem; opacity: 0.76; font-size: 0.5625rem; font-weight: 700; }
 .explore-video-card strong { display: -webkit-box; overflow: hidden; margin-top: 0.375rem; font-size: 0.75rem; font-weight: 800; line-height: 1.35; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .explore-video-card footer { display: flex; flex-wrap: wrap; gap: 0.375rem 0.625rem; margin-top: 0.625rem; opacity: 0.8; font-size: 0.5625rem; font-weight: 650; }
