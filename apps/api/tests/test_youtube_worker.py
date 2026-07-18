@@ -204,6 +204,35 @@ def test_channel_all_content_flags_continue_past_legacy_numeric_limits() -> None
     assert completed.checkpoint["phaseProgress"]["comments"] == {"completed": 0, "total": 0}
 
 
+def test_target_channel_fans_out_one_video_job_per_discovered_video() -> None:
+    repository = InMemoryRepository()
+    source = repository.create_source(
+        source_type=SourceType.CHANNEL,
+        config={"input": "@example", "collectAllVideos": True, "includeComments": False},
+    )
+    parent = repository.create_job(source_id=source.id, include_comments=False, max_videos=None, max_comments_per_video=None)
+    repository._jobs[parent.id] = replace(parent, target_id="shared-target")
+    client = FullChannelClient()
+
+    waiting_parent = JobRunner(repository, YouTubeCollector(repository, client)).run(parent.id)
+
+    assert waiting_parent.state is JobState.WAITING_RETRY
+    total, terminal, failed = repository.child_job_summary(parent_job_id=parent.id)
+    assert (total, terminal, failed) == (2, 0, 0)
+
+    for _ in range(2):
+        child = repository.claim_next_job(worker_id="video-worker")
+        assert child is not None and child.parent_job_id == parent.id
+        assert JobRunner(repository, YouTubeCollector(repository, client)).run(child.id).state is JobState.COMPLETED
+
+    repository.transition_job(waiting_parent.id, JobState.WAITING_RETRY, resume_at=utcnow() - timedelta(seconds=1))
+    claimed_parent = repository.claim_next_job(worker_id="parent-worker")
+    assert claimed_parent is not None and claimed_parent.id == parent.id
+    completed_parent = JobRunner(repository, YouTubeCollector(repository, client)).run(parent.id)
+    assert completed_parent.state is JobState.COMPLETED
+    assert completed_parent.progress_completed == 2
+
+
 class IncrementalChannelClient:
     def __init__(self) -> None:
         self.playlist_calls = 0

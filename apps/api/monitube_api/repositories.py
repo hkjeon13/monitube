@@ -199,6 +199,10 @@ class CollectionRepository(SourceRepository, JobRepository, CollectionRequestRep
         self, job_id: str, *, completed: int, total: int | None, unit: str, current_stage: str | None = None
     ) -> JobRecord: ...
 
+    def enqueue_video_jobs(self, *, parent_job: JobRecord, youtube_video_ids: Iterable[str]) -> int: ...
+
+    def child_job_summary(self, *, parent_job_id: str) -> tuple[int, int, int]: ...
+
     def upsert_channel(self, channel: dict[str, Any]) -> dict[str, Any]: ...
 
     def upsert_video(self, video: VideoRecord) -> VideoRecord: ...
@@ -772,6 +776,40 @@ class InMemoryRepository(CollectionRepository):
             )
             self._jobs[record.id] = record
             return self._clone_job(record)
+
+    def enqueue_video_jobs(self, *, parent_job: JobRecord, youtube_video_ids: Iterable[str]) -> int:
+        """Fan out one discovery job into idempotent, independently retryable video jobs."""
+        with self._lock:
+            created = 0
+            known = {
+                str(job.checkpoint.get("youtubeVideoId"))
+                for job in self._jobs.values()
+                if job.parent_job_id == parent_job.id
+            }
+            now = utcnow()
+            for youtube_video_id in dict.fromkeys(str(value) for value in youtube_video_ids):
+                if not youtube_video_id or youtube_video_id in known:
+                    continue
+                record = JobRecord(
+                    id=new_id(), source_id=parent_job.source_id, state=JobState.QUEUED,
+                    current_stage="queued_video", progress_completed=0, progress_total=1,
+                    progress_unit="videos", include_comments=parent_job.include_comments,
+                    max_videos=1, max_comments_per_video=parent_job.max_comments_per_video,
+                    checkpoint={"jobKind": "video", "youtubeVideoId": youtube_video_id},
+                    runtime_config_id=parent_job.runtime_config_id, created_at=now, updated_at=now,
+                    parent_job_id=parent_job.id,
+                )
+                self._jobs[record.id] = record
+                known.add(youtube_video_id)
+                created += 1
+            return created
+
+    def child_job_summary(self, *, parent_job_id: str) -> tuple[int, int, int]:
+        with self._lock:
+            children = [job for job in self._jobs.values() if job.parent_job_id == parent_job_id]
+            completed = sum(job.state.is_terminal for job in children)
+            failed = sum(job.state in {JobState.FAILED, JobState.CANCELLED} for job in children)
+            return len(children), completed, failed
 
     @staticmethod
     def _desired_coverage(source_type: SourceType, config: dict[str, Any]) -> dict[str, Any]:

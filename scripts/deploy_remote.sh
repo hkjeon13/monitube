@@ -10,6 +10,7 @@ readonly ENV_TEMPLATE="${TARGET_DIR}/.env.example"
 readonly YOUTUBE_SECRET_ENV_FILE="${MONITUBE_YOUTUBE_SECRET_ENV_FILE:-/data/psyche/.config/monitube/youtube.env}"
 readonly BACKUP_DIR="${MONITUBE_BACKUP_DIR:-/data/psyche/backups/monitube}"
 readonly BRANCH="${MONITUBE_BRANCH:-main}"
+readonly WORKER_REPLICAS="${MONITUBE_WORKER_REPLICAS:-2}"
 
 log() {
   printf '[monitube deploy] %s\n' "$*"
@@ -22,6 +23,9 @@ die() {
 
 if [[ ! "$BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]]; then
   die "MONITUBE_BRANCH contains unsupported characters."
+fi
+if [[ ! "$WORKER_REPLICAS" =~ ^[1-9][0-9]*$ ]]; then
+  die "MONITUBE_WORKER_REPLICAS must be a positive integer."
 fi
 
 command -v docker >/dev/null 2>&1 || die "Docker is required on the deployment host."
@@ -160,7 +164,7 @@ for attempt in $(seq 1 30); do
   if compose exec -T api python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)" >/dev/null 2>&1; then
     log "API health check passed."
     log "Recreating web and worker services."
-    compose up --detach --force-recreate --no-deps web worker
+    compose up --detach --force-recreate --no-deps web --scale "worker=${WORKER_REPLICAS}" worker
     compose ps
     exit 0
   fi

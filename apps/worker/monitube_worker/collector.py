@@ -561,6 +561,17 @@ class YouTubeCollector:
         source = self.repository.get_source(job.source_id)
         self._active_checkpoint = dict(job.checkpoint)
         try:
+            if job.checkpoint.get("jobKind") == "video":
+                self._collect_video_job(job, source)
+                return
+            if job.checkpoint.get("fanoutDiscovered"):
+                self._finalize_fanout_job(job, source)
+                return
+            if source.type is SourceType.VIDEO:
+                # A direct video request is already the smallest schedulable unit.
+                self._collect_video_job(job, source, video_id=str(source.config["input"]))
+                self.repository.save_analysis_summary(source.id)
+                return
             if source.type is SourceType.CHANNEL:
                 incremental_refresh = bool(source.coverage.get("complete") and source.coverage.get("collectAllVideos"))
                 video_ids, known_videos, backfill_required = self._channel_video_ids(
@@ -571,63 +582,82 @@ class YouTubeCollector:
                 known_videos = {}
                 incremental_refresh = False
                 backfill_required = False
-            else:
-                video_ids = [str(source.config["input"])]
-                known_videos = {}
-                incremental_refresh = False
-                backfill_required = False
-
-            stage = "backfilling_oldest_videos" if backfill_required else "fetching_videos"
-            self._set_phase_progress(job, phase="videos", completed=0, total=len(video_ids), current_stage=stage)
-            videos = self._video_records(job, video_ids)
-            for video in videos:
-                self.repository.link_source_video(source.id, video.youtube_video_id)
-            self._set_phase_progress(job, phase="videos", completed=len(video_ids), total=len(video_ids), current_stage="videos_persisted")
-
-            include_comments = bool(job.include_comments or source.config.get("includeComments"))
-            if include_comments:
-                max_pages = None if source.config.get("collectAllComments") else (
-                    job.max_comments_per_video or as_int(source.config.get("maxCommentPagesPerVideo")) or 1
+            if job.target_id is None:
+                self._collect_video_ids_inline(
+                    job, source, video_ids, incremental_refresh=incremental_refresh, backfill_required=backfill_required
                 )
-                # A failed or quota-paused initial collection may be restarted as a
-                # new job, which has no usable page cursor.  Treat an individual
-                # video as complete once its persisted comments cover YouTube's
-                # advertised count, independent of the parent job's status. This
-                # avoids spending quota again on videos completed by an earlier job.
-                persisted_comment_counts = self.repository.comment_counts_by_video(
-                    video.youtube_video_id for video in videos
-                )
-                videos_with_new_comments = self._prioritize_comment_collection(
-                    [
-                        video
-                        for video in videos
-                        if persisted_comment_counts.get(video.youtube_video_id, 0) < video.statistics.get("commentCount", 0)
-                    ],
-                    persisted_comment_counts,
-                )
-                completed_comment_videos = len(videos) - len(videos_with_new_comments)
-                collected_comments = 0
-                self._set_phase_progress(
-                    job,
-                    phase="comments",
-                    completed=completed_comment_videos,
-                    total=len(videos),
-                    current_stage="collecting_comments",
-                )
-                for index, video in enumerate(videos_with_new_comments, start=1):
-                    collected_comments += self._collect_comments(
-                        job, video, max_pages, incremental_refresh=incremental_refresh
-                    )
-                    self._set_phase_progress(
-                        job,
-                        phase="comments",
-                        completed=completed_comment_videos + index,
-                        total=len(videos),
-                        current_stage="collecting_comments",
-                    )
-                self._checkpoint(job, stage="analysis", scope_key=source.id, page_token=None, batch_cursor=collected_comments)
-
-            self.repository.save_analysis_summary(source.id)
-            self._checkpoint(job, stage="completed", scope_key=source.id, page_token=None, batch_cursor=len(videos))
+                return
+            # A discovery job performs only the cheap list/search phase, then fans
+            # out independently retryable video jobs. This stops a large channel
+            # from monopolising the worker ahead of other channels or keywords.
+            self.repository.enqueue_video_jobs(parent_job=job, youtube_video_ids=video_ids)
+            checkpoint = dict(self._active_checkpoint)
+            checkpoint["fanoutDiscovered"] = True
+            checkpoint["fanoutVideoCount"] = len(video_ids)
+            self._active_checkpoint = checkpoint
+            self.repository.checkpoint_job(job.id, checkpoint)
+            self._set_phase_progress(
+                job, phase="videos", completed=0, total=len(video_ids),
+                current_stage="waiting_for_video_jobs",
+            )
+            raise RetryableCollectionError("Waiting for video collection jobs", retry_after_seconds=5)
         except YouTubeApiError as exc:
             self._raise_classified(job, exc)
+
+    def _finalize_fanout_job(self, job: JobRecord, source: Any) -> None:
+        total, terminal, failed = self.repository.child_job_summary(parent_job_id=job.id)
+        self._set_phase_progress(job, phase="videos", completed=terminal, total=total, current_stage="waiting_for_video_jobs")
+        if terminal < total:
+            raise RetryableCollectionError("Waiting for video collection jobs", retry_after_seconds=5)
+        if failed:
+            raise RuntimeError(f"{failed} video collection job(s) failed")
+        self.repository.save_analysis_summary(source.id)
+        self._checkpoint(job, stage="completed", scope_key=source.id, page_token=None, batch_cursor=total)
+
+    def _collect_video_ids_inline(
+        self, job: JobRecord, source: Any, video_ids: list[str], *, incremental_refresh: bool, backfill_required: bool
+    ) -> None:
+        stage = "backfilling_oldest_videos" if backfill_required else "fetching_videos"
+        self._set_phase_progress(job, phase="videos", completed=0, total=len(video_ids), current_stage=stage)
+        videos = self._video_records(job, video_ids)
+        for video in videos:
+            self.repository.link_source_video(source.id, video.youtube_video_id)
+        self._set_phase_progress(job, phase="videos", completed=len(video_ids), total=len(video_ids), current_stage="videos_persisted")
+        if job.include_comments or source.config.get("includeComments"):
+            max_pages = None if source.config.get("collectAllComments") else (
+                job.max_comments_per_video or as_int(source.config.get("maxCommentPagesPerVideo")) or 1
+            )
+            persisted = self.repository.comment_counts_by_video(video.youtube_video_id for video in videos)
+            pending = self._prioritize_comment_collection(
+                [video for video in videos if persisted.get(video.youtube_video_id, 0) < video.statistics.get("commentCount", 0)], persisted
+            )
+            done = len(videos) - len(pending)
+            self._set_phase_progress(job, phase="comments", completed=done, total=len(videos), current_stage="collecting_comments")
+            for index, video in enumerate(pending, start=1):
+                self._collect_comments(job, video, max_pages, incremental_refresh=incremental_refresh)
+                self._set_phase_progress(job, phase="comments", completed=done + index, total=len(videos), current_stage="collecting_comments")
+        self.repository.save_analysis_summary(source.id)
+        self._checkpoint(job, stage="completed", scope_key=source.id, page_token=None, batch_cursor=len(videos))
+
+    def _collect_video_job(self, job: JobRecord, source: Any, *, video_id: str | None = None) -> None:
+        video_id = video_id or str(job.checkpoint.get("youtubeVideoId") or "")
+        if not video_id:
+            raise RuntimeError("Video job is missing youtubeVideoId")
+        videos = self._video_records(job, [video_id])
+        for video in videos:
+            self.repository.link_source_video(source.id, video.youtube_video_id)
+        self._set_phase_progress(job, phase="videos", completed=len(videos), total=1, current_stage="video_persisted")
+        if not videos:
+            return
+        include_comments = bool(job.include_comments or source.config.get("includeComments"))
+        if include_comments:
+            max_pages = None if source.config.get("collectAllComments") else (
+                job.max_comments_per_video or as_int(source.config.get("maxCommentPagesPerVideo")) or 1
+            )
+            video = videos[0]
+            persisted_count = self.repository.comment_counts_by_video([video.youtube_video_id]).get(video.youtube_video_id, 0)
+            if persisted_count < video.statistics.get("commentCount", 0):
+                self._set_phase_progress(job, phase="comments", completed=0, total=1, current_stage="collecting_comments")
+                self._collect_comments(job, video, max_pages, incremental_refresh=False)
+            self._set_phase_progress(job, phase="comments", completed=1, total=1, current_stage="comments_persisted")
+        self._checkpoint(job, stage="completed", scope_key=video_id, page_token=None, batch_cursor=1)

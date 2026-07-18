@@ -82,6 +82,7 @@ Copy `.env.example` to `.env` and edit only local values. `.env` is ignored by G
 | `*_BIND_ADDRESS` / `*_PORT` | `127.0.0.1` and local defaults | n/a | host binding and collision-safe published ports |
 | `NEXT_PUBLIC_API_BASE_URL` | browser-reachable API URL | passed into the web build/runtime | public browser configuration only |
 | `YOUTUBE_API_KEY` | optional local server secret | API/worker only | server-managed YouTube Data API access |
+| `MONITUBE_WORKER_REPLICAS` | `2` | deployment script only | number of concurrent collection workers |
 | `ENABLE_DERIVED_ANALYTICS` | `false` by default | same | policy gate for future model-generated/derived analytics |
 
 `NEXT_PUBLIC_*` values are intentionally browser-visible. Do not put API keys,

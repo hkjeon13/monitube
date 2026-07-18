@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import signal
+import hashlib
 from threading import Event
 
 from monitube_api.settings import Settings, create_repository
@@ -35,14 +36,22 @@ def main() -> None:
         logger.info("Monitube worker stopped.")
         return
 
-    worker_id = os.getenv("WORKER_ID", f"worker-{os.getpid()}")
+    # Compose replicas commonly all run as PID 1. Include the container hostname
+    # so their leases and initial key-pool positions stay distinct.
+    worker_id = os.getenv("WORKER_ID", f"worker-{os.getenv('HOSTNAME', 'local')}-{os.getpid()}")
+    client = RotatingYouTubeDataClient(
+        settings.youtube_api_keys,
+        base_url=settings.youtube_api_base_url,
+        timeout_seconds=settings.youtube_api_timeout_seconds,
+    )
+    # Spread independently started workers across the configured pool. Failover
+    # still rotates normally, and replace_keys preserves this selected key when
+    # runtime-registered keys are loaded before a claimed job.
+    for _ in range(int(hashlib.sha256(worker_id.encode("utf-8")).hexdigest(), 16) % client.key_count):
+        client.rotate()
     collector = YouTubeCollector(
         repository,
-        RotatingYouTubeDataClient(
-            settings.youtube_api_keys,
-            base_url=settings.youtube_api_base_url,
-            timeout_seconds=settings.youtube_api_timeout_seconds,
-        ),
+        client,
         lease_seconds=settings.worker_lease_seconds,
     )
     runner = JobRunner(repository, collector)

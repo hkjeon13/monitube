@@ -95,6 +95,9 @@ class JobRecord:
     created_at: datetime = field(default_factory=utcnow)
     updated_at: datetime = field(default_factory=utcnow)
     target_id: str | None = None
+    # Child video jobs are intentionally not target jobs: only their parent owns
+    # the browser request and final target coverage.
+    parent_job_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

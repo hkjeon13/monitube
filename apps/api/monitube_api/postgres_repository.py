@@ -195,6 +195,7 @@ class PostgresRepository(CollectionRepository):
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             target_id=str(row["target_id"]) if row.get("target_id") else None,
+            parent_job_id=str(row["parent_job_id"]) if row.get("parent_job_id") else None,
         )
 
     @staticmethod
@@ -930,6 +931,46 @@ class PostgresRepository(CollectionRepository):
             ),
         )
         return self._job(cursor.fetchone())
+
+    def enqueue_video_jobs(self, *, parent_job: JobRecord, youtube_video_ids: Iterable[str]) -> int:
+        ids = list(dict.fromkeys(str(value) for value in youtube_video_ids if str(value)))
+        if not ids:
+            return 0
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.executemany(
+                """
+                INSERT INTO sync_jobs (
+                  source_id, runtime_config_id, parent_job_id, state, current_stage,
+                  idempotency_key, include_comments, max_videos, max_comments_per_video,
+                  progress_total, progress_unit, checkpoint
+                ) VALUES (%s, %s, %s, 'queued', 'queued_video', %s, %s, 1, %s, 1, 'videos', %s)
+                ON CONFLICT (source_id, idempotency_key) DO NOTHING
+                """,
+                [
+                    (
+                        parent_job.source_id, parent_job.runtime_config_id, parent_job.id,
+                        f"video:{parent_job.id}:{video_id}", parent_job.include_comments,
+                        parent_job.max_comments_per_video,
+                        Json({"jobKind": "video", "youtubeVideoId": video_id}),
+                    )
+                    for video_id in ids
+                ],
+            )
+            return cursor.rowcount
+
+    def child_job_summary(self, *, parent_job_id: str) -> tuple[int, int, int]:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT count(*)::integer AS total,
+                       count(*) FILTER (WHERE state IN ('completed', 'completed_with_warnings', 'failed', 'cancelled'))::integer AS terminal,
+                       count(*) FILTER (WHERE state IN ('failed', 'cancelled'))::integer AS failed
+                FROM sync_jobs WHERE parent_job_id = %s
+                """,
+                (parent_job_id,),
+            )
+            row = cursor.fetchone()
+            return int(row["total"]), int(row["terminal"]), int(row["failed"])
 
     def _submission(self, cursor: Any, request: CollectionRequestRecord) -> CollectionSubmission:
         cursor.execute("SELECT * FROM collection_targets WHERE id = %s", (request.target_id,))
