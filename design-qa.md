@@ -21,7 +21,7 @@
   - explicit long-text expansion and comment-detail controls;
   - a real parent comment with `답글 1개 보기`, expanded child reply, connecting thread structure, and `답글 접기` state;
   - comment-detail back navigation and a single active modal.
-- Console error review was not completed because the required screenshot comparison failed first.
+- Browser console warnings and errors were checked after the interaction pass; none were recorded.
 
 ## Full-view comparison evidence
 
@@ -57,6 +57,7 @@ Blocked for the same reason. The intended focused region is the author/time/body
 - Comment detail view and return to video comments.
 - Real stored reply expansion and collapse state.
 - Long-comment expansion control presence.
+- Browser console warning/error log was empty after the tested flows.
 
 ## Comparison history
 
