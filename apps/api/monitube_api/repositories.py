@@ -93,7 +93,7 @@ class CollectionRequestRepository(Protocol):
 
     def dispatch_due_pins(self, *, runtime_config_id: str | None = None, limit: int = 10) -> int: ...
 
-    def list_explore(self, *, limit: int = 60, channel_id: str | None = None, owner_id: str | None = None) -> dict[str, Any]: ...
+    def list_explore(self, *, limit: int = 60, offset: int = 0, channel_id: str | None = None, owner_id: str | None = None) -> dict[str, Any]: ...
 
     def list_channel_subscriber_history(
         self, *, youtube_channel_id: str, limit: int = 180, owner_id: str | None = None
@@ -1343,7 +1343,7 @@ class InMemoryRepository(CollectionRepository):
             return dispatched
 
     def list_explore(
-        self, *, limit: int = 60, channel_id: str | None = None, owner_id: str | None = None
+        self, *, limit: int = 60, offset: int = 0, channel_id: str | None = None, owner_id: str | None = None
     ) -> dict[str, Any]:
         with self._lock:
             visible_video_ids = self._visible_video_ids_locked(owner_id)
@@ -1401,7 +1401,12 @@ class InMemoryRepository(CollectionRepository):
                 key=lambda item: (item.published_at or item.source_fetched_at, item.source_fetched_at),
                 reverse=True,
             )
-            return {"channels": channels, "videos": videos[:limit]}
+            page = videos[offset:offset + limit]
+            return {
+                "channels": channels,
+                "videos": page,
+                "next_offset": offset + len(page) if offset + len(page) < len(videos) else None,
+            }
 
     def list_channel_subscriber_history(
         self, *, youtube_channel_id: str, limit: int = 180, owner_id: str | None = None

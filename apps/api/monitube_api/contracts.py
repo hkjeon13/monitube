@@ -236,6 +236,7 @@ class ExploreChannel(ApiModel):
 class ExploreResponse(ApiModel):
     channels: list[ExploreChannel] = Field(default_factory=list)
     videos: list["CollectedVideo"] = Field(default_factory=list)
+    nextOffset: int | None = Field(default=None, ge=0)
 
 
 class ChannelSubscriberSnapshot(ApiModel):

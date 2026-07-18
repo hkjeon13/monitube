@@ -308,7 +308,9 @@ svg { display: block; width: 1.125rem; height: 1.125rem; stroke-width: 1.7; }
 .explore-video-date { margin-top: 1.25rem; opacity: 0.76; font-size: 0.5625rem; font-weight: 700; }
 .explore-video-card strong { display: -webkit-box; overflow: hidden; margin-top: 0.375rem; font-size: 0.75rem; font-weight: 800; line-height: 1.35; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .explore-video-card footer { display: flex; flex-wrap: wrap; gap: 0.375rem 0.625rem; margin-top: 0.625rem; opacity: 0.8; font-size: 0.5625rem; font-weight: 650; }
-.explore-load-more-sentinel { height: 1px; margin-top: 1.5rem; }
+.explore-load-more { display: grid; min-height: 3.5rem; place-items: center; margin-top: 1.5rem; }
+.explore-load-more-spinner { width: 1.5rem; height: 1.5rem; border: 0.1875rem solid var(--line-strong); border-top-color: var(--orange); border-radius: 50%; animation: explore-load-more-spin 720ms linear infinite; }
+@keyframes explore-load-more-spin { to { transform: rotate(360deg); } }
 .explore-empty { display: grid; min-height: 7rem; place-items: center; grid-column: 1 / -1; padding: 1rem; border: 0.0625rem dashed var(--line-strong); border-radius: 0.75rem; color: var(--muted); font-size: 0.75rem; line-height: 1.5; text-align: center; }
 
 .inline-error { margin: 0 0 1.25rem; padding: 0.75rem 0.875rem; border: 0.0625rem solid #efcdcb; border-radius: 0.625rem; color: #933737; background: var(--danger-soft); font-size: 0.75rem; line-height: 1.45; }

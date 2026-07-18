@@ -88,9 +88,13 @@ def test_explore_videos_are_ordered_by_latest_published_date() -> None:
         )
     )
 
-    result = repository.list_explore()
+    result = repository.list_explore(limit=1)
+    next_page = repository.list_explore(limit=1, offset=result["next_offset"])
 
-    assert [video.youtube_video_id for video in result["videos"]] == [newer.youtube_video_id, older.youtube_video_id]
+    assert [video.youtube_video_id for video in result["videos"]] == [newer.youtube_video_id]
+    assert result["next_offset"] == 1
+    assert [video.youtube_video_id for video in next_page["videos"]] == [older.youtube_video_id]
+    assert next_page["next_offset"] is None
 
 
 def test_comment_detail_includes_replies_and_other_comments_from_the_same_author() -> None:

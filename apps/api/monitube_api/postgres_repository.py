@@ -2110,7 +2110,7 @@ class PostgresRepository(CollectionRepository):
             return dispatched
 
     def list_explore(
-        self, *, limit: int = 60, channel_id: str | None = None, owner_id: str | None = None
+        self, *, limit: int = 60, offset: int = 0, channel_id: str | None = None, owner_id: str | None = None
     ) -> dict[str, Any]:
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
@@ -2219,11 +2219,17 @@ class PostgresRepository(CollectionRepository):
                 )
                   AND (%s::text IS NULL OR c.youtube_channel_id = %s)
                 ORDER BY v.published_at DESC NULLS LAST, v.source_fetched_at DESC NULLS LAST
-                LIMIT %s
+                LIMIT %s OFFSET %s
                 """,
-                (owner_id, owner_id, channel_id, channel_id, 10_000 if channel_id else limit),
+                (owner_id, owner_id, channel_id, channel_id, limit + 1, offset),
             )
-            return {"channels": channels, "videos": [self._video(row) for row in cursor.fetchall()]}
+            rows = cursor.fetchall()
+            page_rows = rows[:limit]
+            return {
+                "channels": channels,
+                "videos": [self._video(row) for row in page_rows],
+                "next_offset": offset + len(page_rows) if len(rows) > limit else None,
+            }
 
     def list_channel_subscriber_history(
         self, *, youtube_channel_id: str, limit: int = 180, owner_id: str | None = None

@@ -367,13 +367,19 @@ class CollectionService:
         pin = self.repository.get_target_pin(target_id=target_id)
         return self._pin_contract(pin) if pin else None
 
-    def explore(self, *, owner_id: str | None = None, channel_id: str | None = None) -> ExploreResponse:
-        result = self.repository.list_explore(channel_id=channel_id, owner_id=owner_id)
+    def explore(
+        self, *, owner_id: str | None = None, channel_id: str | None = None, offset: int = 0, limit: int = 60
+    ) -> ExploreResponse:
+        result = self.repository.list_explore(channel_id=channel_id, owner_id=owner_id, offset=offset, limit=limit)
         channels = []
         for channel in result["channels"]:
             pin = channel.pop("pin", None)
             channels.append({**channel, "pin": self._pin_contract(pin) if pin else None})
-        return ExploreResponse(channels=channels, videos=[_video_contract(video) for video in result["videos"]])
+        return ExploreResponse(
+            channels=channels,
+            videos=[_video_contract(video) for video in result["videos"]],
+            nextOffset=result.get("next_offset"),
+        )
 
     def channel_subscriber_history(
         self, youtube_channel_id: str, *, owner_id: str | None = None

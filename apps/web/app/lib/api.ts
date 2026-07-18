@@ -133,6 +133,7 @@ export interface ExploreChannel {
 export interface ExploreData {
   channels: ExploreChannel[];
   videos: CollectedVideo[];
+  nextOffset?: number;
 }
 
 export interface ChannelSubscriberSnapshot {
@@ -701,9 +702,10 @@ export async function getCommentDetail(commentId: string): Promise<CommentDetail
   };
 }
 
-export async function getExplore(channelId?: string): Promise<ExploreData> {
-  const query = channelId ? `?channelId=${encodeURIComponent(channelId)}` : "";
-  const response = await request<unknown>(`/v1/explore${query}`, { method: "GET" });
+export async function getExplore(channelId?: string, offset = 0, limit = 60): Promise<ExploreData> {
+  const query = new URLSearchParams({ offset: String(offset), limit: String(limit) });
+  if (channelId) query.set("channelId", channelId);
+  const response = await request<unknown>(`/v1/explore?${query.toString()}`, { method: "GET" });
   const record = asRecord(response);
   return {
     channels: firstArray(record ?? {}, ["channels"]).flatMap((item) => {
@@ -714,6 +716,7 @@ export async function getExplore(channelId?: string): Promise<ExploreData> {
       const video = normalizeVideo(item);
       return video ? [video] : [];
     }),
+    ...(asNumber(record?.nextOffset ?? record?.next_offset) !== undefined ? { nextOffset: asNumber(record?.nextOffset ?? record?.next_offset) } : {}),
   };
 }
 

@@ -261,8 +261,10 @@ def create_app(repository: CollectionRepository | None = None, settings: Setting
     def explore(
         service: Service, user: User,
         channel_id: str | None = Query(default=None, alias="channelId", min_length=1, max_length=64),
+        offset: int = Query(default=0, ge=0),
+        limit: int = Query(default=60, ge=12, le=120),
     ) -> ExploreResponse:
-        return service.explore(owner_id=user.id, channel_id=channel_id)
+        return service.explore(owner_id=user.id, channel_id=channel_id, offset=offset, limit=limit)
 
     @router.get("/channels/{youtube_channel_id}/subscriber-history", response_model=list[ChannelSubscriberSnapshot], tags=["explore"])
     def channel_subscriber_history(youtube_channel_id: str, service: Service, user: User) -> list[ChannelSubscriberSnapshot]:

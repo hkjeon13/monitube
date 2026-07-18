@@ -515,6 +515,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   const [viewMetric, setViewMetric] = useState<ViewMetric>("views");
   const [explore, setExplore] = useState<ExploreData>({ channels: [], videos: [] });
   const [isExploreLoading, setIsExploreLoading] = useState(false);
+  const [isExploreLoadingMore, setIsExploreLoadingMore] = useState(false);
   const [exploreError, setExploreError] = useState<string | null>(null);
   const [updatingSourceId, setUpdatingSourceId] = useState<string | null>(null);
   const [deletingSourceId, setDeletingSourceId] = useState<string | null>(null);
@@ -648,15 +649,36 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
 
   const refreshExplore = useCallback(async (channelId?: string | null) => {
     setIsExploreLoading(true);
+    setIsExploreLoadingMore(false);
     setExploreError(null);
     try {
       setExplore(await getExplore(channelId ?? undefined));
+      setExploreVisibleCount(12);
     } catch (caught) {
       setExploreError(caught instanceof Error ? caught.message : "Explore 라이브러리를 불러오지 못했습니다.");
     } finally {
       setIsExploreLoading(false);
     }
   }, []);
+
+  const loadMoreExplore = useCallback(async () => {
+    if (isExploreLoadingMore || explore.nextOffset === undefined) return;
+    setIsExploreLoadingMore(true);
+    setExploreError(null);
+    try {
+      const nextPage = await getExplore(exploreChannelId ?? undefined, explore.nextOffset);
+      setExplore((current) => ({
+        channels: current.channels.length ? current.channels : nextPage.channels,
+        videos: [...current.videos, ...nextPage.videos.filter((video) => !current.videos.some((item) => item.id === video.id))],
+        ...(nextPage.nextOffset !== undefined ? { nextOffset: nextPage.nextOffset } : {}),
+      }));
+      setExploreVisibleCount((current) => current + nextPage.videos.length);
+    } catch (caught) {
+      setExploreError(caught instanceof Error ? caught.message : "추가 동영상을 불러오지 못했습니다.");
+    } finally {
+      setIsExploreLoadingMore(false);
+    }
+  }, [explore.nextOffset, exploreChannelId, isExploreLoadingMore]);
 
   const submitCollectedSearch = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -851,13 +873,18 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
 
   useEffect(() => {
     const sentinel = exploreLoadMoreRef.current;
-    if (page !== "explore" || hasSearchQuery || !sentinel || visibleExploreVideos.length >= exploreVideos.length) return;
+    if (page !== "explore" || hasSearchQuery || !sentinel || isExploreLoadingMore) return;
     const observer = new IntersectionObserver(([entry]) => {
-      if (entry.isIntersecting) setExploreVisibleCount((count) => Math.min(count + 12, exploreVideos.length));
+      if (!entry.isIntersecting) return;
+      if (visibleExploreVideos.length < exploreVideos.length) {
+        setExploreVisibleCount((count) => Math.min(count + 12, exploreVideos.length));
+      } else {
+        void loadMoreExplore();
+      }
     }, { rootMargin: "288px 0px" });
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [hasSearchQuery, page, exploreVideos.length, visibleExploreVideos.length]);
+  }, [hasSearchQuery, isExploreLoadingMore, loadMoreExplore, page, exploreVideos.length, visibleExploreVideos.length]);
 
   useEffect(() => {
     if (!activeSourceId) {
@@ -1250,7 +1277,9 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
                 {visibleExploreVideos.map((video, index) => <button className={index === 0 ? "explore-video-card explore-video-card-featured" : "explore-video-card"} type="button" key={video.id} onClick={(event) => openVideoDrawer(video, event.currentTarget)}><img src={youtubeThumbnail(video.youtubeVideoId)} alt="" loading={index < 6 ? "eager" : "lazy"} /><span className="explore-video-shade" aria-hidden="true" /><span className="explore-video-play"><PlayIcon aria-hidden="true" /></span><span className="explore-video-date">{formatShortDate(video.publishedAt)}</span><strong>{video.title ?? video.youtubeVideoId}</strong><footer><span>조회 {formatCount(video.viewCount)}</span><span>댓글 {formatCount(video.commentCount)}</span></footer></button>)}
                 {exploreVideos.length === 0 && <div className="explore-empty">조건에 맞는 저장 동영상이 없습니다.</div>}
               </div>
-              {exploreVideos.length > visibleExploreVideos.length && <div className="explore-load-more-sentinel" ref={exploreLoadMoreRef} aria-hidden="true" />}
+              {(exploreVideos.length > visibleExploreVideos.length || explore.nextOffset !== undefined || isExploreLoadingMore) && <div className="explore-load-more" ref={exploreLoadMoreRef} aria-live="polite">
+                {isExploreLoadingMore && <span className="explore-load-more-spinner" aria-label="추가 동영상을 불러오는 중" />}
+              </div>}
             </>
             )
           )}
