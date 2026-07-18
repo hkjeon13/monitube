@@ -35,6 +35,7 @@ import type { FormEvent, MouseEvent, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
+  ApiError,
   createCollectionRequest,
   deleteSource,
   getChannelSubscriberHistory,
@@ -44,8 +45,10 @@ import {
   getExplore,
   getCommentDetail,
   searchCollected,
-  getSourceResults,
+  getSourceVideos,
+  getSourceWorkspace,
   getVideoCommentThreads,
+  listActiveJobs,
   listSources,
   login,
   register,
@@ -59,6 +62,7 @@ import {
   type ChannelSubscriberSnapshot,
   type CommentDetailData,
   type ExploreData,
+  type ActiveSourceJob,
   type SourceResults,
   type SourceSummary,
 } from "../lib/api";
@@ -411,6 +415,30 @@ function isTerminalJob(job: JobStatus | null | undefined) {
   return job ? ["completed", "completed_with_warnings", "failed", "cancelled"].includes(job.state) : false;
 }
 
+function isAbortError(error: unknown) {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
+function activeJobKey(entry: ActiveSourceJob) {
+  return `${entry.sourceId}:${entry.job.id}`;
+}
+
+function activeJobPollingDelay(entries: ActiveSourceJob[], failureCount = 0) {
+  if (typeof document !== "undefined" && document.visibilityState === "hidden") return 30_000;
+  if (failureCount > 0) {
+    const backoff = Math.min(60_000, 5_000 * (2 ** Math.min(failureCount - 1, 4)));
+    return Math.round(backoff * (0.8 + Math.random() * 0.4));
+  }
+  if (entries.length === 0) return 15_000;
+  const waitingJobs = entries.filter(({ job }) => job.state === "waiting_quota" || job.state === "waiting_retry");
+  if (waitingJobs.length !== entries.length) return 5_000;
+  const nextResumeIn = Math.min(...waitingJobs.map(({ job }) => {
+    const resumeAt = job.resumeAt ? new Date(job.resumeAt).getTime() : Number.NaN;
+    return Number.isFinite(resumeAt) ? Math.max(0, resumeAt - Date.now()) : 30_000;
+  }));
+  return Math.min(60_000, Math.max(15_000, nextResumeIn));
+}
+
 function mergeCommentThreads(current: CommentThreadItem[], incoming: CommentThreadItem[]) {
   const seen = new Set(current.map((item) => item.comment.id));
   return [...current, ...incoming.filter((item) => !seen.has(item.comment.id))];
@@ -539,6 +567,8 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   const [sourceResults, setSourceResults] = useState<SourceResults | null>(null);
   const [isResultsLoading, setIsResultsLoading] = useState(false);
   const [resultsError, setResultsError] = useState<string | null>(null);
+  const [isSourceVideosLoadingMore, setIsSourceVideosLoadingMore] = useState(false);
+  const [sourceVideosError, setSourceVideosError] = useState<string | null>(null);
   const [selectedVideo, setSelectedVideo] = useState<CollectedVideo | null>(null);
   const [commentThreads, setCommentThreads] = useState<CommentThreadItem[]>([]);
   const [commentSort, setCommentSort] = useState<CommentThreadSort>("newest");
@@ -570,6 +600,9 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   const [isSearchLoading, setIsSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const resultsRequest = useRef(0);
+  const resultsAbortController = useRef<AbortController | null>(null);
+  const sourceVideosAbortController = useRef<AbortController | null>(null);
+  const sourceVideosInFlightRef = useRef(false);
   const commentsRequest = useRef(0);
   const collectionTriggerRef = useRef<HTMLElement | null>(null);
   const videoTriggerRef = useRef<HTMLElement | null>(null);
@@ -577,9 +610,17 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   const collectionDrawerRef = useRef<HTMLElement | null>(null);
   const videoModalRef = useRef<HTMLElement | null>(null);
   const commentThreadsLoadMoreRef = useRef<HTMLDivElement | null>(null);
+  const sourceVideosLoadMoreRef = useRef<HTMLDivElement | null>(null);
   const exploreLoadMoreRef = useRef<HTMLDivElement | null>(null);
   const appliedSourceQueryRef = useRef<string | null>(null);
   const searchRequest = useRef(0);
+  const sourcesRef = useRef<SourceSummary[]>([]);
+  const activeSourceIdRef = useRef("");
+  const localJobRef = useRef<{ sourceId: string; job: JobStatus } | null>(null);
+  const activeJobsRef = useRef<Map<string, ActiveSourceJob>>(new Map());
+  const activeJobsEndpointSupportedRef = useRef<boolean | null>(null);
+  const handledTerminalJobsRef = useRef<Set<string>>(new Set());
+  const wakeActiveJobsPollRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     void getCurrentUser().then((user) => setAuthUser(user?.username ?? null)).catch(() => setAuthUser(null));
@@ -591,15 +632,16 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   const activeJob = job && jobSourceId === activeSourceId ? job : sourceResults?.latestJob;
   const videos = sourceResults?.videos ?? [];
   const rankedVideos = useMemo(
-    () => [...videos].sort((left, right) => videoMetric(right, viewMetric) - videoMetric(left, viewMetric)).slice(0, 6),
-    [videos, viewMetric],
+    () => sourceResults?.topVideos?.[viewMetric]
+      ?? [...videos].sort((left, right) => videoMetric(right, viewMetric) - videoMetric(left, viewMetric)).slice(0, 6),
+    [sourceResults?.topVideos, videos, viewMetric],
   );
   const rankedMax = Math.max(1, ...rankedVideos.map((video) => videoMetric(video, viewMetric)));
   const topWords = sourceResults?.analysis?.topWords.length
     ? sourceResults.analysis.topWords
     : sourceResults?.commentSummary?.topWords ?? [];
   const wordMax = Math.max(1, ...topWords.map((word) => word.count ?? 0));
-  const analysisVideoCount = sourceResults?.analysis?.videoCount ?? videos.length;
+  const analysisVideoCount = sourceResults?.analysis?.videoCount ?? sourceResults?.videosTotal ?? videos.length;
   const analysisCommentCount = sourceResults?.analysis?.commentCount ?? sourceResults?.commentSummary?.total;
   const latestVideoDate = sourceResults?.analysis?.latestVideoPublishedAt
     ?? [...videos].sort((left, right) => new Date(right.publishedAt ?? 0).getTime() - new Date(left.publishedAt ?? 0).getTime())[0]?.publishedAt;
@@ -656,6 +698,19 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     setIsSourcesLoading(true);
     try {
       const nextSources = dedupeSources(await listSources());
+      for (const source of nextSources) {
+        if (source.latestJob && !isTerminalJob(source.latestJob)) {
+          const entry: ActiveSourceJob = {
+            sourceId: source.id,
+            ...(source.targetId ? { targetId: source.targetId } : {}),
+            job: source.latestJob,
+          };
+          activeJobsRef.current.set(activeJobKey(entry), entry);
+        }
+      }
+      if (nextSources.some((source) => source.latestJob && !isTerminalJob(source.latestJob))) {
+        wakeActiveJobsPollRef.current?.();
+      }
       setSources(nextSources);
       setActiveSourceId((current) => {
         if (current && nextSources.some((source) => source.id === current)) return current;
@@ -670,20 +725,65 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
 
   const refreshResults = useCallback(async (sourceId: string) => {
     if (!sourceId) return;
+    resultsAbortController.current?.abort();
+    sourceVideosAbortController.current?.abort();
+    const controller = new AbortController();
+    resultsAbortController.current = controller;
     const requestId = ++resultsRequest.current;
     setIsResultsLoading(true);
     setResultsError(null);
+    setSourceVideosError(null);
+    setIsSourceVideosLoadingMore(false);
+    sourceVideosInFlightRef.current = false;
     try {
-      const nextResults = await getSourceResults(sourceId);
+      const nextResults = await getSourceWorkspace(sourceId, controller.signal);
       if (requestId === resultsRequest.current) setSourceResults(nextResults);
     } catch (caught) {
-      if (requestId === resultsRequest.current) {
+      if (requestId === resultsRequest.current && !isAbortError(caught)) {
         setResultsError(caught instanceof Error ? caught.message : "수집 결과를 불러오지 못했습니다.");
       }
     } finally {
-      if (requestId === resultsRequest.current) setIsResultsLoading(false);
+      if (resultsAbortController.current === controller) resultsAbortController.current = null;
+      if (requestId === resultsRequest.current && !controller.signal.aborted) setIsResultsLoading(false);
     }
   }, []);
+
+  const loadMoreSourceVideos = useCallback(async () => {
+    const sourceId = activeSourceIdRef.current;
+    const cursor = sourceResults?.videosNextCursor;
+    if (!sourceId || !cursor || sourceVideosInFlightRef.current) return;
+    sourceVideosInFlightRef.current = true;
+    sourceVideosAbortController.current?.abort();
+    const controller = new AbortController();
+    sourceVideosAbortController.current = controller;
+    setIsSourceVideosLoadingMore(true);
+    setSourceVideosError(null);
+    try {
+      const page = await getSourceVideos(sourceId, { cursor, signal: controller.signal });
+      if (controller.signal.aborted || activeSourceIdRef.current !== sourceId) return;
+      setSourceResults((current) => {
+        if (!current || current.source.id !== sourceId) return current;
+        const existingIds = new Set(current.videos.map((video) => video.id));
+        return {
+          ...current,
+          videos: [...current.videos, ...page.videos.filter((video) => !existingIds.has(video.id))],
+          videosNextCursor: page.nextCursor,
+          videosSnapshotAt: page.snapshotAt ?? current.videosSnapshotAt,
+          videosTotal: page.total,
+        };
+      });
+    } catch (caught) {
+      if (!isAbortError(caught)) {
+        setSourceVideosError(caught instanceof Error ? caught.message : "추가 동영상을 불러오지 못했습니다.");
+      }
+    } finally {
+      if (sourceVideosAbortController.current === controller) sourceVideosAbortController.current = null;
+      if (sourceVideosAbortController.current === null || sourceVideosAbortController.current === controller) {
+        sourceVideosInFlightRef.current = false;
+      }
+      if (!controller.signal.aborted) setIsSourceVideosLoadingMore(false);
+    }
+  }, [sourceResults?.videosNextCursor]);
 
   const refreshExplore = useCallback(async (channelId?: string | null) => {
     setIsExploreLoading(true);
@@ -891,15 +991,43 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   }, []);
 
   useEffect(() => {
-    if (authUser) void refreshSources();
-  }, [authUser, refreshSources]);
+    sourcesRef.current = sources;
+  }, [sources]);
 
   useEffect(() => {
-    const hasRunningSource = sources.some((source) => source.latestJob && !isTerminalJob(source.latestJob));
-    if (!hasRunningSource) return;
-    const timer = window.setInterval(() => { void refreshSources(); }, 5_000);
-    return () => window.clearInterval(timer);
-  }, [refreshSources, sources]);
+    activeSourceIdRef.current = activeSourceId;
+  }, [activeSourceId]);
+
+  useEffect(() => {
+    localJobRef.current = job && jobSourceId ? { sourceId: jobSourceId, job } : null;
+  }, [job, jobSourceId]);
+
+  useEffect(() => () => {
+    resultsAbortController.current?.abort();
+    sourceVideosAbortController.current?.abort();
+  }, []);
+
+  useEffect(() => {
+    if (authUser !== null) return;
+    resultsAbortController.current?.abort();
+    sourceVideosAbortController.current?.abort();
+    activeJobsRef.current.clear();
+    handledTerminalJobsRef.current.clear();
+    activeJobsEndpointSupportedRef.current = null;
+    sourcesRef.current = [];
+    activeSourceIdRef.current = "";
+    localJobRef.current = null;
+    setSources([]);
+    setActiveSourceId("");
+    setSourceResults(null);
+    setExplore({ channels: [], videos: [] });
+    setJob(null);
+    setJobSourceId(null);
+  }, [authUser]);
+
+  useEffect(() => {
+    if (authUser) void refreshSources();
+  }, [authUser, refreshSources]);
 
   useEffect(() => {
     if (!requestedSourceId || appliedSourceQueryRef.current === requestedSourceId) return;
@@ -961,8 +1089,23 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   }, [isCommentsLoading, loadComments, nextCommentsCursor, selectedCommentId, selectedVideo]);
 
   useEffect(() => {
+    const sentinel = sourceVideosLoadMoreRef.current;
+    if (!sourceResults?.videosNextCursor || !sentinel || isSourceVideosLoadingMore || sourceVideosError) return;
+    const observer = new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) void loadMoreSourceVideos();
+    }, { rootMargin: "320px 0px" });
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [isSourceVideosLoadingMore, loadMoreSourceVideos, sourceResults?.videosNextCursor, sourceVideosError]);
+
+  useEffect(() => {
     if (!activeSourceId) {
+      resultsAbortController.current?.abort();
+      sourceVideosAbortController.current?.abort();
       setSourceResults(null);
+      setIsResultsLoading(false);
+      setIsSourceVideosLoadingMore(false);
+      sourceVideosInFlightRef.current = false;
       return;
     }
     setSelectedVideo(null);
@@ -972,31 +1115,148 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     setCommentSort("newest");
     setNextCommentsCursor(undefined);
     setCommentsError(null);
+    setSourceVideosError(null);
     void refreshResults(activeSourceId);
   }, [activeSourceId, refreshResults]);
 
   useEffect(() => {
-    if (!activeJob || isTerminalJob(activeJob)) return;
-    const jobId = activeJob.id;
-    const sourceId = activeSourceId;
+    if (!authUser) return;
+    let stopped = false;
+    let inFlight = false;
+    let pollAgain = false;
+    let timer: number | undefined;
+    let controller: AbortController | null = null;
+    let failureCount = 0;
+
+    const readLegacyActiveJobs = async (signal: AbortSignal) => {
+      const candidates: ActiveSourceJob[] = sourcesRef.current.flatMap((source) => (
+        source.latestJob && !isTerminalJob(source.latestJob)
+          ? [{ sourceId: source.id, ...(source.targetId ? { targetId: source.targetId } : {}), job: source.latestJob }]
+          : []
+      ));
+      const local = localJobRef.current;
+      if (local && !isTerminalJob(local.job) && !candidates.some((entry) => activeJobKey(entry) === `${local.sourceId}:${local.job.id}`)) {
+        candidates.push({ sourceId: local.sourceId, job: local.job });
+      }
+      const resolved = await Promise.all(candidates.map(async (entry) => {
+        try {
+          return { ...entry, job: await getJob(entry.job.id, signal) };
+        } catch (caught) {
+          if (caught instanceof ApiError && caught.status === 404) return null;
+          throw caught;
+        }
+      }));
+      return resolved.flatMap((entry) => entry ? [entry] : []);
+    };
+
+    const readActiveJobs = async (signal: AbortSignal) => {
+      if (activeJobsEndpointSupportedRef.current !== false) {
+        try {
+          const entries = await listActiveJobs(signal);
+          activeJobsEndpointSupportedRef.current = true;
+          return entries;
+        } catch (caught) {
+          if (!(caught instanceof ApiError) || ![404, 405, 501].includes(caught.status)) throw caught;
+          activeJobsEndpointSupportedRef.current = false;
+        }
+      }
+      return readLegacyActiveJobs(signal);
+    };
+
+    const schedule = (delay: number) => {
+      if (stopped) return;
+      if (timer !== undefined) window.clearTimeout(timer);
+      timer = window.setTimeout(() => { void poll(); }, delay);
+    };
+
     const poll = async () => {
+      if (stopped || inFlight) {
+        pollAgain = true;
+        return;
+      }
+      inFlight = true;
+      controller = new AbortController();
+      let activeEntries: ActiveSourceJob[] = [];
       try {
-        const nextJob = await getJob(jobId);
-        setJob(nextJob);
-        setJobSourceId(sourceId);
-        await refreshResults(sourceId);
-        if (isTerminalJob(nextJob)) void refreshExplore();
-      } catch {
-        // Keep the last valid state visible through a transient polling failure.
+        const entries = await readActiveJobs(controller.signal);
+        if (stopped || controller.signal.aborted) return;
+        failureCount = 0;
+
+        const previous = activeJobsRef.current;
+        const explicitTerminal = entries.filter(({ job: currentJob }) => isTerminalJob(currentJob));
+        activeEntries = entries.filter(({ job: currentJob }) => !isTerminalJob(currentJob));
+        const current = new Map(activeEntries.map((entry) => [activeJobKey(entry), entry]));
+        const disappeared = [...previous.entries()].flatMap(([key, entry]) => current.has(key) ? [] : [entry]);
+        activeJobsRef.current = current;
+
+        const latestBySource = new Map<string, ActiveSourceJob>();
+        for (const entry of [...activeEntries, ...explicitTerminal]) latestBySource.set(entry.sourceId, entry);
+        setSources((currentSources) => currentSources.map((source) => {
+          const entry = latestBySource.get(source.id);
+          return entry ? { ...source, latestJob: entry.job } : source;
+        }));
+
+        const selectedSourceId = activeSourceIdRef.current;
+        const selectedEntry = latestBySource.get(selectedSourceId);
+        if (selectedEntry) {
+          setJob(selectedEntry.job);
+          setJobSourceId(selectedSourceId);
+        } else if (disappeared.some((entry) => entry.sourceId === selectedSourceId)) {
+          setJob(null);
+          setJobSourceId(null);
+        }
+
+        const newlyTerminal = [...explicitTerminal, ...disappeared].filter((entry) => {
+          const key = activeJobKey(entry);
+          if (handledTerminalJobsRef.current.has(key)) return false;
+          handledTerminalJobsRef.current.add(key);
+          return true;
+        });
+        if (newlyTerminal.length > 0) {
+          const affectedSourceIds = new Set(newlyTerminal.map((entry) => entry.sourceId));
+          await Promise.all([
+            refreshSources(),
+            affectedSourceIds.has(selectedSourceId) && selectedSourceId
+              ? refreshResults(selectedSourceId)
+              : Promise.resolve(),
+            refreshExplore(),
+          ]);
+        }
+      } catch (caught) {
+        if (isAbortError(caught) || stopped) return;
+        if (caught instanceof ApiError && caught.status === 401) {
+          stopped = true;
+          setAuthUser(null);
+          return;
+        }
+        failureCount += 1;
+      } finally {
+        inFlight = false;
+        controller = null;
+        if (!stopped) {
+          const delay = pollAgain ? 0 : activeJobPollingDelay(activeEntries, failureCount);
+          pollAgain = false;
+          schedule(delay);
+        }
       }
     };
-    const timer = window.setInterval(() => { void poll(); }, 5_000);
-    return () => window.clearInterval(timer);
-  }, [activeJob, activeSourceId, exploreChannelId, refreshExplore, refreshResults]);
 
-  useEffect(() => {
-    if (jobSourceId && isTerminalJob(job)) void refreshResults(jobSourceId);
-  }, [job, jobSourceId, refreshResults]);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== "visible") return;
+      if (inFlight) pollAgain = true;
+      else schedule(0);
+    };
+    wakeActiveJobsPollRef.current = handleVisibilityChange;
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    schedule(0);
+    return () => {
+      stopped = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+      controller?.abort();
+      if (wakeActiveJobsPollRef.current === handleVisibilityChange) wakeActiveJobsPollRef.current = null;
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [authUser, refreshExplore, refreshResults, refreshSources]);
 
   useEffect(() => {
     const drawer = isCollectionOpen ? collectionDrawerRef.current : (selectedCommentId || selectedVideo) ? videoModalRef.current : null;
@@ -1068,6 +1328,16 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
       if (response.job) {
         setJobSourceId(response.source.id);
         setJob(response.job);
+        if (!isTerminalJob(response.job)) {
+          const entry: ActiveSourceJob = {
+            sourceId: response.source.id,
+            ...(response.source.targetId ? { targetId: response.source.targetId } : {}),
+            job: response.job,
+          };
+          activeJobsRef.current.set(activeJobKey(entry), entry);
+          handledTerminalJobsRef.current.delete(activeJobKey(entry));
+          wakeActiveJobsPollRef.current?.();
+        }
       } else {
         setJobSourceId(null);
         setJob(null);
@@ -1556,7 +1826,11 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
                     <p className="section-kicker">VIDEO LIBRARY</p>
                     <h2 id="recent-videos-title">최근 동영상</h2>
                   </div>
-                  <span className="panel-count">{formatCount(videos.length)}개</span>
+                  <span className="panel-count">
+                    {sourceResults.videosTotal !== undefined && sourceResults.videosTotal !== videos.length
+                      ? `${formatCount(videos.length)} / ${formatCount(sourceResults.videosTotal)}개`
+                      : `${formatCount(videos.length)}개`}
+                  </span>
                 </div>
 
                 {videos.length === 0 ? (
@@ -1600,6 +1874,19 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
                     </table>
                   </div>
                   </>
+                )}
+                {sourceVideosError && (
+                  <div className="source-videos-load-error" role="status">
+                    <span>{sourceVideosError}</span>
+                    <button type="button" onClick={() => void loadMoreSourceVideos()}>다시 시도</button>
+                  </div>
+                )}
+                {!sourceVideosError && (sourceResults.videosNextCursor || isSourceVideosLoadingMore) && (
+                  <div className="source-videos-load-more" ref={sourceVideosLoadMoreRef} aria-live="polite">
+                    {isSourceVideosLoadingMore
+                      ? <span><span className="loading-spinner" aria-hidden="true" />동영상을 더 불러오는 중</span>
+                      : <button type="button" onClick={() => void loadMoreSourceVideos()}>동영상 더 보기</button>}
+                  </div>
                 )}
               </section>
             </div>

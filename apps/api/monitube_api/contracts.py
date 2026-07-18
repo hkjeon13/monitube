@@ -239,6 +239,17 @@ class ExploreResponse(ApiModel):
     nextOffset: int | None = Field(default=None, ge=0)
 
 
+class ExploreChannelsResponse(ApiModel):
+    channels: list[ExploreChannel] = Field(default_factory=list)
+
+
+class ExploreVideosPageResponse(ApiModel):
+    videos: list["CollectedVideo"] = Field(default_factory=list)
+    nextCursor: str | None = None
+    snapshotAt: datetime
+    total: int = Field(default=0, ge=0)
+
+
 class ChannelSubscriberSnapshot(ApiModel):
     fetchedAt: datetime
     subscriberCount: int | None = Field(default=None, ge=0)
@@ -379,6 +390,60 @@ class AnalysisSummary(ApiModel):
     latestCommentPublishedAt: datetime | None = None
     topWords: list[TopWord] = Field(default_factory=list)
     generatedAt: datetime
+
+
+SummaryStatus: TypeAlias = Literal["fresh", "stale", "building", "failed"]
+
+
+class SourceOverviewSummary(AnalysisSummary):
+    """Bounded source summary plus explicit freshness metadata.
+
+    Counts and timestamps describe the complete visible source scope.  ``topWords``
+    may lag those exact fields, so its state is reported independently.
+    """
+
+    asOfJobId: str | None = None
+    dataVersion: int = Field(default=0, ge=0)
+    status: SummaryStatus = "fresh"
+    topWordsStatus: SummaryStatus = "fresh"
+    partialData: bool = False
+    coverage: dict[str, Any] = Field(default_factory=dict)
+
+
+class SourceTopVideos(ApiModel):
+    """Full-scope rankings used by the overview metric switch."""
+
+    views: list[CollectedVideo] = Field(default_factory=list)
+    likes: list[CollectedVideo] = Field(default_factory=list)
+    comments: list[CollectedVideo] = Field(default_factory=list)
+
+
+class SourceOverviewResponse(ApiModel):
+    source: CollectionSource
+    latestJob: JobStatus | None = None
+    summary: SourceOverviewSummary
+    topVideos: SourceTopVideos = Field(default_factory=SourceTopVideos)
+
+
+class SourceVideosPageResponse(ApiModel):
+    """One stable, keyset-paginated page of videos for a source."""
+
+    videos: list[CollectedVideo] = Field(default_factory=list)
+    nextCursor: str | None = None
+    snapshotAt: datetime
+    total: int = Field(default=0, ge=0)
+
+
+class ActiveParentJob(ApiModel):
+    """An active parent job mapped to the caller's public source ID."""
+
+    sourceId: str
+    targetId: str | None = None
+    job: JobStatus
+
+
+class ActiveParentJobsResponse(ApiModel):
+    jobs: list[ActiveParentJob] = Field(default_factory=list)
 
 
 class SourceResultsResponse(ApiModel):

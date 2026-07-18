@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 import os
 import secrets
 from typing import Annotated, Literal
@@ -12,8 +13,10 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from .channel_resolution import ChannelInputError
+from .cache import DerivedCache
 from .auth import AuthStore, AuthUser, SESSION_MAX_AGE_SECONDS
 from .contracts import (
+    ActiveParentJobsResponse,
     AuthUserResponse,
     ChannelResolutionRequest,
     ChannelResolutionResponse,
@@ -24,6 +27,8 @@ from .contracts import (
     CollectionRequestCreate,
     CollectionRequestResponse,
     ExploreResponse,
+    ExploreChannelsResponse,
+    ExploreVideosPageResponse,
     HealthResponse,
     LoginRequest,
     RuntimeKeyRegistration,
@@ -31,6 +36,8 @@ from .contracts import (
     JobCreate,
     JobStatus,
     SourceResultsResponse,
+    SourceOverviewResponse,
+    SourceVideosPageResponse,
     UnifiedSearchResponse,
     TargetPin,
     TargetPinUpdate,
@@ -41,9 +48,17 @@ from .contracts import (
     VideoResolutionRequest,
     VideoResolutionResponse,
 )
-from .repositories import CollectionRepository, InMemoryRepository, InvalidStateTransitionError, NotFoundError, RepositoryError
+from .repositories import (
+    CollectionRepository,
+    InMemoryRepository,
+    InvalidCursorError,
+    InvalidStateTransitionError,
+    NotFoundError,
+    RepositoryError,
+    RepositoryUnavailableError,
+)
 from .settings import Settings, create_repository
-from .services import CollectionService
+from .services import CollectionService, InvalidSearchQueryError
 from .video_resolution import VideoInputError
 
 
@@ -87,17 +102,41 @@ User = Annotated[AuthUser, Depends(get_current_user)]
 
 
 def create_app(repository: CollectionRepository | None = None, settings: Settings | None = None) -> FastAPI:
-    app = FastAPI(title="Monitube API", version="0.1.0")
     configured_settings = settings or Settings.from_environment()
     if repository is None:
         repository, runtime_config_id = create_repository(configured_settings)
     else:
         runtime_config_id = None
-    app.state.collection_service = CollectionService(repository, runtime_config_id=runtime_config_id)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        try:
+            yield
+        finally:
+            derived_cache.close()
+            close = getattr(repository, "close", None)
+            if close:
+                close()
+
+    derived_cache = DerivedCache(
+        configured_settings.redis_url,
+        enabled=configured_settings.enable_redis_derived_cache,
+    )
+    app = FastAPI(title="Monitube API", version="0.1.0", lifespan=lifespan)
+    app.state.collection_service = CollectionService(
+        repository,
+        runtime_config_id=runtime_config_id,
+        derived_cache=derived_cache,
+    )
+    app.state.derived_cache = derived_cache
     app.state.repository = repository
     app.state.runtime_config_id = runtime_config_id
     app.state.settings = configured_settings
-    app.state.auth_store = AuthStore(configured_settings.database_url) if configured_settings.database_url else None
+    app.state.auth_store = (
+        AuthStore(configured_settings.database_url, pool=getattr(repository, "pool", None))
+        if configured_settings.database_url
+        else None
+    )
     cors_origins = [
         origin.strip()
         for origin in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
@@ -123,6 +162,10 @@ def create_app(repository: CollectionRepository | None = None, settings: Setting
     async def video_input_handler(_: Request, exc: VideoInputError) -> Response:
         return JSONResponse(content={"detail": str(exc)}, status_code=status.HTTP_422_UNPROCESSABLE_ENTITY)
 
+    @app.exception_handler(InvalidSearchQueryError)
+    async def invalid_search_query_handler(_: Request, exc: InvalidSearchQueryError) -> Response:
+        return JSONResponse(content={"detail": str(exc)}, status_code=status.HTTP_422_UNPROCESSABLE_CONTENT)
+
     @app.exception_handler(ValidationError)
     async def validation_handler(_: Request, exc: ValidationError) -> Response:
         return JSONResponse(content={"detail": "Invalid source configuration", "errors": exc.errors()}, status_code=status.HTTP_422_UNPROCESSABLE_ENTITY)
@@ -131,6 +174,17 @@ def create_app(repository: CollectionRepository | None = None, settings: Setting
     async def state_transition_handler(_: Request, exc: InvalidStateTransitionError) -> Response:
         return JSONResponse(content={"detail": str(exc)}, status_code=status.HTTP_409_CONFLICT)
 
+    @app.exception_handler(InvalidCursorError)
+    async def invalid_cursor_handler(_: Request, exc: InvalidCursorError) -> Response:
+        return JSONResponse(content={"detail": str(exc)}, status_code=status.HTTP_400_BAD_REQUEST)
+
+    @app.exception_handler(RepositoryUnavailableError)
+    async def repository_unavailable_handler(_: Request, exc: RepositoryUnavailableError) -> Response:
+        return JSONResponse(
+            content={"detail": str(exc), "retryable": True},
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
     @app.exception_handler(RepositoryError)
     async def repository_handler(_: Request, exc: RepositoryError) -> Response:
         return JSONResponse(content={"detail": str(exc)}, status_code=status.HTTP_409_CONFLICT)
@@ -138,6 +192,22 @@ def create_app(repository: CollectionRepository | None = None, settings: Setting
     @app.get("/health", response_model=HealthResponse, tags=["health"])
     def health() -> HealthResponse:
         return HealthResponse()
+
+    @app.get("/ready", tags=["health"])
+    def ready() -> dict[str, object]:
+        checker = getattr(repository, "check_readiness", None)
+        try:
+            checks = checker() if checker else {"repository": "in-memory"}
+        except RepositoryUnavailableError:
+            raise
+        except Exception as exc:
+            raise RepositoryUnavailableError("Database readiness check failed") from exc
+        if checks.get("migrationCurrent") is False:
+            raise RepositoryUnavailableError("Required database migration is not applied")
+        return {
+            "status": "ready",
+            "checks": {**checks, "derivedCache": derived_cache.health()},
+        }
 
     @app.post("/register/key", response_model=RuntimeKeyRegistrationResponse, status_code=status.HTTP_201_CREATED, tags=["runtime"])
     def register_runtime_keys(
@@ -268,6 +338,25 @@ def create_app(repository: CollectionRepository | None = None, settings: Setting
     ) -> ExploreResponse:
         return service.explore(owner_id=user.id, channel_id=channel_id, offset=offset, limit=limit)
 
+    @router.get("/explore/channels", response_model=ExploreChannelsResponse, tags=["explore"])
+    def explore_channels(service: Service, user: User) -> ExploreChannelsResponse:
+        return service.explore_channels(owner_id=user.id)
+
+    @router.get("/explore/videos", response_model=ExploreVideosPageResponse, tags=["explore"])
+    def explore_videos_page(
+        service: Service,
+        user: User,
+        channel_id: str | None = Query(default=None, alias="channelId", min_length=1, max_length=64),
+        cursor: str | None = Query(default=None, max_length=768),
+        limit: int = Query(default=60, ge=1, le=100),
+    ) -> ExploreVideosPageResponse:
+        return service.explore_videos_page(
+            owner_id=user.id,
+            channel_id=channel_id,
+            cursor=cursor,
+            limit=limit,
+        )
+
     @router.get("/channels/{youtube_channel_id}/subscriber-history", response_model=list[ChannelSubscriberSnapshot], tags=["explore"])
     def channel_subscriber_history(youtube_channel_id: str, service: Service, user: User) -> list[ChannelSubscriberSnapshot]:
         return service.channel_subscriber_history(youtube_channel_id, owner_id=user.id)
@@ -319,6 +408,37 @@ def create_app(repository: CollectionRepository | None = None, settings: Setting
         require_source_owner(source_id, user)
         return service.get_source_results(source_id, owner_id=user.id)
 
+    @router.get("/sources/{source_id}/overview", response_model=SourceOverviewResponse, tags=["results"])
+    def get_source_overview(source_id: str, service: Service, user: User) -> SourceOverviewResponse:
+        if not configured_settings.enable_source_overview_v2:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Source overview endpoint is disabled",
+            )
+        require_source_owner(source_id, user)
+        return service.get_source_overview(source_id, owner_id=user.id)
+
+    @router.get("/sources/{source_id}/videos", response_model=SourceVideosPageResponse, tags=["results"])
+    def get_source_videos_page(
+        source_id: str,
+        service: Service,
+        user: User,
+        cursor: str | None = Query(default=None, max_length=512),
+        limit: int = Query(default=60, ge=1, le=100),
+    ) -> SourceVideosPageResponse:
+        if not configured_settings.enable_video_keyset_pagination:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Source video pagination endpoint is disabled",
+            )
+        require_source_owner(source_id, user)
+        return service.get_source_videos_page(
+            source_id,
+            owner_id=user.id,
+            cursor=cursor,
+            limit=limit,
+        )
+
     @router.get("/sources/{source_id}/jobs", response_model=list[JobStatus], tags=["jobs"])
     def list_source_jobs(source_id: str, service: Service, user: User, limit: int = Query(default=20, ge=1, le=50)) -> list[JobStatus]:
         require_source_owner(source_id, user)
@@ -344,6 +464,10 @@ def create_app(repository: CollectionRepository | None = None, settings: Setting
     def create_job(source_id: str, payload: JobCreate, service: Service, user: User) -> JobStatus:
         require_source_owner(source_id, user)
         return service.create_job(source_id, payload, owner_id=user.id)
+
+    @router.get("/jobs/active", response_model=ActiveParentJobsResponse, tags=["jobs"])
+    def list_active_parent_jobs(service: Service, user: User) -> ActiveParentJobsResponse:
+        return service.list_active_parent_jobs(owner_id=user.id)
 
     @router.get("/jobs/{job_id}", response_model=JobStatus, tags=["jobs"])
     def get_job(job_id: str, service: Service, user: User) -> JobStatus:

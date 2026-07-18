@@ -2,19 +2,26 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import secrets
-from typing import Any
+from typing import Any, Iterator
 
 try:
     import psycopg
     from psycopg.rows import dict_row
+    from psycopg_pool import PoolTimeout
 except ImportError:  # pragma: no cover
     psycopg = None  # type: ignore[assignment]
     dict_row = None  # type: ignore[assignment]
+
+    class PoolTimeout(Exception):
+        pass
+
+from .repositories import RepositoryUnavailableError
 
 
 SESSION_DAYS = 90
@@ -50,13 +57,25 @@ def _verify_password(password: str, encoded: str) -> bool:
 
 
 class AuthStore:
-    def __init__(self, database_url: str) -> None:
+    def __init__(self, database_url: str, *, pool: Any | None = None) -> None:
         self.database_url = database_url
+        self._pool = pool
 
-    def _connection(self):
-        if psycopg is None:
-            raise RuntimeError("psycopg is required when DATABASE_URL is configured")
-        return psycopg.connect(self.database_url, row_factory=dict_row)
+    @contextmanager
+    def _connection(self) -> Iterator[Any]:
+        try:
+            if self._pool is not None:
+                with self._pool.connection() as connection:
+                    yield connection
+                return
+            if psycopg is None:
+                raise RuntimeError("psycopg is required when DATABASE_URL is configured")
+            with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+                yield connection
+        except PoolTimeout as exc:
+            raise RepositoryUnavailableError(
+                "Database connection pool is busy; retry shortly"
+            ) from exc
 
     def register(self, username: str, password: str) -> AuthUser:
         with self._connection() as connection, connection.cursor() as cursor:

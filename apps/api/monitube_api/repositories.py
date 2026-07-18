@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import base64
+import binascii
 from copy import deepcopy
-from dataclasses import replace
-from datetime import datetime, timedelta
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 import hashlib
 import json
 from threading import RLock
@@ -27,11 +28,15 @@ from .domain import (
     new_id,
     utcnow,
 )
-from .fuzzy_search import rank_text_fields
+from .fuzzy_search import normalize_search_text, rank_text_fields
 
 
 class RepositoryError(RuntimeError):
     pass
+
+
+class RepositoryUnavailableError(RepositoryError):
+    """The persistence layer is temporarily unavailable and may be retried."""
 
 
 class NotFoundError(RepositoryError):
@@ -40,6 +45,181 @@ class NotFoundError(RepositoryError):
 
 class InvalidStateTransitionError(RepositoryError):
     pass
+
+
+class InvalidCursorError(RepositoryError):
+    """A syntactically invalid cursor or one bound to another request scope."""
+
+
+SOURCE_VIDEO_CURSOR_VERSION = 1
+SOURCE_VIDEO_SORT = "effective_published_desc"
+EXPLORE_VIDEO_CURSOR_VERSION = 1
+EXPLORE_VIDEO_SORT = "effective_published_fetched_desc"
+
+
+@dataclass(frozen=True, slots=True)
+class SourceVideoCursor:
+    effective_at: datetime
+    youtube_video_id: str
+    snapshot_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ExploreVideoCursor:
+    effective_at: datetime
+    fetched_at: datetime
+    youtube_video_id: str
+    snapshot_at: datetime
+
+
+def source_video_filter_hash() -> str:
+    """Fingerprint the normalized filter contract, currently the empty filter."""
+
+    return hashlib.sha256(b"{}").hexdigest()
+
+
+def _effective_video_timestamp(video: VideoRecord) -> datetime:
+    return video.published_at or video.source_fetched_at
+
+
+def _video_sort_key(video: VideoRecord) -> tuple[datetime, str]:
+    return (_effective_video_timestamp(video), video.youtube_video_id)
+
+
+def encode_source_video_cursor(
+    video: VideoRecord,
+    *,
+    snapshot_at: datetime,
+    scope: str,
+    filter_hash: str,
+    sort: str = SOURCE_VIDEO_SORT,
+) -> str:
+    payload = {
+        "v": SOURCE_VIDEO_CURSOR_VERSION,
+        "at": _effective_video_timestamp(video).isoformat(),
+        "id": video.youtube_video_id,
+        "snapshot": snapshot_at.isoformat(),
+        "scope": scope,
+        "filter": filter_hash,
+        "sort": sort,
+    }
+    encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return base64.urlsafe_b64encode(encoded).decode("ascii").rstrip("=")
+
+
+def decode_source_video_cursor(
+    cursor: str | None,
+    *,
+    scope: str,
+    filter_hash: str,
+    sort: str = SOURCE_VIDEO_SORT,
+) -> SourceVideoCursor | None:
+    if not cursor:
+        return None
+    try:
+        padding = "=" * (-len(cursor) % 4)
+        raw = base64.b64decode(cursor + padding, altchars=b"-_", validate=True)
+        payload = json.loads(raw.decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("cursor payload must be an object")
+        if payload.get("v") != SOURCE_VIDEO_CURSOR_VERSION:
+            raise ValueError("unsupported cursor version")
+        if payload.get("scope") != scope:
+            raise ValueError("cursor scope does not match request")
+        if payload.get("filter") != filter_hash:
+            raise ValueError("cursor filter does not match request")
+        if payload.get("sort") != sort:
+            raise ValueError("cursor sort does not match request")
+        effective_at = datetime.fromisoformat(str(payload["at"]))
+        snapshot_at = datetime.fromisoformat(str(payload["snapshot"]))
+        youtube_video_id = str(payload["id"])
+        if effective_at.tzinfo is None or snapshot_at.tzinfo is None or not youtube_video_id:
+            raise ValueError("cursor fields are invalid")
+        return SourceVideoCursor(
+            effective_at=effective_at,
+            youtube_video_id=youtube_video_id,
+            snapshot_at=snapshot_at,
+        )
+    except (binascii.Error, UnicodeDecodeError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+        raise InvalidCursorError("Invalid source video cursor") from exc
+
+
+def explore_video_filter_hash(channel_id: str | None) -> str:
+    normalized = json.dumps(
+        {"channelId": channel_id or None},
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(normalized).hexdigest()
+
+
+def _explore_video_sort_key(video: VideoRecord) -> tuple[datetime, datetime, str]:
+    return (_effective_video_timestamp(video), video.source_fetched_at, video.youtube_video_id)
+
+
+def encode_explore_video_cursor(
+    video: VideoRecord,
+    *,
+    snapshot_at: datetime,
+    scope: str,
+    filter_hash: str,
+) -> str:
+    payload = {
+        "v": EXPLORE_VIDEO_CURSOR_VERSION,
+        "kind": "explore-video",
+        "effectiveAt": _effective_video_timestamp(video).isoformat(),
+        "fetchedAt": video.source_fetched_at.isoformat(),
+        "id": video.youtube_video_id,
+        "snapshot": snapshot_at.isoformat(),
+        "scope": scope,
+        "filter": filter_hash,
+        "sort": EXPLORE_VIDEO_SORT,
+    }
+    encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return base64.urlsafe_b64encode(encoded).decode("ascii").rstrip("=")
+
+
+def decode_explore_video_cursor(
+    cursor: str | None,
+    *,
+    scope: str,
+    filter_hash: str,
+) -> ExploreVideoCursor | None:
+    if not cursor:
+        return None
+    try:
+        padding = "=" * (-len(cursor) % 4)
+        raw = base64.b64decode(cursor + padding, altchars=b"-_", validate=True)
+        payload = json.loads(raw.decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("cursor payload must be an object")
+        if payload.get("v") != EXPLORE_VIDEO_CURSOR_VERSION or payload.get("kind") != "explore-video":
+            raise ValueError("unsupported cursor version")
+        if payload.get("scope") != scope:
+            raise ValueError("cursor scope does not match request")
+        if payload.get("filter") != filter_hash:
+            raise ValueError("cursor filter does not match request")
+        if payload.get("sort") != EXPLORE_VIDEO_SORT:
+            raise ValueError("cursor sort does not match request")
+        effective_at = datetime.fromisoformat(str(payload["effectiveAt"]))
+        fetched_at = datetime.fromisoformat(str(payload["fetchedAt"]))
+        snapshot_at = datetime.fromisoformat(str(payload["snapshot"]))
+        youtube_video_id = str(payload["id"])
+        if (
+            effective_at.tzinfo is None
+            or fetched_at.tzinfo is None
+            or snapshot_at.tzinfo is None
+            or not youtube_video_id
+        ):
+            raise ValueError("cursor fields are invalid")
+        return ExploreVideoCursor(
+            effective_at=effective_at,
+            fetched_at=fetched_at,
+            youtube_video_id=youtube_video_id,
+            snapshot_at=snapshot_at,
+        )
+    except (binascii.Error, UnicodeDecodeError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+        raise InvalidCursorError("Invalid explore video cursor") from exc
 
 
 def _comment_sort_key(comment: CommentRecord) -> tuple[datetime, str]:
@@ -138,6 +318,8 @@ class JobRepository(Protocol):
 
     def list_jobs_for_source(self, source_id: str, *, limit: int = 20, owner_id: str | None = None) -> list[JobRecord]: ...
 
+    def list_active_parent_jobs(self, *, owner_id: str) -> list[dict[str, Any]]: ...
+
     def transition_job(self, job_id: str, state: JobState, **changes: Any) -> JobRecord: ...
 
 
@@ -164,6 +346,17 @@ class CollectionRequestRepository(Protocol):
     def dispatch_due_pins(self, *, runtime_config_id: str | None = None, limit: int = 10) -> int: ...
 
     def list_explore(self, *, limit: int = 60, offset: int = 0, channel_id: str | None = None, owner_id: str | None = None) -> dict[str, Any]: ...
+
+    def list_explore_channels(self, *, owner_id: str | None = None) -> list[dict[str, Any]]: ...
+
+    def list_explore_videos_page(
+        self,
+        *,
+        owner_id: str | None = None,
+        channel_id: str | None = None,
+        cursor: str | None = None,
+        limit: int = 60,
+    ) -> dict[str, Any]: ...
 
     def list_channel_subscriber_history(
         self, *, youtube_channel_id: str, limit: int = 180, owner_id: str | None = None
@@ -219,6 +412,14 @@ class CollectionRepository(SourceRepository, JobRepository, CollectionRequestRep
 
     def upsert_comment(self, comment: CommentRecord) -> CommentRecord: ...
 
+    def persist_comment_page(
+        self,
+        comments: Iterable[CommentRecord],
+        *,
+        job_id: str | None = None,
+        checkpoint: dict[str, Any] | None = None,
+    ) -> list[CommentRecord]: ...
+
     def existing_comment_ids(self, youtube_comment_ids: Iterable[str]) -> set[str]: ...
 
     def comment_counts_by_video(self, youtube_video_ids: Iterable[str]) -> dict[str, int]: ...
@@ -228,6 +429,12 @@ class CollectionRepository(SourceRepository, JobRepository, CollectionRequestRep
     def save_analysis_summary(self, source_id: str) -> dict[str, Any]: ...
 
     def get_source_results(self, source_id: str, *, owner_id: str | None = None) -> dict[str, Any]: ...
+
+    def get_source_overview(self, source_id: str, *, owner_id: str | None = None) -> dict[str, Any]: ...
+
+    def get_source_videos_page(
+        self, source_id: str, *, owner_id: str | None = None, cursor: str | None = None, limit: int = 60
+    ) -> dict[str, Any]: ...
 
     def get_video_comments(self, video_id: str, *, owner_id: str | None = None) -> dict[str, Any]: ...
 
@@ -296,13 +503,17 @@ class InMemoryRepository(CollectionRepository):
         self._target_aliases: dict[tuple[SourceType, str, str], str] = {}
         self._requests: dict[str, CollectionRequestRecord] = {}
         self._target_videos: dict[str, set[str]] = {}
+        self._target_video_first_seen: dict[tuple[str, str], datetime] = {}
         self._pins: dict[str, dict[str, Any]] = {}
         self._runtime_configs: dict[str, dict[str, Any]] = {}
         self._channels: dict[str, dict[str, Any]] = {}
         self._videos: dict[str, VideoRecord] = {}
+        self._video_first_seen: dict[str, datetime] = {}
         self._comments: dict[str, CommentRecord] = {}
         self._source_videos: dict[str, set[str]] = {}
+        self._source_video_first_seen: dict[tuple[str, str], datetime] = {}
         self._analysis: dict[str, dict[str, Any]] = {}
+        self._analysis_metadata: dict[str, dict[str, Any]] = {}
         self._request_logs: list[dict[str, Any]] = []
 
     @staticmethod
@@ -334,8 +545,11 @@ class InMemoryRepository(CollectionRepository):
         latest_candidates = [
             job
             for job in self._jobs.values()
-            if (record.target_id and job.target_id == record.target_id)
-            or (not record.target_id and job.source_id == record.id)
+            if job.parent_job_id is None
+            and (
+                (record.target_id and job.target_id == record.target_id)
+                or (not record.target_id and job.source_id == record.id)
+            )
         ]
         latest_job = max(latest_candidates, key=lambda job: job.created_at, default=None)
         source = replace(self._clone_source(record), latest_job=self._clone_job(latest_job) if latest_job else None)
@@ -356,7 +570,11 @@ class InMemoryRepository(CollectionRepository):
         if not target:
             raise NotFoundError(f"Collection target '{subscription.target_id}' was not found")
         latest_job = max(
-            (job for job in self._jobs.values() if job.target_id == target.id),
+            (
+                job
+                for job in self._jobs.values()
+                if job.target_id == target.id and job.parent_job_id is None
+            ),
             key=lambda job: job.created_at,
             default=None,
         )
@@ -667,11 +885,19 @@ class InMemoryRepository(CollectionRepository):
                 self._source_owners.pop(identifier, None)
                 self._source_videos.pop(identifier, None)
                 self._analysis.pop(identifier, None)
+                self._analysis.pop(f"source:{identifier}", None)
+                self._analysis_metadata.pop(f"source:{identifier}", None)
+                for key in [key for key in self._source_video_first_seen if key[0] == identifier]:
+                    self._source_video_first_seen.pop(key, None)
             for job_id in [job.id for job in self._jobs.values() if job.source_id in source_ids]:
                 del self._jobs[job_id]
             if source.target_id:
                 target = self._targets.pop(source.target_id, None)
                 self._target_videos.pop(source.target_id, None)
+                self._analysis.pop(f"target:{source.target_id}", None)
+                self._analysis_metadata.pop(f"target:{source.target_id}", None)
+                for key in [key for key in self._target_video_first_seen if key[0] == source.target_id]:
+                    self._target_video_first_seen.pop(key, None)
                 self._pins.pop(source.target_id, None)
                 if target:
                     self._target_ids_by_key.pop((target.type, target.canonical_key), None)
@@ -1148,7 +1374,18 @@ class InMemoryRepository(CollectionRepository):
                 for alias, value in list(self._target_aliases.items()):
                     if value == current.id:
                         self._target_aliases[alias] = target.id
-                self._target_videos.setdefault(target.id, set()).update(self._target_videos.pop(current.id, set()))
+                merged_video_ids = self._target_videos.pop(current.id, set())
+                self._target_videos.setdefault(target.id, set()).update(merged_video_ids)
+                for youtube_video_id in merged_video_ids:
+                    current_seen = self._target_video_first_seen.pop(
+                        (current.id, youtube_video_id),
+                        datetime.min.replace(tzinfo=UTC),
+                    )
+                    canonical_key = (target.id, youtube_video_id)
+                    canonical_seen = self._target_video_first_seen.get(canonical_key)
+                    self._target_video_first_seen[canonical_key] = (
+                        min(canonical_seen, current_seen) if canonical_seen else current_seen
+                    )
                 current_pin = self._pins.pop(current.id, None)
                 if current_pin and target.id not in self._pins:
                     self._pins[target.id] = {**current_pin, "target_id": target.id}
@@ -1185,6 +1422,49 @@ class InMemoryRepository(CollectionRepository):
                 or (not source.target_id and job.source_id == source_id)
             ]
             return [self._clone_job(job) for job in sorted(jobs, key=lambda item: item.updated_at, reverse=True)[:limit]]
+
+    def list_active_parent_jobs(self, *, owner_id: str) -> list[dict[str, Any]]:
+        """Return only browser-facing parent jobs for the caller's sources."""
+
+        with self._lock:
+            visible_sources: list[tuple[str, str | None, str | None]] = [
+                (subscription.id, subscription.target_id, None)
+                for subscription in self._subscriptions.values()
+                if subscription.user_id == owner_id
+            ]
+            visible_sources.extend(
+                (source_id, None, source_id)
+                for source_id, candidate_owner in self._source_owners.items()
+                if candidate_owner == owner_id
+                and source_id in self._sources
+                and self._sources[source_id].target_id is None
+            )
+            active: list[dict[str, Any]] = []
+            for public_source_id, target_id, legacy_source_id in visible_sources:
+                candidate = max(
+                    (
+                        job
+                        for job in self._jobs.values()
+                        if job.parent_job_id is None
+                        and not job.state.is_terminal
+                        and (
+                            (target_id is not None and job.target_id == target_id)
+                            or (legacy_source_id is not None and job.source_id == legacy_source_id)
+                        )
+                    ),
+                    key=lambda job: job.created_at,
+                    default=None,
+                )
+                if candidate:
+                    active.append(
+                        {
+                            "source_id": public_source_id,
+                            "target_id": target_id,
+                            "job": self._clone_job(candidate),
+                        }
+                    )
+            active.sort(key=lambda item: item["job"].created_at)
+            return active
 
     def transition_job(self, job_id: str, state: JobState, **changes: Any) -> JobRecord:
         allowed = {
@@ -1305,6 +1585,7 @@ class InMemoryRepository(CollectionRepository):
             current = self._videos.get(video.youtube_video_id)
             stored = replace(video, id=current.id) if current else video
             self._videos[video.youtube_video_id] = stored
+            self._video_first_seen.setdefault(video.youtube_video_id, utcnow())
             return stored
 
     def get_videos_by_youtube_ids(self, youtube_video_ids: Iterable[str]) -> dict[str, VideoRecord]:
@@ -1324,9 +1605,12 @@ class InMemoryRepository(CollectionRepository):
             source = self.get_source(source_id)
             if youtube_video_id not in self._videos:
                 raise NotFoundError(f"Video '{youtube_video_id}' was not found")
+            first_seen_at = utcnow()
             self._source_videos.setdefault(source_id, set()).add(youtube_video_id)
+            self._source_video_first_seen.setdefault((source_id, youtube_video_id), first_seen_at)
             if source.target_id:
                 self._target_videos.setdefault(source.target_id, set()).add(youtube_video_id)
+                self._target_video_first_seen.setdefault((source.target_id, youtube_video_id), first_seen_at)
 
     def source_video_ids(self, source_id: str, youtube_video_ids: Iterable[str]) -> set[str]:
         with self._lock:
@@ -1341,6 +1625,23 @@ class InMemoryRepository(CollectionRepository):
             current = self._comments.get(comment.youtube_comment_id)
             stored = replace(comment, id=current.id) if current else comment
             self._comments[comment.youtube_comment_id] = stored
+            return stored
+
+    def persist_comment_page(
+        self,
+        comments: Iterable[CommentRecord],
+        *,
+        job_id: str | None = None,
+        checkpoint: dict[str, Any] | None = None,
+    ) -> list[CommentRecord]:
+        """Atomically mirror one upstream comment page in the in-memory store."""
+
+        with self._lock:
+            if checkpoint is not None and job_id is None:
+                raise RepositoryError("job_id is required when persisting a checkpoint")
+            stored = [self.upsert_comment(comment) for comment in comments]
+            if checkpoint is not None and job_id is not None:
+                self.checkpoint_job(job_id, checkpoint)
             return stored
 
     def get_comment_detail(self, comment_id: str, *, owner_id: str | None = None) -> dict[str, Any]:
@@ -1540,6 +1841,70 @@ class InMemoryRepository(CollectionRepository):
                 "next_offset": offset + len(page) if offset + len(page) < len(videos) else None,
             }
 
+    def list_explore_channels(self, *, owner_id: str | None = None) -> list[dict[str, Any]]:
+        """Return channel summaries independently from any video page."""
+
+        return self.list_explore(limit=1, owner_id=owner_id)["channels"]
+
+    def list_explore_videos_page(
+        self,
+        *,
+        owner_id: str | None = None,
+        channel_id: str | None = None,
+        cursor: str | None = None,
+        limit: int = 60,
+    ) -> dict[str, Any]:
+        with self._lock:
+            scope = f"owner:{owner_id}" if owner_id is not None else "public"
+            filter_hash = explore_video_filter_hash(channel_id)
+            decoded = decode_explore_video_cursor(
+                cursor,
+                scope=scope,
+                filter_hash=filter_hash,
+            )
+            snapshot_at = decoded.snapshot_at if decoded else utcnow()
+            membership = self._visible_video_membership_locked(owner_id)
+            videos = sorted(
+                (
+                    self._videos[youtube_video_id]
+                    for youtube_video_id, first_seen_at in membership.items()
+                    if first_seen_at <= snapshot_at
+                    and (
+                        channel_id is None
+                        or self._videos[youtube_video_id].youtube_channel_id == channel_id
+                    )
+                ),
+                key=_explore_video_sort_key,
+                reverse=True,
+            )
+            total = len(videos)
+            if decoded:
+                cursor_key = (
+                    decoded.effective_at,
+                    decoded.fetched_at,
+                    decoded.youtube_video_id,
+                )
+                videos = [video for video in videos if _explore_video_sort_key(video) < cursor_key]
+            candidates = videos[: limit + 1]
+            has_more = len(candidates) > limit
+            page = candidates[:limit]
+            next_cursor = (
+                encode_explore_video_cursor(
+                    page[-1],
+                    snapshot_at=snapshot_at,
+                    scope=scope,
+                    filter_hash=filter_hash,
+                )
+                if has_more and page
+                else None
+            )
+            return {
+                "videos": list(page),
+                "next_cursor": next_cursor,
+                "snapshot_at": snapshot_at,
+                "total": total,
+            }
+
     def list_channel_subscriber_history(
         self, *, youtube_channel_id: str, limit: int = 180, owner_id: str | None = None
     ) -> list[dict[str, Any]]:
@@ -1562,6 +1927,8 @@ class InMemoryRepository(CollectionRepository):
     def search_collected(self, *, query: str, limit: int = 20, owner_id: str | None = None, scope: str = "all") -> dict[str, Any]:
         with self._lock:
             visible_video_ids = self._visible_video_ids_locked(owner_id)
+            normalized_query = normalize_search_text(query)
+            short_query = len(normalized_query) == 2
             video_results: list[dict[str, Any]] = []
             comment_results: list[dict[str, Any]] = []
             if scope in {"all", "videos"}:
@@ -1569,16 +1936,28 @@ class InMemoryRepository(CollectionRepository):
                     if visible_video_ids is not None and video.youtube_video_id not in visible_video_ids:
                         continue
                     channel = self._channels.get(video.youtube_channel_id or "", {})
-                    score, matched_fields = rank_text_fields(query, {
+                    fields = {
+                        "id": video.youtube_video_id,
                         "title": video.title,
-                        "description": video.description,
-                        "channel": channel.get("title"),
                         "handle": channel.get("handle"),
-                    })
+                    }
+                    if short_query:
+                        matched_fields = [
+                            name
+                            for name, value in fields.items()
+                            if value and normalize_search_text(str(value)).startswith(normalized_query)
+                        ]
+                        score = 1.0 if matched_fields else 0.0
+                    else:
+                        score, matched_fields = rank_text_fields(query, {
+                            **fields,
+                            "description": video.description,
+                            "channel": channel.get("title"),
+                        })
                     if matched_fields:
                         video_results.append({"video": video, "score": score, "matched_fields": matched_fields})
 
-            if scope in {"all", "comments"}:
+            if not short_query and scope in {"all", "comments"}:
                 for comment in self._comments.values():
                     video = self._videos.get(comment.youtube_video_id)
                     if not video:
@@ -1597,16 +1976,70 @@ class InMemoryRepository(CollectionRepository):
             comment_results.sort(key=lambda item: (item["score"], item["comment"].source_fetched_at), reverse=True)
             return {"videos": video_results[:limit], "comments": comment_results[:limit]}
 
-    def _source_video_records(self, source_id: str) -> list[VideoRecord]:
+    def _source_video_membership_locked(self, source_id: str) -> dict[str, datetime]:
         subscription = self._subscriptions.get(source_id)
         source = self._sources.get(source_id)
         if subscription:
             ids = self._target_videos.get(subscription.target_id, set())
+            first_seen = self._target_video_first_seen
+            scope = subscription.target_id
         elif source and source.target_id:
             ids = self._target_videos.get(source.target_id, set())
+            first_seen = self._target_video_first_seen
+            scope = source.target_id
         else:
             ids = self._source_videos.get(source_id, set())
-        return sorted((self._videos[item] for item in ids if item in self._videos), key=lambda item: item.source_fetched_at, reverse=True)
+            first_seen = self._source_video_first_seen
+            scope = source_id
+        epoch = datetime.min.replace(tzinfo=UTC)
+        return {
+            youtube_video_id: first_seen.get((scope, youtube_video_id), epoch)
+            for youtube_video_id in ids
+            if youtube_video_id in self._videos
+        }
+
+    def _source_video_records(self, source_id: str) -> list[VideoRecord]:
+        membership = self._source_video_membership_locked(source_id)
+        return sorted(
+            (self._videos[item] for item in membership),
+            key=_video_sort_key,
+            reverse=True,
+        )
+
+    def _source_parent_jobs_locked(self, source_id: str, source: SourceRecord) -> list[JobRecord]:
+        return [
+            job
+            for job in self._jobs.values()
+            if job.parent_job_id is None
+            and (
+                (source.target_id is not None and job.target_id == source.target_id)
+                or (source.target_id is None and job.source_id == source_id)
+            )
+        ]
+
+    @staticmethod
+    def _top_video_records(videos: list[VideoRecord], *, limit: int = 6) -> dict[str, list[VideoRecord]]:
+        metric_fields = {
+            "views": "viewCount",
+            "likes": "likeCount",
+            "comments": "commentCount",
+        }
+        return {
+            name: sorted(
+                videos,
+                key=lambda video: (
+                    int(video.statistics.get(field, 0)),
+                    _effective_video_timestamp(video),
+                    video.youtube_video_id,
+                ),
+                reverse=True,
+            )[:limit]
+            for name, field in metric_fields.items()
+        }
+
+    @staticmethod
+    def _summary_identity(source_id: str, source: SourceRecord) -> str:
+        return f"target:{source.target_id}" if source.target_id else f"source:{source_id}"
 
     def _target_video_ids_locked(self, target_ids: Iterable[str]) -> set[str]:
         return {
@@ -1622,6 +2055,29 @@ class InMemoryRepository(CollectionRepository):
         # previously collected public data from that same user.
         return self._target_video_ids_locked(self.subscription_target_ids(owner_id=owner_id, enabled_only=False))
 
+    def _visible_video_membership_locked(self, owner_id: str | None) -> dict[str, datetime]:
+        """Return distinct visible videos and the time they entered this scope."""
+
+        if owner_id is None:
+            return {
+                youtube_video_id: self._video_first_seen.get(youtube_video_id, datetime.min.replace(tzinfo=UTC))
+                for youtube_video_id in self._videos
+            }
+        visible: dict[str, datetime] = {}
+        for subscription in self._subscriptions.values():
+            if subscription.user_id != owner_id:
+                continue
+            for youtube_video_id in self._target_videos.get(subscription.target_id, set()):
+                membership_seen = self._target_video_first_seen.get(
+                    (subscription.target_id, youtube_video_id),
+                    datetime.min.replace(tzinfo=UTC),
+                )
+                first_visible_at = max(subscription.created_at, membership_seen)
+                current = visible.get(youtube_video_id)
+                if current is None or first_visible_at < current:
+                    visible[youtube_video_id] = first_visible_at
+        return visible
+
     def _comments_for_video_ids(self, video_ids: set[str]) -> list[CommentRecord]:
         return sorted(
             (comment for comment in self._comments.values() if comment.youtube_video_id in video_ids),
@@ -1631,10 +2087,24 @@ class InMemoryRepository(CollectionRepository):
 
     def save_analysis_summary(self, source_id: str) -> dict[str, Any]:
         with self._lock:
+            source = self.get_source(source_id)
             videos = self._source_video_records(source_id)
             comments = self._comments_for_video_ids({video.youtube_video_id for video in videos})
             summary = build_summary(videos, comments)
-            self._analysis[source_id] = deepcopy(summary)
+            identity = self._summary_identity(source_id, source)
+            parent_jobs = self._source_parent_jobs_locked(source_id, source)
+            terminal_jobs = [job for job in parent_jobs if job.state.is_terminal]
+            latest_terminal = max(terminal_jobs, key=lambda job: job.created_at, default=None)
+            self._analysis[identity] = deepcopy(summary)
+            self._analysis_metadata[identity] = {
+                "data_version": len(terminal_jobs),
+                "as_of_job_id": latest_terminal.id if latest_terminal else None,
+                "coverage": {
+                    "strategy": "full",
+                    "sampledComments": len(comments),
+                    "totalComments": len(comments),
+                },
+            }
             return deepcopy(summary)
 
     def get_source_results(self, source_id: str, *, owner_id: str | None = None) -> dict[str, Any]:
@@ -1642,28 +2112,128 @@ class InMemoryRepository(CollectionRepository):
             source = self.get_source(source_id, owner_id=owner_id)
             videos = self._source_video_records(source_id)
             comments = self._comments_for_video_ids({video.youtube_video_id for video in videos})
+            parent_jobs = self._source_parent_jobs_locked(source_id, source)
             latest_job = next(
                 iter(
                     sorted(
-                        (
-                            job
-                            for job in self._jobs.values()
-                            if (source.target_id and job.target_id == source.target_id)
-                            or (not source.target_id and job.source_id == source_id)
-                        ),
+                        parent_jobs,
                         key=lambda item: item.created_at,
                         reverse=True,
                     )
                 ),
                 None,
             )
-            summary = deepcopy(self._analysis.get(source_id) or build_summary(videos, comments))
+            identity = self._summary_identity(source_id, source)
+            summary = deepcopy(self._analysis.get(identity) or self._analysis.get(source_id) or build_summary(videos, comments))
             return {
                 "source": source,
                 "latest_job": self._clone_job(latest_job) if latest_job else None,
                 "videos": list(videos),
                 "comments": list(comments),
                 "analysis": summary,
+            }
+
+    def get_source_overview(self, source_id: str, *, owner_id: str | None = None) -> dict[str, Any]:
+        """Build a bounded overview without returning any comment records."""
+
+        with self._lock:
+            source = self.get_source(source_id, owner_id=owner_id)
+            videos = self._source_video_records(source_id)
+            comments = self._comments_for_video_ids({video.youtube_video_id for video in videos})
+            live_summary = build_summary(videos, comments)
+            parent_jobs = self._source_parent_jobs_locked(source_id, source)
+            latest_job = max(parent_jobs, key=lambda job: job.created_at, default=None)
+            terminal_jobs = [job for job in parent_jobs if job.state.is_terminal]
+            latest_terminal = max(terminal_jobs, key=lambda job: job.created_at, default=None)
+            data_version = len(terminal_jobs)
+            identity = self._summary_identity(source_id, source)
+            cached_summary = self._analysis.get(identity) or self._analysis.get(source_id)
+            metadata = self._analysis_metadata.get(identity, {})
+            summary_status = "fresh"
+
+            if cached_summary:
+                # Exact fields are current; only the bounded language analysis may
+                # lag the latest committed collection version.
+                live_summary["topWords"] = deepcopy(cached_summary.get("topWords", []))
+                live_summary["generatedAt"] = cached_summary.get("generatedAt", live_summary["generatedAt"])
+                cached_version = int(metadata.get("data_version", 0))
+                top_words_status = "fresh" if cached_version == data_version else "stale"
+                as_of_job_id = metadata.get("as_of_job_id")
+            elif latest_job and not latest_job.state.is_terminal:
+                top_words_status = "building"
+                as_of_job_id = latest_terminal.id if latest_terminal else None
+            else:
+                top_words_status = "building" if latest_terminal else "fresh"
+                as_of_job_id = latest_terminal.id if latest_terminal else None
+
+            partial_data = bool(
+                latest_terminal
+                and latest_terminal.state
+                in {JobState.COMPLETED_WITH_WARNINGS, JobState.FAILED, JobState.CANCELLED}
+            )
+            if latest_terminal and latest_terminal.state in {JobState.FAILED, JobState.CANCELLED}:
+                summary_status = "stale" if cached_summary else "failed"
+                top_words_status = "stale" if cached_summary else "failed"
+
+            return {
+                "source": source,
+                "latest_job": self._clone_job(latest_job) if latest_job else None,
+                "summary": {
+                    **deepcopy(live_summary),
+                    "asOfJobId": as_of_job_id,
+                    "dataVersion": data_version,
+                    "status": summary_status,
+                    "topWordsStatus": top_words_status,
+                    "partialData": partial_data,
+                    "coverage": deepcopy(metadata.get("coverage") or {"partial": partial_data}),
+                },
+                "top_videos": self._top_video_records(videos),
+            }
+
+    def get_source_videos_page(
+        self, source_id: str, *, owner_id: str | None = None, cursor: str | None = None, limit: int = 60
+    ) -> dict[str, Any]:
+        with self._lock:
+            self.get_source(source_id, owner_id=owner_id)
+            filter_hash = source_video_filter_hash()
+            decoded = decode_source_video_cursor(
+                cursor,
+                scope=source_id,
+                filter_hash=filter_hash,
+            )
+            snapshot_at = decoded.snapshot_at if decoded else utcnow()
+            membership = self._source_video_membership_locked(source_id)
+            videos = sorted(
+                (
+                    self._videos[youtube_video_id]
+                    for youtube_video_id, first_seen_at in membership.items()
+                    if first_seen_at <= snapshot_at
+                ),
+                key=_video_sort_key,
+                reverse=True,
+            )
+            total = len(videos)
+            if decoded:
+                cursor_key = (decoded.effective_at, decoded.youtube_video_id)
+                videos = [video for video in videos if _video_sort_key(video) < cursor_key]
+            candidates = videos[: limit + 1]
+            has_more = len(candidates) > limit
+            page = candidates[:limit]
+            next_cursor = (
+                encode_source_video_cursor(
+                    page[-1],
+                    snapshot_at=snapshot_at,
+                    scope=source_id,
+                    filter_hash=filter_hash,
+                )
+                if has_more and page
+                else None
+            )
+            return {
+                "videos": list(page),
+                "next_cursor": next_cursor,
+                "snapshot_at": snapshot_at,
+                "total": total,
             }
 
     def get_video_comments(self, video_id: str, *, owner_id: str | None = None) -> dict[str, Any]:

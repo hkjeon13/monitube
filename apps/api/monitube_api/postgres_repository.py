@@ -12,15 +12,20 @@ try:  # Keep the in-memory API usable when optional runtime dependencies are abs
     import psycopg
     from psycopg.rows import dict_row
     from psycopg.types.json import Json
+    from psycopg_pool import ConnectionPool, PoolTimeout
 except ImportError:  # pragma: no cover - exercised only in minimal local installs
     psycopg = None  # type: ignore[assignment]
     dict_row = None  # type: ignore[assignment]
+    ConnectionPool = None  # type: ignore[assignment,misc]
+
+    class PoolTimeout(Exception):
+        pass
 
     class Json:  # type: ignore[no-redef]
         def __init__(self, value: Any) -> None:
             self.value = value
 
-from .analysis import build_summary
+from .analysis import build_summary, top_words_from_texts
 from .fuzzy_search import normalize_search_text, rank_text_fields
 from .domain import (
     CollectionRequestRecord,
@@ -40,14 +45,22 @@ from .domain import (
 from .repositories import (
     CollectionRepository,
     CommentThreadSort,
+    InvalidCursorError,
     InvalidStateTransitionError,
     NotFoundError,
     RepositoryError,
+    RepositoryUnavailableError,
     _ALLOWED_TRANSITIONS,
     decode_comment_cursor,
     decode_comment_thread_cursor,
+    decode_explore_video_cursor,
+    decode_source_video_cursor,
     encode_comment_cursor,
     encode_comment_thread_cursor,
+    encode_explore_video_cursor,
+    encode_source_video_cursor,
+    explore_video_filter_hash,
+    source_video_filter_hash,
 )
 
 
@@ -77,16 +90,100 @@ class PostgresRepository(CollectionRepository):
     raw API key.
     """
 
-    def __init__(self, database_url: str, *, connect: Any | None = None) -> None:
+    def __init__(
+        self,
+        database_url: str,
+        *,
+        connect: Any | None = None,
+        pool_min_size: int = 1,
+        pool_max_size: int = 8,
+        pool_timeout_seconds: float = 3.0,
+        enable_target_summary_write: bool = True,
+        enable_target_summary_read: bool = True,
+        enable_comment_batch_write: bool = True,
+        enable_comment_rollup_dual_write: bool = True,
+        enable_comment_rollup_read: bool = False,
+        enable_explore_rollup: bool = False,
+        enable_search_trigram: bool = True,
+    ) -> None:
         if not database_url:
             raise ValueError("database_url is required")
         self.database_url = database_url
         self._connect_override = connect
+        self._pool_timeout_seconds = pool_timeout_seconds
+        self.enable_target_summary_write = enable_target_summary_write
+        self.enable_target_summary_read = enable_target_summary_read
+        self.enable_comment_batch_write = enable_comment_batch_write
+        self.enable_comment_rollup_dual_write = enable_comment_rollup_dual_write
+        self.enable_comment_rollup_read = enable_comment_rollup_read
+        self.enable_explore_rollup = enable_explore_rollup
+        self.enable_search_trigram = enable_search_trigram
+        self._pool: Any | None = None
+        if connect is None and ConnectionPool is not None:
+            self._pool = ConnectionPool(
+                conninfo=database_url,
+                min_size=max(1, pool_min_size),
+                max_size=max(pool_min_size, pool_max_size),
+                timeout=pool_timeout_seconds,
+                kwargs={"row_factory": dict_row},
+                open=True,
+                name="monitube-db",
+            )
+
+    @property
+    def pool(self) -> Any | None:
+        """Process-local pool shared with the auth store when PostgreSQL is used."""
+
+        return self._pool
+
+    def close(self) -> None:
+        if self._pool is not None:
+            self._pool.close()
+
+    def check_readiness(self) -> dict[str, Any]:
+        """Acquire a pool connection and verify the latest required migration."""
+
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT 1 AS ok")
+            cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT EXISTS (
+                  SELECT 1 FROM monitube_schema_migrations
+                  WHERE filename = '015_database_performance_foundation.sql'
+                ) AS migration_current
+                """
+            )
+            row = cursor.fetchone()
+            checks: dict[str, Any] = {
+                "database": "ok",
+                "migrationCurrent": bool(row and row.get("migration_current")),
+                "pool": "enabled" if self._pool is not None else "direct",
+            }
+            if self._pool is not None:
+                stats = self._pool.get_stats()
+                checks["poolStats"] = {
+                    key: int(stats.get(key, 0))
+                    for key in (
+                        "pool_size",
+                        "pool_available",
+                        "requests_waiting",
+                        "requests_errors",
+                    )
+                }
+            return checks
 
     @contextmanager
     def _connection(self) -> Iterator[Any]:
+        pooled = False
         if self._connect_override is not None:
             connection = self._connect_override()
+        elif self._pool is not None:
+            try:
+                connection = self._pool.getconn(timeout=self._pool_timeout_seconds)
+                pooled = True
+            except PoolTimeout as exc:
+                raise RepositoryUnavailableError("Database connection pool is busy; retry shortly") from exc
         else:
             if psycopg is None:
                 raise RuntimeError("psycopg is required when DATABASE_URL is configured")
@@ -98,7 +195,10 @@ class PostgresRepository(CollectionRepository):
             connection.rollback()
             raise
         finally:
-            connection.close()
+            if pooled:
+                self._pool.putconn(connection)
+            else:
+                connection.close()
 
     @staticmethod
     def _source(row: dict[str, Any]) -> SourceRecord:
@@ -298,8 +398,11 @@ class PostgresRepository(CollectionRepository):
             LEFT JOIN LATERAL (
               SELECT to_jsonb(job) AS latest_job
               FROM sync_jobs job
-              WHERE (cs.target_id IS NOT NULL AND job.target_id = cs.target_id)
-                 OR (cs.target_id IS NULL AND job.source_id = cs.id)
+              WHERE (
+                  (cs.target_id IS NOT NULL AND job.target_id = cs.target_id)
+                  OR (cs.target_id IS NULL AND job.source_id = cs.id)
+                )
+                AND job.parent_job_id IS NULL
               ORDER BY job.created_at DESC
               LIMIT 1
             ) latest_job ON TRUE
@@ -348,7 +451,7 @@ class PostgresRepository(CollectionRepository):
             LEFT JOIN LATERAL (
               SELECT to_jsonb(job) AS latest_job
               FROM sync_jobs job
-              WHERE job.target_id = target.id
+              WHERE job.target_id = target.id AND job.parent_job_id IS NULL
               ORDER BY job.created_at DESC
               LIMIT 1
             ) latest_job ON TRUE
@@ -506,39 +609,61 @@ class PostgresRepository(CollectionRepository):
         with self._connection() as connection, connection.cursor() as cursor:
             if owner_id is not None:
                 cursor.execute(
-                    "SELECT id::text FROM collection_subscriptions WHERE user_id = %s ORDER BY created_at, id",
-                    (owner_id,),
-                )
-                subscriptions = []
-                for row in cursor.fetchall():
-                    selected = self._select_subscription_source(cursor, str(row["id"]), owner_id=owner_id)
-                    if selected:
-                        subscriptions.append(self._source(selected))
-
-                # Untargeted legacy sources remain user-owned objects.  A
-                # target-backed worker source is never exposed through an
-                # authenticated Sources route; its subscription is the DTO.
-                cursor.execute(
                     """
-                    SELECT cs.id::text, cs.type::text, cs.config, cs.enabled, cs.created_at, cs.updated_at, cs.next_run_at,
-                           cs.target_id::text, ct.canonical_key, ct.coverage, ct.last_completed_at, latest_job.latest_job
-                    FROM collection_sources cs
-                    LEFT JOIN collection_targets ct ON ct.id = cs.target_id
+                    SELECT subscription.id::text AS id,
+                           target.type::text,
+                           COALESCE(NULLIF(subscription.display_config, '{}'::jsonb), target.config) AS config,
+                           subscription.enabled,
+                           subscription.created_at,
+                           subscription.updated_at,
+                           NULL::timestamptz AS next_run_at,
+                           target.id::text AS target_id,
+                           target.canonical_key,
+                           target.coverage,
+                           target.last_completed_at,
+                           latest_job.latest_job
+                    FROM collection_subscriptions subscription
+                    JOIN collection_targets target ON target.id = subscription.target_id
                     LEFT JOIN LATERAL (
                       SELECT to_jsonb(job) AS latest_job
                       FROM sync_jobs job
-                      WHERE (cs.target_id IS NOT NULL AND job.target_id = cs.target_id)
-                         OR (cs.target_id IS NULL AND job.source_id = cs.id)
+                      WHERE job.target_id = target.id AND job.parent_job_id IS NULL
                       ORDER BY job.created_at DESC
                       LIMIT 1
                     ) latest_job ON TRUE
-                    WHERE cs.owner_id = %s
-                      AND cs.target_id IS NULL
-                    ORDER BY cs.created_at
+                    WHERE subscription.user_id = %s
+
+                    UNION ALL
+
+                    SELECT source.id::text AS id,
+                           source.type::text,
+                           source.config,
+                           source.enabled,
+                           source.created_at,
+                           source.updated_at,
+                           source.next_run_at,
+                           NULL::text AS target_id,
+                           NULL::text AS canonical_key,
+                           '{}'::jsonb AS coverage,
+                           NULL::timestamptz AS last_completed_at,
+                           latest_job.latest_job
+                    FROM collection_sources source
+                    LEFT JOIN LATERAL (
+                      SELECT to_jsonb(job) AS latest_job
+                      FROM sync_jobs job
+                      WHERE job.source_id = source.id
+                        AND job.target_id IS NULL
+                        AND job.parent_job_id IS NULL
+                      ORDER BY job.created_at DESC
+                      LIMIT 1
+                    ) latest_job ON TRUE
+                    WHERE source.owner_id = %s AND source.target_id IS NULL
+
+                    ORDER BY created_at, id
                     """,
-                    (owner_id,),
+                    (owner_id, owner_id),
                 )
-                return subscriptions + [self._source(row) for row in cursor.fetchall()]
+                return [self._source(row) for row in cursor.fetchall()]
 
             cursor.execute(
                 """
@@ -549,8 +674,11 @@ class PostgresRepository(CollectionRepository):
                 LEFT JOIN LATERAL (
                   SELECT to_jsonb(job) AS latest_job
                   FROM sync_jobs job
-                  WHERE (cs.target_id IS NOT NULL AND job.target_id = cs.target_id)
-                     OR (cs.target_id IS NULL AND job.source_id = cs.id)
+                  WHERE (
+                      (cs.target_id IS NOT NULL AND job.target_id = cs.target_id)
+                      OR (cs.target_id IS NULL AND job.source_id = cs.id)
+                    )
+                    AND job.parent_job_id IS NULL
                   ORDER BY job.created_at DESC
                   LIMIT 1
                 ) latest_job ON TRUE
@@ -1437,15 +1565,77 @@ class PostgresRepository(CollectionRepository):
         if unknown:
             raise RepositoryError(f"Unsupported job changes: {', '.join(sorted(unknown))}")
         with self._connection() as connection, connection.cursor() as cursor:
-            # Use the same target -> job lock order as request submission.  This
-            # prevents a just-finished job from missing a concurrently inserted
-            # successor request between its terminal transition and pending scan.
-            cursor.execute("SELECT target_id FROM sync_jobs WHERE id = %s", (job_id,))
+            # Use one global UUID order for every target affected by a terminal
+            # parent. Two collections can share a video; locking only each job's
+            # own target first would let A->B and B->A deadlock. Request
+            # submission also takes the target lock before the job lock.
+            cursor.execute(
+                "SELECT target_id, parent_job_id, state, checkpoint FROM sync_jobs WHERE id = %s",
+                (job_id,),
+            )
             target_hint = cursor.fetchone()
             if not target_hint:
                 raise NotFoundError(f"Job '{job_id}' was not found")
+            terminal_target_ids: list[str] = []
             if target_hint.get("target_id"):
-                cursor.execute("SELECT id FROM collection_targets WHERE id = %s FOR UPDATE", (target_hint["target_id"],))
+                current_state = JobState(str(target_hint["state"]))
+                if (
+                    state.is_terminal
+                    and not current_state.is_terminal
+                    and target_hint.get("parent_job_id") is None
+                ):
+                    pending_checkpoint = changes.get("checkpoint")
+                    checkpoint_hint = (
+                        pending_checkpoint
+                        if isinstance(pending_checkpoint, dict)
+                        else dict(target_hint.get("checkpoint") or {})
+                    )
+                    cursor.execute(
+                        """
+                        WITH touched_video_ids AS (
+                          SELECT video.id
+                          FROM sync_jobs child
+                          JOIN videos video
+                            ON video.youtube_video_id = child.checkpoint ->> 'youtubeVideoId'
+                          WHERE child.parent_job_id = %s
+                          UNION
+                          SELECT video.id
+                          FROM videos video
+                          WHERE video.youtube_video_id = %s
+                        ), affected AS (
+                          SELECT DISTINCT membership.target_id
+                          FROM collection_target_videos membership
+                          JOIN touched_video_ids touched ON touched.id = membership.video_id
+                          UNION
+                          SELECT %s::uuid
+                        )
+                        SELECT target_id::text
+                        FROM affected
+                        ORDER BY target_id
+                        """,
+                        (
+                            job_id,
+                            str(checkpoint_hint.get("youtubeVideoId") or ""),
+                            target_hint["target_id"],
+                        ),
+                    )
+                    terminal_target_ids = [str(item["target_id"]) for item in cursor.fetchall()]
+                    cursor.execute(
+                        """
+                        SELECT id
+                        FROM collection_targets
+                        WHERE id = ANY(%s::uuid[])
+                        ORDER BY id
+                        FOR UPDATE
+                        """,
+                        (terminal_target_ids,),
+                    )
+                    cursor.fetchall()
+                else:
+                    cursor.execute(
+                        "SELECT id FROM collection_targets WHERE id = %s FOR UPDATE",
+                        (target_hint["target_id"],),
+                    )
             cursor.execute("SELECT * FROM sync_jobs WHERE id = %s FOR UPDATE", (job_id,))
             row = cursor.fetchone()
             if not row:
@@ -1453,6 +1643,7 @@ class PostgresRepository(CollectionRepository):
             current = self._job(row)
             if state != current.state and state not in _ALLOWED_TRANSITIONS[current.state]:
                 raise InvalidStateTransitionError(f"Cannot transition job '{job_id}' from {current.state.value} to {state.value}")
+            became_terminal = not current.state.is_terminal and state.is_terminal
             assignments = ["state = %s"]
             values: list[Any] = [state.value]
             for key, value in changes.items():
@@ -1461,13 +1652,13 @@ class PostgresRepository(CollectionRepository):
             values.append(job_id)
             cursor.execute(f"UPDATE sync_jobs SET {', '.join(assignments)}, updated_at = now() WHERE id = %s RETURNING *", values)
             updated = self._job(cursor.fetchone())
-            if updated.state.is_terminal:
+            if became_terminal:
                 cursor.execute(
                     "UPDATE collection_requests SET status = %s, updated_at = now() WHERE job_id = %s",
                     (updated.state.value, updated.id),
                 )
                 if updated.target_id:
-                    if updated.state is JobState.COMPLETED:
+                    if updated.state in {JobState.COMPLETED, JobState.COMPLETED_WITH_WARNINGS}:
                         source_row = self._select_source(cursor, updated.source_id)
                         if source_row:
                             source = self._source(source_row)
@@ -1499,6 +1690,99 @@ class PostgresRepository(CollectionRepository):
                             cursor.execute(
                                 "UPDATE collection_requests SET job_id = %s, status = 'queued', updated_at = now() WHERE id = ANY(%s)",
                                 (successor.id, pending),
+                            )
+                # Child video jobs are implementation details.  A parent (or a
+                # direct, targetless legacy job) advances the public data
+                # version once, after all committed child work is visible.
+                if updated.parent_job_id is None:
+                    affected_targets: list[tuple[str, int]] = []
+                    if updated.target_id:
+                        if not terminal_target_ids:
+                            terminal_target_ids = [updated.target_id]
+                        cursor.execute(
+                            """
+                            UPDATE collection_targets target
+                            SET data_version = target.data_version + 1, updated_at = now()
+                            WHERE target.id = ANY(%s::uuid[])
+                            RETURNING target.id::text, target.data_version
+                            """,
+                            (terminal_target_ids,),
+                        )
+                        affected_targets = [
+                            (str(item["id"]), int(item["data_version"]))
+                            for item in cursor.fetchall()
+                        ]
+                    else:
+                        cursor.execute(
+                            """
+                            UPDATE collection_sources
+                            SET data_version = data_version + 1, updated_at = now()
+                            WHERE id = %s
+                            RETURNING data_version
+                            """,
+                            (updated.source_id,),
+                        )
+                        source_version_row = cursor.fetchone()
+                        if (
+                            source_version_row
+                            and self.enable_target_summary_write
+                            and updated.state in {JobState.COMPLETED, JobState.COMPLETED_WITH_WARNINGS}
+                        ):
+                            cursor.execute(
+                                """
+                                INSERT INTO analysis_runs (
+                                  source_id, job_id, data_version, state,
+                                  pipeline_version, policy_gate_version, sample_plan, coverage
+                                )
+                                SELECT %s, %s, %s, 'queued', 'deterministic-v2',
+                                       'server-managed', %s, %s
+                                WHERE NOT EXISTS (
+                                  SELECT 1 FROM analysis_runs
+                                  WHERE target_id IS NULL AND source_id = %s
+                                    AND data_version = %s
+                                    AND pipeline_version = 'deterministic-v2'
+                                )
+                                """,
+                                (
+                                    updated.source_id,
+                                    updated.id,
+                                    int(source_version_row["data_version"]),
+                                    Json({"strategy": "per-video-recent", "maxComments": 50_000, "maxPerVideo": 1_000}),
+                                    Json({"partial": updated.state is JobState.COMPLETED_WITH_WARNINGS}),
+                                    updated.source_id,
+                                    int(source_version_row["data_version"]),
+                                ),
+                            )
+                    if (
+                        affected_targets
+                        and self.enable_target_summary_write
+                        and updated.state in {JobState.COMPLETED, JobState.COMPLETED_WITH_WARNINGS}
+                    ):
+                        for target_id, data_version in affected_targets:
+                            cursor.execute(
+                                """
+                                INSERT INTO analysis_runs (
+                                  source_id, target_id, job_id, data_version, state,
+                                  pipeline_version, policy_gate_version, sample_plan, coverage
+                                )
+                                SELECT %s, %s, %s, %s, 'queued', 'deterministic-v2',
+                                       'server-managed', %s, %s
+                                WHERE NOT EXISTS (
+                                  SELECT 1 FROM analysis_runs
+                                  WHERE target_id = %s AND data_version = %s
+                                    AND pipeline_version = 'deterministic-v2'
+                                )
+                                """,
+                                (
+                                    updated.source_id if target_id == updated.target_id else None,
+                                    target_id,
+                                    updated.id,
+                                    data_version,
+                                    Json({"strategy": "per-video-recent", "maxComments": 50_000, "maxPerVideo": 1_000}),
+                                    Json({"partial": updated.state is JobState.COMPLETED_WITH_WARNINGS}),
+                                    target_id,
+                                    data_version,
+                                ),
                             )
             return updated
 
@@ -1762,42 +2046,111 @@ class PostgresRepository(CollectionRepository):
             return int(cursor.fetchone()["video_count"])
 
     def upsert_comment(self, comment: CommentRecord) -> CommentRecord:
-        comment = replace(
-            comment,
-            youtube_comment_id=_strip_nul(comment.youtube_comment_id),
-            youtube_video_id=_strip_nul(comment.youtube_video_id),
-            youtube_parent_comment_id=_strip_nul(comment.youtube_parent_comment_id),
-            youtube_thread_id=_strip_nul(comment.youtube_thread_id),
-            text_display=_strip_nul(comment.text_display),
-        )
+        return self.persist_comment_page([comment])[0]
+
+    def persist_comment_page(
+        self,
+        comments: Iterable[CommentRecord],
+        *,
+        job_id: str | None = None,
+        checkpoint: dict[str, Any] | None = None,
+    ) -> list[CommentRecord]:
+        """Persist one upstream page using one connection and one transaction.
+
+        Top-level comments are written before replies so parent foreign keys are
+        resolved deterministically.  The rollup is recomputed while holding the
+        video row lock: replaying a page after a crash therefore cannot inflate
+        counts.  A supplied checkpoint commits in the same transaction.
+        """
+
+        sanitized_page = [
+            replace(
+                comment,
+                youtube_comment_id=_strip_nul(comment.youtube_comment_id),
+                youtube_video_id=_strip_nul(comment.youtube_video_id),
+                youtube_parent_comment_id=_strip_nul(comment.youtube_parent_comment_id),
+                youtube_thread_id=_strip_nul(comment.youtube_thread_id),
+                text_display=_strip_nul(comment.text_display),
+            )
+            for comment in comments
+        ]
+        # Upstream pages should already be unique, but de-duplicating here keeps
+        # both the SQL upsert and rollup delta idempotent under malformed/replayed
+        # responses.  Dict insertion order preserves the first-seen page order.
+        page_by_id: dict[str, CommentRecord] = {}
+        for comment in sanitized_page:
+            page_by_id[comment.youtube_comment_id] = comment
+        page = list(page_by_id.values())
+        video_ids = {comment.youtube_video_id for comment in page}
+        if len(video_ids) > 1:
+            raise RepositoryError("A comment page must belong to exactly one video")
+        if checkpoint is not None and not job_id:
+            raise RepositoryError("job_id is required when persisting a checkpoint")
+
         with self._connection() as connection, connection.cursor() as cursor:
-            cursor.execute("SELECT id FROM videos WHERE youtube_video_id = %s", (comment.youtube_video_id,))
-            video = cursor.fetchone()
-            if not video:
-                raise NotFoundError(f"Video '{comment.youtube_video_id}' was not found")
-            parent_id = None
-            if comment.youtube_parent_comment_id:
-                cursor.execute("SELECT id FROM comments WHERE youtube_comment_id = %s", (comment.youtube_parent_comment_id,))
-                parent = cursor.fetchone()
-                parent_id = parent["id"] if parent else None
-            cursor.execute(
-                """
+            video: dict[str, Any] | None = None
+            existing_comments: dict[str, dict[str, Any]] = {}
+            absolute_rollup_required = False
+            if video_ids:
+                youtube_video_id = next(iter(video_ids))
+                cursor.execute("SELECT id FROM videos WHERE youtube_video_id = %s FOR UPDATE", (youtube_video_id,))
+                video = cursor.fetchone()
+                if not video:
+                    raise NotFoundError(f"Video '{youtube_video_id}' was not found")
+                cursor.execute(
+                    """
+                    SELECT youtube_comment_id, video_id, youtube_parent_comment_id,
+                           COALESCE(published_at, source_fetched_at) AS effective_published_at
+                    FROM comments
+                    WHERE youtube_comment_id = ANY(%s)
+                    FOR UPDATE
+                    """,
+                    ([item.youtube_comment_id for item in page],),
+                )
+                existing_comments = {
+                    str(item["youtube_comment_id"]): dict(item)
+                    for item in cursor.fetchall()
+                }
+                for item in page:
+                    previous = existing_comments.get(item.youtube_comment_id)
+                    if previous is None:
+                        continue
+                    if str(previous["video_id"]) != str(video["id"]):
+                        raise RepositoryError(
+                            f"Comment '{item.youtube_comment_id}' cannot move between videos"
+                        )
+                    effective_published_at = item.published_at or item.source_fetched_at
+                    if (
+                        previous.get("youtube_parent_comment_id")
+                        != item.youtube_parent_comment_id
+                        or previous.get("effective_published_at")
+                        != effective_published_at
+                    ):
+                        # Category changes and a correction to the current maximum
+                        # cannot be represented safely as a simple positive delta.
+                        absolute_rollup_required = True
+
+            upsert_sql = """
                 INSERT INTO comments (
                   youtube_comment_id, video_id, parent_id, youtube_parent_comment_id, youtube_thread_id,
-                  author_channel_id, author_display_name, text_display, text_original, like_count, published_at, updated_at, source_fetched_at
+                  author_channel_id, author_display_name, text_display, text_original, like_count,
+                  published_at, updated_at, source_fetched_at
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (youtube_comment_id) DO UPDATE SET
-                  parent_id = EXCLUDED.parent_id, youtube_parent_comment_id = EXCLUDED.youtube_parent_comment_id,
-                  youtube_thread_id = EXCLUDED.youtube_thread_id, text_display = EXCLUDED.text_display,
-                  text_original = EXCLUDED.text_original, author_channel_id = EXCLUDED.author_channel_id,
-                  author_display_name = EXCLUDED.author_display_name, like_count = EXCLUDED.like_count,
-                  published_at = EXCLUDED.published_at, updated_at = EXCLUDED.updated_at,
-                  source_fetched_at = EXCLUDED.source_fetched_at
-                RETURNING id::text
-                """,
-                (
+                  video_id = EXCLUDED.video_id, parent_id = EXCLUDED.parent_id,
+                  youtube_parent_comment_id = EXCLUDED.youtube_parent_comment_id,
+                  youtube_thread_id = EXCLUDED.youtube_thread_id,
+                  text_display = EXCLUDED.text_display, text_original = EXCLUDED.text_original,
+                  author_channel_id = EXCLUDED.author_channel_id,
+                  author_display_name = EXCLUDED.author_display_name,
+                  like_count = EXCLUDED.like_count, published_at = EXCLUDED.published_at,
+                  updated_at = EXCLUDED.updated_at, source_fetched_at = EXCLUDED.source_fetched_at
+            """
+
+            def parameters(comment: CommentRecord, parent_id: Any | None) -> tuple[Any, ...]:
+                return (
                     comment.youtube_comment_id,
-                    video["id"],
+                    video["id"] if video else None,
                     parent_id,
                     comment.youtube_parent_comment_id,
                     comment.youtube_thread_id,
@@ -1809,9 +2162,169 @@ class PostgresRepository(CollectionRepository):
                     comment.published_at,
                     comment.updated_at,
                     comment.source_fetched_at,
-                ),
+                )
+
+            top_level = [item for item in page if not item.youtube_parent_comment_id]
+            replies = [item for item in page if item.youtube_parent_comment_id]
+            if top_level:
+                cursor.executemany(upsert_sql, [parameters(item, None) for item in top_level])
+
+            parent_ids = list(
+                dict.fromkeys(
+                    item.youtube_parent_comment_id
+                    for item in replies
+                    if item.youtube_parent_comment_id
+                )
             )
-            return replace(comment, id=str(cursor.fetchone()["id"]))
+            parent_map: dict[str, Any] = {}
+            if parent_ids:
+                cursor.execute(
+                    """
+                    SELECT youtube_comment_id, id
+                    FROM comments
+                    WHERE youtube_comment_id = ANY(%s)
+                    """,
+                    (parent_ids,),
+                )
+                parent_map = {
+                    str(item["youtube_comment_id"]): item["id"]
+                    for item in cursor.fetchall()
+                }
+            if replies:
+                cursor.executemany(
+                    upsert_sql,
+                    [
+                        parameters(item, parent_map.get(str(item.youtube_parent_comment_id)))
+                        for item in replies
+                    ],
+                )
+
+            stored_by_youtube_id: dict[str, CommentRecord] = {}
+            if page:
+                cursor.execute(
+                    """
+                    SELECT youtube_comment_id, id::text
+                    FROM comments
+                    WHERE youtube_comment_id = ANY(%s)
+                    """,
+                    ([item.youtube_comment_id for item in page],),
+                )
+                database_ids = {
+                    str(item["youtube_comment_id"]): str(item["id"])
+                    for item in cursor.fetchall()
+                }
+                stored_by_youtube_id = {
+                    item.youtube_comment_id: replace(
+                        item, id=database_ids[item.youtube_comment_id]
+                    )
+                    for item in page
+                }
+
+            if video is not None and self.enable_comment_rollup_dual_write:
+                cursor.execute(
+                    "SELECT video_id FROM video_comment_rollups WHERE video_id = %s FOR UPDATE",
+                    (video["id"],),
+                )
+                rollup_exists = cursor.fetchone() is not None
+                new_comments = [
+                    item for item in page if item.youtube_comment_id not in existing_comments
+                ]
+                if absolute_rollup_required or not rollup_exists:
+                    cursor.execute(
+                        """
+                        INSERT INTO video_comment_rollups (
+                          video_id, stored_count, top_level_count, reply_count,
+                          latest_published_at, updated_at, last_reconciled_at
+                        )
+                        SELECT
+                          %s,
+                          count(*)::bigint,
+                          count(*) FILTER (WHERE youtube_parent_comment_id IS NULL)::bigint,
+                          count(*) FILTER (WHERE youtube_parent_comment_id IS NOT NULL)::bigint,
+                          max(COALESCE(published_at, source_fetched_at)),
+                          now(), now()
+                        FROM comments
+                        WHERE video_id = %s
+                        ON CONFLICT (video_id) DO UPDATE SET
+                          stored_count = EXCLUDED.stored_count,
+                          top_level_count = EXCLUDED.top_level_count,
+                          reply_count = EXCLUDED.reply_count,
+                          latest_published_at = EXCLUDED.latest_published_at,
+                          updated_at = EXCLUDED.updated_at,
+                          last_reconciled_at = EXCLUDED.last_reconciled_at
+                        """,
+                        (video["id"], video["id"]),
+                    )
+                elif new_comments:
+                    top_level_delta = sum(
+                        1 for item in new_comments if not item.youtube_parent_comment_id
+                    )
+                    reply_delta = len(new_comments) - top_level_delta
+                    effective_times = [
+                        item.published_at or item.source_fetched_at
+                        for item in new_comments
+                        if item.published_at or item.source_fetched_at
+                    ]
+                    latest_delta = max(effective_times) if effective_times else None
+                    cursor.execute(
+                        """
+                        UPDATE video_comment_rollups
+                        SET stored_count = stored_count + %s,
+                            top_level_count = top_level_count + %s,
+                            reply_count = reply_count + %s,
+                            latest_published_at = CASE
+                              WHEN %s::timestamptz IS NULL THEN latest_published_at
+                              WHEN latest_published_at IS NULL THEN %s::timestamptz
+                              ELSE GREATEST(latest_published_at, %s::timestamptz)
+                            END,
+                            updated_at = now()
+                        WHERE video_id = %s
+                        """,
+                        (
+                            len(new_comments),
+                            top_level_delta,
+                            reply_delta,
+                            latest_delta,
+                            latest_delta,
+                            latest_delta,
+                            video["id"],
+                        ),
+                    )
+
+            if checkpoint is not None and job_id is not None:
+                cursor.execute(
+                    """
+                    UPDATE sync_jobs
+                    SET checkpoint = %s, updated_at = now()
+                    WHERE id = %s AND state = 'running'
+                    """,
+                    (Json(checkpoint), job_id),
+                )
+                if cursor.rowcount != 1:
+                    raise RepositoryError(f"Running job '{job_id}' was not found while checkpointing")
+                cursor.execute(
+                    """
+                    INSERT INTO sync_checkpoints (
+                      job_id, stage, scope_key, request_hash, page_token, batch_cursor, checkpoint_seq
+                    ) VALUES (%s, %s, %s, %s, %s, %s, 1)
+                    ON CONFLICT (job_id, stage, scope_key) DO UPDATE SET
+                      request_hash = EXCLUDED.request_hash,
+                      page_token = EXCLUDED.page_token,
+                      batch_cursor = EXCLUDED.batch_cursor,
+                      checkpoint_seq = sync_checkpoints.checkpoint_seq + 1,
+                      updated_at = now()
+                    """,
+                    (
+                        job_id,
+                        str(checkpoint.get("stage", "comments")),
+                        str(checkpoint.get("scopeKey", "job")),
+                        hashlib.sha256(str(sorted(checkpoint.items())).encode("utf-8")).hexdigest(),
+                        checkpoint.get("pageToken"),
+                        int(checkpoint.get("batchCursor", 0)),
+                    ),
+                )
+
+            return [stored_by_youtube_id[item.youtube_comment_id] for item in page]
 
     def existing_comment_ids(self, youtube_comment_ids: Iterable[str]) -> set[str]:
         comment_ids = list(dict.fromkeys(youtube_comment_ids))
@@ -1911,52 +2424,788 @@ class PostgresRepository(CollectionRepository):
         )
         return [self._comment(row) for row in cursor.fetchall()]
 
-    def save_analysis_summary(self, source_id: str) -> dict[str, Any]:
-        result = self.get_source_results(source_id)
-        summary = result["analysis"]
+    def _resolve_source_scope(
+        self, cursor: Any, source_id: str, *, owner_id: str | None
+    ) -> tuple[SourceRecord, str | None, str]:
+        """Resolve a public subscription/source ID to its bounded read scope."""
+
+        source_row = self._select_subscription_source(cursor, source_id, owner_id=owner_id)
+        if source_row:
+            source = self._source(source_row)
+            return source, source.target_id, source_id
+        if self._select_subscription(cursor, source_id) is not None:
+            raise NotFoundError(f"Source '{source_id}' was not found")
+        source_row = self._select_source(cursor, source_id)
+        if not source_row:
+            raise NotFoundError(f"Source '{source_id}' was not found")
+        if owner_id is not None:
+            cursor.execute(
+                "SELECT 1 FROM collection_sources WHERE id = %s AND owner_id = %s",
+                (source_id, owner_id),
+            )
+            if not cursor.fetchone():
+                raise NotFoundError(f"Source '{source_id}' was not found")
+        source = self._source(source_row)
+        return source, source.target_id, source_id
+
+    def get_scope_data_version(
+        self, *, target_id: str | None, source_id: str
+    ) -> int:
+        """Return the monotonic identity used only for derived cache keys."""
+
+        with self._connection() as connection, connection.cursor() as cursor:
+            if target_id:
+                cursor.execute(
+                    "SELECT data_version FROM collection_targets WHERE id = %s",
+                    (target_id,),
+                )
+            else:
+                cursor.execute(
+                    "SELECT data_version FROM collection_sources WHERE id = %s AND target_id IS NULL",
+                    (source_id,),
+                )
+            row = cursor.fetchone()
+            if not row:
+                raise NotFoundError("Collection data scope was not found")
+            return int(row["data_version"] or 0)
+
+    def get_owner_explore_generation(self, *, owner_id: str) -> str:
+        """Hash subscription ACL/update state and every visible target version."""
+
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
-                INSERT INTO analysis_runs (source_id, state, pipeline_version, policy_gate_version, started_at, completed_at)
-                VALUES (%s, 'completed', 'deterministic-v1', 'server-managed', now(), now())
-                RETURNING id
+                SELECT md5(COALESCE(string_agg(
+                  concat_ws(':', subscription.target_id::text, target.data_version::text,
+                            extract(epoch FROM subscription.updated_at)::text),
+                  ',' ORDER BY subscription.target_id
+                ), '')) AS generation
+                FROM collection_subscriptions subscription
+                JOIN collection_targets target ON target.id = subscription.target_id
+                WHERE subscription.user_id = %s
                 """,
-                (source_id,),
+                (owner_id,),
             )
-            run_id = cursor.fetchone()["id"]
+            return str(cursor.fetchone()["generation"])
+
+    def list_active_parent_jobs(self, *, owner_id: str) -> list[dict[str, Any]]:
+        """Return only user-visible, active coordinator jobs in one query."""
+
+        with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
-                "INSERT INTO analysis_results (analysis_run_id, result_kind, payload) VALUES (%s, 'basic_summary', %s)",
+                """
+                SELECT subscription.id::text AS public_source_id, job.*
+                FROM collection_subscriptions subscription
+                JOIN sync_jobs job ON job.target_id = subscription.target_id
+                WHERE subscription.user_id = %s
+                  AND job.parent_job_id IS NULL
+                  AND job.state NOT IN ('completed', 'completed_with_warnings', 'failed', 'cancelled')
+                UNION ALL
+                SELECT source.id::text AS public_source_id, job.*
+                FROM collection_sources source
+                JOIN sync_jobs job ON job.source_id = source.id
+                WHERE source.owner_id = %s
+                  AND source.target_id IS NULL
+                  AND job.target_id IS NULL
+                  AND job.parent_job_id IS NULL
+                  AND job.state NOT IN ('completed', 'completed_with_warnings', 'failed', 'cancelled')
+                ORDER BY created_at DESC
+                """,
+                (owner_id, owner_id),
+            )
+            return [
+                {
+                    "source_id": str(row["public_source_id"]),
+                    "target_id": str(row["target_id"]) if row.get("target_id") else None,
+                    "job": self._job(row),
+                }
+                for row in cursor.fetchall()
+            ]
+
+    @staticmethod
+    def _visible_video_cte(target_id: str | None) -> str:
+        if target_id:
+            return """
+                SELECT membership.video_id, membership.first_seen_at
+                FROM collection_target_videos membership
+                WHERE membership.target_id = %s
+            """
+        return """
+            SELECT membership.video_id, membership.first_seen_at
+            FROM source_videos membership
+            WHERE membership.source_id = %s
+        """
+
+    def get_source_overview(self, source_id: str, *, owner_id: str | None = None) -> dict[str, Any]:
+        """Return exact aggregates and rankings without hydrating comment text."""
+
+        with self._connection() as connection, connection.cursor() as cursor:
+            source, target_id, membership_id = self._resolve_source_scope(
+                cursor, source_id, owner_id=owner_id
+            )
+            scope_value = target_id or membership_id
+            if target_id:
+                cursor.execute(
+                    "SELECT data_version, coverage FROM collection_targets WHERE id = %s",
+                    (target_id,),
+                )
+            else:
+                cursor.execute(
+                    "SELECT data_version, '{}'::jsonb AS coverage FROM collection_sources WHERE id = %s",
+                    (membership_id,),
+                )
+            version_row = cursor.fetchone() or {"data_version": 0, "coverage": {}}
+            data_version = int(version_row.get("data_version") or 0)
+
+            if target_id:
+                cursor.execute(
+                    """
+                    SELECT * FROM sync_jobs
+                    WHERE target_id = %s AND parent_job_id IS NULL
+                    ORDER BY created_at DESC LIMIT 1
+                    """,
+                    (target_id,),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT * FROM sync_jobs
+                    WHERE source_id = %s AND target_id IS NULL AND parent_job_id IS NULL
+                    ORDER BY created_at DESC LIMIT 1
+                    """,
+                    (membership_id,),
+                )
+            latest_job_row = cursor.fetchone()
+            latest_job = self._job(latest_job_row) if latest_job_row else None
+            if target_id:
+                cursor.execute(
+                    """
+                    SELECT * FROM sync_jobs
+                    WHERE target_id = %s AND parent_job_id IS NULL
+                      AND state IN ('completed', 'completed_with_warnings', 'failed', 'cancelled')
+                    ORDER BY created_at DESC LIMIT 1
+                    """,
+                    (target_id,),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT * FROM sync_jobs
+                    WHERE source_id = %s AND target_id IS NULL AND parent_job_id IS NULL
+                      AND state IN ('completed', 'completed_with_warnings', 'failed', 'cancelled')
+                    ORDER BY created_at DESC LIMIT 1
+                    """,
+                    (membership_id,),
+                )
+            latest_terminal_row = cursor.fetchone()
+            latest_terminal = self._job(latest_terminal_row) if latest_terminal_row else None
+
+            visible_cte = self._visible_video_cte(target_id)
+            if self.enable_comment_rollup_read:
+                aggregate_sql = f"""
+                    WITH visible_video AS ({visible_cte})
+                    SELECT count(*)::bigint AS video_count,
+                           COALESCE(sum(rollup.stored_count), 0)::bigint AS comment_count,
+                           max(video.published_at) AS latest_video_published_at,
+                           max(rollup.latest_published_at) AS latest_comment_published_at
+                    FROM visible_video membership
+                    JOIN videos video ON video.id = membership.video_id
+                    LEFT JOIN video_comment_rollups rollup ON rollup.video_id = video.id
+                """
+            else:
+                aggregate_sql = f"""
+                    WITH visible_video AS ({visible_cte}), comment_aggregate AS (
+                      SELECT comment.video_id, count(*)::bigint AS stored_count,
+                             max(COALESCE(comment.published_at, comment.source_fetched_at)) AS latest_published_at
+                      FROM comments comment
+                      JOIN visible_video membership ON membership.video_id = comment.video_id
+                      GROUP BY comment.video_id
+                    )
+                    SELECT count(*)::bigint AS video_count,
+                           COALESCE(sum(comment_aggregate.stored_count), 0)::bigint AS comment_count,
+                           max(video.published_at) AS latest_video_published_at,
+                           max(comment_aggregate.latest_published_at) AS latest_comment_published_at
+                    FROM visible_video membership
+                    JOIN videos video ON video.id = membership.video_id
+                    LEFT JOIN comment_aggregate ON comment_aggregate.video_id = video.id
+                """
+            cursor.execute(aggregate_sql, (scope_value,))
+            exact = cursor.fetchone() or {}
+
+            summary_row: dict[str, Any] | None = None
+            if self.enable_target_summary_read and target_id:
+                cursor.execute(
+                    """
+                    SELECT run.data_version, run.job_id::text, run.completed_at, run.coverage,
+                           result.payload
+                    FROM analysis_runs run
+                    JOIN analysis_results result ON result.analysis_run_id = run.id
+                    WHERE run.target_id = %s AND run.state = 'completed'
+                      AND result.result_kind = 'basic_summary'
+                      AND result.deleted_at IS NULL
+                      AND (result.expires_at IS NULL OR result.expires_at > now())
+                    ORDER BY run.data_version DESC, run.completed_at DESC
+                    LIMIT 1
+                    """,
+                    (target_id,),
+                )
+                summary_row = cursor.fetchone()
+            elif self.enable_target_summary_read:
+                cursor.execute(
+                    """
+                    SELECT run.data_version, run.job_id::text, run.completed_at, run.coverage,
+                           result.payload
+                    FROM analysis_runs run
+                    JOIN analysis_results result ON result.analysis_run_id = run.id
+                    WHERE run.target_id IS NULL AND run.source_id = %s
+                      AND run.state = 'completed' AND result.result_kind = 'basic_summary'
+                      AND result.deleted_at IS NULL
+                      AND (result.expires_at IS NULL OR result.expires_at > now())
+                    ORDER BY run.data_version DESC, run.completed_at DESC
+                    LIMIT 1
+                    """,
+                    (membership_id,),
+                )
+                summary_row = cursor.fetchone()
+            summary_payload = dict(summary_row.get("payload") or {}) if summary_row else {}
+            summary_version = int(summary_row.get("data_version") or 0) if summary_row else -1
+
+            if target_id:
+                cursor.execute(
+                    """
+                    SELECT state, coverage FROM analysis_runs
+                    WHERE target_id = %s AND data_version = %s
+                    ORDER BY created_at DESC LIMIT 1
+                    """,
+                    (target_id, data_version),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT state, coverage FROM analysis_runs
+                    WHERE target_id IS NULL AND source_id = %s AND data_version = %s
+                    ORDER BY created_at DESC LIMIT 1
+                    """,
+                    (membership_id, data_version),
+                )
+            current_run = cursor.fetchone()
+            run_state = str(current_run["state"]) if current_run else None
+            analysis_coverage = dict(
+                (current_run or {}).get("coverage")
+                or (summary_row or {}).get("coverage")
+                or {}
+            )
+            status = "fresh"
+            if summary_version == data_version:
+                top_words_status = "fresh"
+            elif run_state in {"queued", "running"}:
+                top_words_status = "building"
+            elif run_state == "failed":
+                top_words_status = "failed"
+            else:
+                top_words_status = "stale" if summary_row else "building"
+
+            partial_data = bool(
+                latest_terminal
+                and latest_terminal.state
+                in {JobState.COMPLETED_WITH_WARNINGS, JobState.FAILED, JobState.CANCELLED}
+            )
+            if latest_terminal and latest_terminal.state in {JobState.FAILED, JobState.CANCELLED}:
+                status = "stale" if summary_row else "failed"
+                top_words_status = "stale" if summary_row else "failed"
+
+            generated_at = (
+                summary_payload.get("generatedAt")
+                or (summary_row.get("completed_at") if summary_row else None)
+                or utcnow()
+            )
+            summary = {
+                "videoCount": int(exact.get("video_count") or 0),
+                "commentCount": int(exact.get("comment_count") or 0),
+                "latestVideoPublishedAt": exact.get("latest_video_published_at"),
+                "latestCommentPublishedAt": exact.get("latest_comment_published_at"),
+                "topWords": list(summary_payload.get("topWords") or []),
+                "generatedAt": generated_at,
+                "asOfJobId": (
+                    (str(summary_row["job_id"]) if summary_row.get("job_id") else None)
+                    if summary_row
+                    else (latest_terminal.id if latest_terminal else None)
+                ),
+                "dataVersion": data_version,
+                "status": status,
+                "topWordsStatus": top_words_status,
+                "partialData": partial_data,
+                "coverage": analysis_coverage,
+            }
+
+            top_videos: dict[str, list[VideoRecord]] = {}
+            metric_columns = {
+                "views": "view_count",
+                "likes": "like_count",
+                "comments": "comment_count",
+            }
+            for label, column in metric_columns.items():
+                cursor.execute(
+                    f"""
+                    WITH visible_video AS ({visible_cte})
+                    SELECT video.id::text, video.youtube_video_id, channel.youtube_channel_id,
+                           video.title, video.description, video.published_at, video.duration_seconds,
+                           video.privacy_status, video.made_for_kids, video.source_fetched_at,
+                           jsonb_build_object(
+                             'viewCount', COALESCE(stats.view_count, 0),
+                             'likeCount', COALESCE(stats.like_count, 0),
+                             'commentCount', COALESCE(stats.comment_count, 0)
+                           ) AS statistics
+                    FROM visible_video membership
+                    JOIN videos video ON video.id = membership.video_id
+                    LEFT JOIN channels channel ON channel.id = video.channel_id
+                    LEFT JOIN LATERAL (
+                      SELECT view_count, like_count, comment_count
+                      FROM video_stat_snapshots snapshot
+                      WHERE snapshot.video_id = video.id
+                      ORDER BY snapshot.fetched_at DESC LIMIT 1
+                    ) stats ON TRUE
+                    ORDER BY COALESCE(stats.{column}, 0) DESC,
+                             COALESCE(video.published_at, video.source_fetched_at, 'epoch'::timestamptz) DESC,
+                             video.youtube_video_id DESC
+                    LIMIT 6
+                    """,
+                    (scope_value,),
+                )
+                top_videos[label] = [self._video(row) for row in cursor.fetchall()]
+
+            return {
+                "source": source,
+                "latest_job": latest_job,
+                "summary": summary,
+                "top_videos": top_videos,
+            }
+
+    def get_source_videos_page(
+        self,
+        source_id: str,
+        *,
+        owner_id: str | None = None,
+        cursor: str | None = None,
+        limit: int = 60,
+    ) -> dict[str, Any]:
+        with self._connection() as connection, connection.cursor() as db_cursor:
+            _, target_id, membership_id = self._resolve_source_scope(
+                db_cursor, source_id, owner_id=owner_id
+            )
+            filter_hash = source_video_filter_hash()
+            decoded = decode_source_video_cursor(
+                cursor, scope=source_id, filter_hash=filter_hash
+            )
+            snapshot_at = decoded.snapshot_at if decoded else utcnow()
+            scope_value = target_id or membership_id
+            visible_cte = self._visible_video_cte(target_id)
+            db_cursor.execute(
+                f"""
+                WITH visible_video AS ({visible_cte})
+                SELECT count(*)::bigint AS total
+                FROM visible_video
+                WHERE first_seen_at <= %s
+                """,
+                (scope_value, snapshot_at),
+            )
+            total = int(db_cursor.fetchone()["total"])
+
+            after_sql = ""
+            params: list[Any] = [scope_value, snapshot_at]
+            if decoded:
+                after_sql = """
+                  AND (
+                    COALESCE(video.published_at, video.source_fetched_at, 'epoch'::timestamptz),
+                    video.youtube_video_id
+                  ) < (%s, %s)
+                """
+                params.extend([decoded.effective_at, decoded.youtube_video_id])
+            params.append(limit + 1)
+            db_cursor.execute(
+                f"""
+                WITH visible_video AS ({visible_cte})
+                SELECT video.id::text, video.youtube_video_id, channel.youtube_channel_id,
+                       video.title, video.description, video.published_at, video.duration_seconds,
+                       video.privacy_status, video.made_for_kids,
+                       COALESCE(video.source_fetched_at, 'epoch'::timestamptz) AS source_fetched_at,
+                       jsonb_build_object(
+                         'viewCount', COALESCE(stats.view_count, 0),
+                         'likeCount', COALESCE(stats.like_count, 0),
+                         'commentCount', COALESCE(stats.comment_count, 0)
+                       ) AS statistics
+                FROM visible_video membership
+                JOIN videos video ON video.id = membership.video_id
+                LEFT JOIN channels channel ON channel.id = video.channel_id
+                LEFT JOIN LATERAL (
+                  SELECT view_count, like_count, comment_count
+                  FROM video_stat_snapshots snapshot
+                  WHERE snapshot.video_id = video.id
+                  ORDER BY snapshot.fetched_at DESC LIMIT 1
+                ) stats ON TRUE
+                WHERE membership.first_seen_at <= %s
+                {after_sql}
+                ORDER BY COALESCE(video.published_at, video.source_fetched_at, 'epoch'::timestamptz) DESC,
+                         video.youtube_video_id DESC
+                LIMIT %s
+                """,
+                params,
+            )
+            candidates = [self._video(row) for row in db_cursor.fetchall()]
+            has_more = len(candidates) > limit
+            videos = candidates[:limit]
+            next_cursor = (
+                encode_source_video_cursor(
+                    videos[-1],
+                    snapshot_at=snapshot_at,
+                    scope=source_id,
+                    filter_hash=filter_hash,
+                )
+                if has_more and videos
+                else None
+            )
+            return {
+                "videos": videos,
+                "next_cursor": next_cursor,
+                "snapshot_at": snapshot_at,
+                "total": total,
+            }
+
+    def enqueue_missing_analysis_runs(self, *, limit: int = 100) -> int:
+        """Seed current target/source versions without duplicating active work."""
+
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                WITH candidate AS (
+                  SELECT target.id AS target_id, target.data_version,
+                         source.id AS source_id, latest_job.id AS job_id
+                  FROM collection_targets target
+                  LEFT JOIN LATERAL (
+                    SELECT id FROM collection_sources
+                    WHERE target_id = target.id ORDER BY created_at LIMIT 1
+                  ) source ON TRUE
+                  LEFT JOIN LATERAL (
+                    SELECT id FROM sync_jobs
+                    WHERE target_id = target.id AND parent_job_id IS NULL
+                      AND state IN ('completed', 'completed_with_warnings')
+                    ORDER BY created_at DESC LIMIT 1
+                  ) latest_job ON TRUE
+                  WHERE NOT EXISTS (
+                    SELECT 1 FROM analysis_runs run
+                    WHERE run.target_id = target.id
+                      AND run.data_version = target.data_version
+                      AND run.pipeline_version = 'deterministic-v2'
+                  )
+                  ORDER BY target.updated_at DESC
+                  LIMIT %s
+                )
+                INSERT INTO analysis_runs (
+                  source_id, target_id, job_id, data_version, state,
+                  pipeline_version, policy_gate_version, sample_plan
+                )
+                SELECT source_id, target_id, job_id, data_version, 'queued',
+                       'deterministic-v2', 'server-managed', %s
+                FROM candidate
+                ON CONFLICT DO NOTHING
+                """,
+                (
+                    limit,
+                    Json({"strategy": "per-video-recent", "maxComments": 50_000, "maxPerVideo": 1_000}),
+                ),
+            )
+            inserted = max(0, cursor.rowcount)
+            cursor.execute(
+                """
+                WITH candidate AS (
+                  SELECT source.id AS source_id, source.data_version,
+                         latest_job.id AS job_id
+                  FROM collection_sources source
+                  LEFT JOIN LATERAL (
+                    SELECT id FROM sync_jobs
+                    WHERE source_id = source.id AND target_id IS NULL
+                      AND parent_job_id IS NULL
+                      AND state IN ('completed', 'completed_with_warnings')
+                    ORDER BY created_at DESC LIMIT 1
+                  ) latest_job ON TRUE
+                  WHERE source.target_id IS NULL
+                    AND NOT EXISTS (
+                      SELECT 1 FROM analysis_runs run
+                      WHERE run.target_id IS NULL AND run.source_id = source.id
+                        AND run.data_version = source.data_version
+                        AND run.pipeline_version = 'deterministic-v2'
+                    )
+                  ORDER BY source.updated_at DESC
+                  LIMIT %s
+                )
+                INSERT INTO analysis_runs (
+                  source_id, job_id, data_version, state,
+                  pipeline_version, policy_gate_version, sample_plan
+                )
+                SELECT source_id, job_id, data_version, 'queued',
+                       'deterministic-v2', 'server-managed', %s
+                FROM candidate
+                ON CONFLICT DO NOTHING
+                """,
+                (
+                    max(0, limit - inserted),
+                    Json({"strategy": "per-video-recent", "maxComments": 50_000, "maxPerVideo": 1_000}),
+                ),
+            )
+            return inserted + max(0, cursor.rowcount)
+
+    def claim_next_analysis_run(
+        self, *, worker_id: str, lease_seconds: int = 900
+    ) -> dict[str, Any] | None:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                WITH candidate AS (
+                  SELECT id
+                  FROM analysis_runs
+                  WHERE (
+                    (state = 'queued' AND (resume_at IS NULL OR resume_at <= now()))
+                    OR (state = 'running' AND lease_expires_at <= now())
+                  )
+                  ORDER BY created_at
+                  FOR UPDATE SKIP LOCKED
+                  LIMIT 1
+                )
+                UPDATE analysis_runs run
+                SET state = 'running', lease_owner = %s,
+                    lease_expires_at = now() + (%s * interval '1 second'),
+                    started_at = COALESCE(started_at, now()), resume_at = NULL,
+                    last_error = NULL
+                FROM candidate
+                WHERE run.id = candidate.id
+                RETURNING run.id::text, run.source_id::text, run.target_id::text,
+                          run.job_id::text, run.data_version, run.retry_count,
+                          run.sample_plan, run.coverage
+                """,
+                (worker_id, lease_seconds),
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def complete_analysis_run(
+        self,
+        run_id: str,
+        *,
+        worker_id: str,
+        max_comments: int = 50_000,
+        max_per_video: int = 1_000,
+    ) -> dict[str, Any]:
+        """Build one bounded deterministic summary and atomically publish it."""
+
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT * FROM analysis_runs
+                WHERE id = %s AND state = 'running' AND lease_owner = %s
+                FOR UPDATE
+                """,
+                (run_id, worker_id),
+            )
+            run = cursor.fetchone()
+            if not run:
+                raise RepositoryError(f"Analysis run '{run_id}' is no longer leased by this worker")
+            target_id = str(run["target_id"]) if run.get("target_id") else None
+            source_id = str(run["source_id"]) if run.get("source_id") else None
+            if not target_id and not source_id:
+                raise RepositoryError(f"Analysis run '{run_id}' has no target or source scope")
+            visible_cte = self._visible_video_cte(target_id)
+            scope_value = target_id or source_id
+            cursor.execute(
+                f"""
+                WITH visible_video AS ({visible_cte}), comment_aggregate AS (
+                  SELECT comment.video_id, count(*)::bigint AS stored_count,
+                         max(COALESCE(comment.published_at, comment.source_fetched_at)) AS latest_published_at
+                  FROM comments comment
+                  JOIN visible_video membership ON membership.video_id = comment.video_id
+                  GROUP BY comment.video_id
+                )
+                SELECT count(*)::bigint AS video_count,
+                       COALESCE(sum(comment_aggregate.stored_count), 0)::bigint AS comment_count,
+                       max(video.published_at) AS latest_video_published_at,
+                       max(comment_aggregate.latest_published_at) AS latest_comment_published_at
+                FROM visible_video membership
+                JOIN videos video ON video.id = membership.video_id
+                LEFT JOIN comment_aggregate ON comment_aggregate.video_id = video.id
+                """,
+                (scope_value,),
+            )
+            aggregate = cursor.fetchone() or {}
+            video_count = int(aggregate.get("video_count") or 0)
+            per_video_limit = min(
+                max_per_video,
+                max(1, (max_comments + max(1, video_count) - 1) // max(1, video_count)),
+            )
+            cursor.execute(
+                f"""
+                WITH visible_video AS ({visible_cte})
+                SELECT sample.text_display
+                FROM visible_video membership
+                JOIN LATERAL (
+                  SELECT comment.text_display
+                  FROM comments comment
+                  WHERE comment.video_id = membership.video_id
+                    AND comment.text_display IS NOT NULL
+                    AND btrim(comment.text_display) <> ''
+                  ORDER BY COALESCE(comment.published_at, comment.source_fetched_at, 'epoch'::timestamptz) DESC,
+                           comment.youtube_comment_id DESC
+                  LIMIT %s
+                ) sample ON TRUE
+                ORDER BY membership.video_id
+                LIMIT %s
+                """,
+                (scope_value, per_video_limit, max_comments),
+            )
+            sampled_texts = [str(row["text_display"]) for row in cursor.fetchall()]
+            generated_at = utcnow()
+            summary = {
+                "videoCount": video_count,
+                "commentCount": int(aggregate.get("comment_count") or 0),
+                "latestVideoPublishedAt": aggregate.get("latest_video_published_at"),
+                "latestCommentPublishedAt": aggregate.get("latest_comment_published_at"),
+                "topWords": top_words_from_texts(sampled_texts),
+                "generatedAt": generated_at,
+            }
+            coverage = dict(run.get("coverage") or {})
+            coverage.update(
+                {
+                    "sampledComments": len(sampled_texts),
+                    "totalComments": summary["commentCount"],
+                    "sampleRatio": (
+                        len(sampled_texts) / summary["commentCount"]
+                        if summary["commentCount"]
+                        else 1.0
+                    ),
+                }
+            )
+            cursor.execute(
+                """
+                INSERT INTO analysis_results (analysis_run_id, result_kind, payload)
+                VALUES (%s, 'basic_summary', %s)
+                ON CONFLICT (analysis_run_id, result_kind) WHERE deleted_at IS NULL
+                DO UPDATE SET payload = EXCLUDED.payload, created_at = now()
+                """,
                 (run_id, Json(self._json_safe(summary))),
             )
-        return summary
+            cursor.execute(
+                """
+                UPDATE analysis_runs
+                SET state = 'completed', completed_at = now(), coverage = %s,
+                    lease_owner = NULL, lease_expires_at = NULL, last_error = NULL
+                WHERE id = %s AND lease_owner = %s
+                """,
+                (Json(coverage), run_id, worker_id),
+            )
+            if cursor.rowcount != 1:
+                raise RepositoryError(f"Analysis run '{run_id}' lease was lost")
+            return summary
+
+    def fail_analysis_run(
+        self,
+        run_id: str,
+        *,
+        worker_id: str,
+        error: str,
+        max_retries: int = 3,
+    ) -> str:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE analysis_runs
+                SET retry_count = retry_count + 1,
+                    state = CASE WHEN retry_count + 1 >= %s THEN 'failed' ELSE 'queued' END,
+                    resume_at = CASE
+                      WHEN retry_count + 1 >= %s THEN NULL
+                      ELSE now() + (power(2, retry_count) * interval '30 seconds')
+                    END,
+                    last_error = %s, lease_owner = NULL, lease_expires_at = NULL,
+                    completed_at = CASE WHEN retry_count + 1 >= %s THEN now() ELSE NULL END
+                WHERE id = %s AND state = 'running' AND lease_owner = %s
+                RETURNING state
+                """,
+                (max_retries, max_retries, error[:1_000], max_retries, run_id, worker_id),
+            )
+            row = cursor.fetchone()
+            return str(row["state"]) if row else "lost"
+
+    def save_analysis_summary(self, source_id: str) -> dict[str, Any]:
+        """Compatibility producer: enqueue bounded analysis instead of reading all comments."""
+
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT id::text, target_id::text, data_version FROM collection_sources WHERE id = %s",
+                (source_id,),
+            )
+            source = cursor.fetchone()
+            if not source:
+                raise NotFoundError(f"Source '{source_id}' was not found")
+            target_id = str(source["target_id"]) if source.get("target_id") else None
+            if target_id:
+                cursor.execute("SELECT data_version FROM collection_targets WHERE id = %s", (target_id,))
+                version = int(cursor.fetchone()["data_version"])
+            else:
+                version = int(source.get("data_version") or 0)
+            cursor.execute(
+                """
+                INSERT INTO analysis_runs (
+                  source_id, target_id, data_version, state,
+                  pipeline_version, policy_gate_version, sample_plan
+                )
+                SELECT %s, %s, %s, 'queued', 'deterministic-v2',
+                       'server-managed', %s
+                WHERE NOT EXISTS (
+                  SELECT 1 FROM analysis_runs
+                  WHERE data_version = %s AND pipeline_version = 'deterministic-v2'
+                    AND (
+                      (%s::uuid IS NOT NULL AND target_id = %s::uuid)
+                      OR (%s::uuid IS NULL AND target_id IS NULL AND source_id = %s::uuid)
+                    )
+                )
+                ON CONFLICT DO NOTHING
+                RETURNING id::text
+                """,
+                (
+                    source_id,
+                    target_id,
+                    version,
+                    Json({"strategy": "per-video-recent", "maxComments": 50_000, "maxPerVideo": 1_000}),
+                    version,
+                    target_id,
+                    target_id,
+                    target_id,
+                    source_id,
+                ),
+            )
+            row = cursor.fetchone()
+            return {"queued": bool(row), "dataVersion": version, "analysisRunId": str(row["id"]) if row else None}
 
     def get_source_results(self, source_id: str, *, owner_id: str | None = None) -> dict[str, Any]:
+        """Legacy compatibility response without hydrating comment rows.
+
+        The additive overview/video APIs are preferred, but older clients still
+        receive the complete video list and exact summary.  No comment text ever
+        crosses the database boundary for this endpoint.
+        """
+
+        overview = self.get_source_overview(source_id, owner_id=owner_id)
         with self._connection() as connection, connection.cursor() as cursor:
-            source_row = self._select_subscription_source(cursor, source_id, owner_id=owner_id)
-            if source_row:
-                source = self._source(source_row)
-            else:
-                if self._select_subscription(cursor, source_id) is not None:
-                    raise NotFoundError(f"Source '{source_id}' was not found")
-                source_row = self._select_source(cursor, source_id)
-                if not source_row:
-                    raise NotFoundError(f"Source '{source_id}' was not found")
-                if owner_id is not None:
-                    if source_row.get("target_id"):
-                        raise NotFoundError(f"Source '{source_id}' was not found")
-                    cursor.execute("SELECT 1 FROM collection_sources WHERE id = %s AND owner_id = %s", (source_id, owner_id))
-                    if not cursor.fetchone():
-                        raise NotFoundError(f"Source '{source_id}' was not found")
-                source = self._source(source_row)
-            if source.target_id:
-                cursor.execute("SELECT * FROM sync_jobs WHERE target_id = %s ORDER BY created_at DESC LIMIT 1", (source.target_id,))
-            else:
-                cursor.execute("SELECT * FROM sync_jobs WHERE source_id = %s ORDER BY created_at DESC LIMIT 1", (source_id,))
-            latest_row = cursor.fetchone()
-            videos = self._target_videos(cursor, source.target_id) if source.target_id else self._source_videos(cursor, source_id)
-            comments = self._comments(cursor, [video.youtube_video_id for video in videos])
-            summary = build_summary(videos, comments)
-            return {"source": source, "latest_job": self._job(latest_row) if latest_row else None, "videos": videos, "comments": comments, "analysis": summary}
+            source = overview["source"]
+            videos = (
+                self._target_videos(cursor, source.target_id)
+                if source.target_id
+                else self._source_videos(cursor, source_id)
+            )
+            return {
+                "source": source,
+                "latest_job": overview.get("latest_job"),
+                "videos": videos,
+                "comments": [],
+                "analysis": overview["summary"],
+            }
 
     def get_video_comments(self, video_id: str, *, owner_id: str | None = None) -> dict[str, Any]:
         with self._connection() as connection, connection.cursor() as cursor:
@@ -1985,8 +3234,42 @@ class PostgresRepository(CollectionRepository):
             if not row:
                 raise NotFoundError(f"Video '{video_id}' was not found")
             video = self._video(row)
-            comments = self._comments(cursor, [video.youtube_video_id])
-            return {"video": video, "comments": comments, "summary": build_summary([video], comments)}
+            cursor.execute(
+                """
+                SELECT comment.id::text, comment.youtube_comment_id,
+                       video.youtube_video_id, comment.youtube_parent_comment_id,
+                       comment.youtube_thread_id, comment.author_channel_id,
+                       comment.author_display_name, comment.text_display,
+                       comment.like_count, comment.published_at, comment.updated_at,
+                       comment.source_fetched_at
+                FROM comments comment
+                JOIN videos video ON video.id = comment.video_id
+                WHERE comment.video_id = %s
+                ORDER BY COALESCE(comment.published_at, comment.source_fetched_at, 'epoch'::timestamptz) DESC,
+                         comment.youtube_comment_id DESC
+                LIMIT 100
+                """,
+                (row["id"],),
+            )
+            comments = [self._comment(item) for item in cursor.fetchall()]
+            cursor.execute(
+                """
+                SELECT count(*)::bigint AS comment_count,
+                       max(COALESCE(published_at, source_fetched_at)) AS latest_comment_published_at
+                FROM comments WHERE video_id = %s
+                """,
+                (row["id"],),
+            )
+            aggregate = cursor.fetchone()
+            summary = {
+                "videoCount": 1,
+                "commentCount": int(aggregate["comment_count"]),
+                "latestVideoPublishedAt": video.published_at,
+                "latestCommentPublishedAt": aggregate.get("latest_comment_published_at"),
+                "topWords": top_words_from_texts(comment.text_display for comment in comments),
+                "generatedAt": utcnow(),
+            }
+            return {"video": video, "comments": comments, "summary": summary}
 
     def get_video_comment_threads(
         self, video_id: str, *, owner_id: str | None = None, cursor: str | None = None,
@@ -2386,116 +3669,321 @@ class PostgresRepository(CollectionRepository):
                 )
             return dispatched
 
-    def list_explore(
-        self, *, limit: int = 60, offset: int = 0, channel_id: str | None = None, owner_id: str | None = None
-    ) -> dict[str, Any]:
+    def list_explore_channels(self, *, owner_id: str | None = None) -> list[dict[str, Any]]:
+        """Aggregate each channel once over the caller's distinct visible videos."""
+
+        if owner_id is None:
+            visible_cte = """
+                SELECT video.id AS video_id, video.channel_id, video.source_fetched_at
+                FROM videos video
+                WHERE video.channel_id IS NOT NULL
+            """
+            visible_params: tuple[Any, ...] = ()
+        else:
+            visible_cte = """
+                SELECT membership.video_id, video.channel_id,
+                       max(video.source_fetched_at) AS source_fetched_at
+                FROM collection_target_videos membership
+                JOIN collection_subscriptions subscription
+                  ON subscription.target_id = membership.target_id
+                 AND subscription.user_id = %s::uuid
+                JOIN videos video ON video.id = membership.video_id
+                WHERE video.channel_id IS NOT NULL
+                GROUP BY membership.video_id, video.channel_id
+            """
+            visible_params = (owner_id,)
+
+        if self.enable_explore_rollup and self.enable_comment_rollup_read:
+            comment_cte = """
+                SELECT visible.channel_id,
+                       COALESCE(sum(rollup.stored_count), 0)::bigint AS comment_count
+                FROM visible_video visible
+                LEFT JOIN video_comment_rollups rollup ON rollup.video_id = visible.video_id
+                GROUP BY visible.channel_id
+            """
+        else:
+            comment_cte = """
+                SELECT visible.channel_id, count(comment.id)::bigint AS comment_count
+                FROM visible_video visible
+                LEFT JOIN comments comment ON comment.video_id = visible.video_id
+                GROUP BY visible.channel_id
+            """
+
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
-                """
-                SELECT c.youtube_channel_id, c.handle, c.title, c.description, c.thumbnail_url,
-                       COALESCE(video_counts.video_count, 0)::integer AS video_count,
-                       COALESCE(comment_counts.comment_count, 0)::integer AS comment_count,
-                       COALESCE(video_stats.youtube_comment_count, 0)::integer AS youtube_comment_count,
-                       channel_stats.subscriber_count, channel_stats.view_count,
-                       channel_stats.video_count AS youtube_video_count, channel_stats.hidden_subscriber_count,
-                       GREATEST(c.source_fetched_at, video_counts.last_fetched_at) AS last_fetched_at,
-                       target.id::text AS target_id, pin.enabled AS pin_enabled, pin.interval_minutes AS pin_interval_minutes,
-                       pin.next_run_at AS pin_next_run_at, pin.last_dispatched_at AS pin_last_dispatched_at
-                FROM channels c
-                LEFT JOIN LATERAL (
-                    SELECT count(*) AS video_count, max(v.source_fetched_at) AS last_fetched_at
-                    FROM videos v
-                    WHERE v.channel_id = c.id
-                      AND (
-                        %s::uuid IS NULL
-                        OR EXISTS (
-                          SELECT 1 FROM collection_target_videos membership
-                          JOIN collection_subscriptions subscription ON subscription.target_id = membership.target_id
-                          WHERE membership.video_id = v.id AND subscription.user_id = %s::uuid
-                        )
-                      )
-                ) video_counts ON TRUE
-                LEFT JOIN LATERAL (
-                    SELECT count(*) AS comment_count
-                    FROM comments cm JOIN videos v ON v.id = cm.video_id
-                    WHERE v.channel_id = c.id
-                      AND (
-                        %s::uuid IS NULL
-                        OR EXISTS (
-                          SELECT 1 FROM collection_target_videos membership
-                          JOIN collection_subscriptions subscription ON subscription.target_id = membership.target_id
-                          WHERE membership.video_id = v.id AND subscription.user_id = %s::uuid
-                        )
-                      )
-                ) comment_counts ON TRUE
-                LEFT JOIN LATERAL (
-                    SELECT sum(COALESCE(latest_stats.comment_count, 0)) AS youtube_comment_count
-                    FROM videos v
-                    LEFT JOIN LATERAL (
-                        SELECT comment_count FROM video_stat_snapshots
-                        WHERE video_id = v.id
-                        ORDER BY fetched_at DESC
-                        LIMIT 1
-                    ) latest_stats ON TRUE
-                    WHERE v.channel_id = c.id
-                      AND (
-                        %s::uuid IS NULL
-                        OR EXISTS (
-                          SELECT 1 FROM collection_target_videos membership
-                          JOIN collection_subscriptions subscription ON subscription.target_id = membership.target_id
-                          WHERE membership.video_id = v.id AND subscription.user_id = %s::uuid
-                        )
-                      )
-                ) video_stats ON TRUE
-                LEFT JOIN LATERAL (SELECT subscriber_count, view_count, video_count, hidden_subscriber_count FROM channel_snapshots WHERE channel_id = c.id AND (subscriber_count IS NOT NULL OR view_count IS NOT NULL OR video_count IS NOT NULL OR hidden_subscriber_count IS NOT NULL) ORDER BY fetched_at DESC LIMIT 1) channel_stats ON TRUE
-                LEFT JOIN collection_targets target ON target.resolved_channel_id = c.id
-                    AND (
-                      %s::uuid IS NULL
-                      OR EXISTS (SELECT 1 FROM collection_subscriptions subscription WHERE subscription.target_id = target.id AND subscription.user_id = %s::uuid)
-                    )
-                LEFT JOIN collection_target_pins pin ON pin.target_id = target.id
-                WHERE (
-                    %s::uuid IS NULL
-                    OR EXISTS (
-                      SELECT 1
-                      FROM videos visible_video
-                      JOIN collection_target_videos membership ON membership.video_id = visible_video.id
-                      JOIN collection_subscriptions subscription ON subscription.target_id = membership.target_id
-                      WHERE visible_video.channel_id = c.id AND subscription.user_id = %s::uuid
-                    )
+                f"""
+                WITH visible_video AS ({visible_cte}),
+                video_aggregate AS (
+                  SELECT channel_id, count(*)::bigint AS video_count,
+                         max(source_fetched_at) AS last_fetched_at
+                  FROM visible_video GROUP BY channel_id
+                ),
+                comment_aggregate AS ({comment_cte}),
+                latest_video_stats AS (
+                  SELECT DISTINCT ON (snapshot.video_id)
+                         snapshot.video_id, snapshot.comment_count
+                  FROM video_stat_snapshots snapshot
+                  JOIN visible_video visible ON visible.video_id = snapshot.video_id
+                  ORDER BY snapshot.video_id, snapshot.fetched_at DESC
+                ),
+                youtube_comment_aggregate AS (
+                  SELECT visible.channel_id,
+                         COALESCE(sum(COALESCE(stats.comment_count, 0)), 0)::bigint AS youtube_comment_count
+                  FROM visible_video visible
+                  LEFT JOIN latest_video_stats stats ON stats.video_id = visible.video_id
+                  GROUP BY visible.channel_id
                 )
-                ORDER BY GREATEST(c.source_fetched_at, video_counts.last_fetched_at) DESC NULLS LAST, c.title
+                SELECT channel.youtube_channel_id, channel.handle, channel.title,
+                       channel.description, channel.thumbnail_url,
+                       video_aggregate.video_count,
+                       COALESCE(comment_aggregate.comment_count, 0) AS comment_count,
+                       COALESCE(youtube_comments.youtube_comment_count, 0) AS youtube_comment_count,
+                       channel_stats.subscriber_count, channel_stats.view_count,
+                       channel_stats.video_count AS youtube_video_count,
+                       channel_stats.hidden_subscriber_count,
+                       GREATEST(channel.source_fetched_at, video_aggregate.last_fetched_at) AS last_fetched_at,
+                       target.id::text AS target_id,
+                       pin.enabled AS pin_enabled, pin.interval_minutes AS pin_interval_minutes,
+                       pin.next_run_at AS pin_next_run_at,
+                       pin.last_dispatched_at AS pin_last_dispatched_at
+                FROM video_aggregate
+                JOIN channels channel ON channel.id = video_aggregate.channel_id
+                LEFT JOIN comment_aggregate ON comment_aggregate.channel_id = channel.id
+                LEFT JOIN youtube_comment_aggregate youtube_comments ON youtube_comments.channel_id = channel.id
+                LEFT JOIN LATERAL (
+                  SELECT subscriber_count, view_count, video_count, hidden_subscriber_count
+                  FROM channel_snapshots snapshot
+                  WHERE snapshot.channel_id = channel.id
+                    AND (subscriber_count IS NOT NULL OR view_count IS NOT NULL
+                         OR video_count IS NOT NULL OR hidden_subscriber_count IS NOT NULL)
+                  ORDER BY fetched_at DESC LIMIT 1
+                ) channel_stats ON TRUE
+                LEFT JOIN LATERAL (
+                  SELECT candidate.id
+                  FROM collection_targets candidate
+                  WHERE candidate.resolved_channel_id = channel.id
+                    AND (
+                      %s::uuid IS NULL OR EXISTS (
+                        SELECT 1 FROM collection_subscriptions subscription
+                        WHERE subscription.target_id = candidate.id
+                          AND subscription.user_id = %s::uuid
+                      )
+                    )
+                  ORDER BY candidate.updated_at DESC, candidate.id
+                  LIMIT 1
+                ) target ON TRUE
+                LEFT JOIN collection_target_pins pin ON pin.target_id = target.id
+                ORDER BY GREATEST(channel.source_fetched_at, video_aggregate.last_fetched_at) DESC NULLS LAST,
+                         channel.title, channel.youtube_channel_id
                 """,
-                (owner_id, owner_id, owner_id, owner_id, owner_id, owner_id, owner_id, owner_id, owner_id, owner_id),
+                (*visible_params, owner_id, owner_id),
             )
-            channels = []
+            channels: list[dict[str, Any]] = []
             for row in cursor.fetchall():
                 pin = None
                 if row.get("pin_enabled") is not None:
-                    pin = {"target_id": str(row["target_id"]), "enabled": bool(row["pin_enabled"]), "interval_minutes": int(row["pin_interval_minutes"]), "next_run_at": row["pin_next_run_at"], "last_dispatched_at": row["pin_last_dispatched_at"]}
-                video_count = int(row["video_count"])
+                    pin = {
+                        "target_id": str(row["target_id"]),
+                        "enabled": bool(row["pin_enabled"]),
+                        "interval_minutes": int(row["pin_interval_minutes"]),
+                        "next_run_at": row["pin_next_run_at"],
+                        "last_dispatched_at": row["pin_last_dispatched_at"],
+                    }
+                video_count = int(row["video_count"] or 0)
                 youtube_video_count = int(row["youtube_video_count"] or 0)
-                comment_count = int(row["comment_count"])
-                youtube_comment_count = int(row["youtube_comment_count"])
-                channels.append({"youtubeChannelId": row["youtube_channel_id"], "handle": row["handle"], "title": row["title"], "description": row["description"], "thumbnailUrl": row["thumbnail_url"], "subscriberCount": row["subscriber_count"], "viewCount": row["view_count"], "youtubeVideoCount": row["youtube_video_count"], "hiddenSubscriberCount": row["hidden_subscriber_count"], "videoCount": video_count, "commentCount": comment_count, "youtubeCommentCount": youtube_comment_count, "videoCollectionRate": min(100, round((video_count / youtube_video_count) * 100)) if youtube_video_count else 0, "commentCollectionRate": min(100, round((comment_count / youtube_comment_count) * 100)) if youtube_comment_count else 0, "lastFetchedAt": row["last_fetched_at"], "targetId": str(row["target_id"]) if row.get("target_id") else None, "pin": pin})
+                comment_count = int(row["comment_count"] or 0)
+                youtube_comment_count = int(row["youtube_comment_count"] or 0)
+                channels.append(
+                    {
+                        "youtubeChannelId": row["youtube_channel_id"],
+                        "handle": row["handle"],
+                        "title": row["title"],
+                        "description": row["description"],
+                        "thumbnailUrl": row["thumbnail_url"],
+                        "subscriberCount": row["subscriber_count"],
+                        "viewCount": row["view_count"],
+                        "youtubeVideoCount": row["youtube_video_count"],
+                        "hiddenSubscriberCount": row["hidden_subscriber_count"],
+                        "videoCount": video_count,
+                        "commentCount": comment_count,
+                        "youtubeCommentCount": youtube_comment_count,
+                        "videoCollectionRate": (
+                            min(100, round((video_count / youtube_video_count) * 100))
+                            if youtube_video_count else 0
+                        ),
+                        "commentCollectionRate": (
+                            min(100, round((comment_count / youtube_comment_count) * 100))
+                            if youtube_comment_count else 0
+                        ),
+                        "lastFetchedAt": row["last_fetched_at"],
+                        "targetId": str(row["target_id"]) if row.get("target_id") else None,
+                        "pin": pin,
+                    }
+                )
+            return channels
+
+    def list_explore_videos_page(
+        self,
+        *,
+        owner_id: str | None = None,
+        channel_id: str | None = None,
+        cursor: str | None = None,
+        limit: int = 60,
+    ) -> dict[str, Any]:
+        scope = f"owner:{owner_id}" if owner_id is not None else "public"
+        filter_hash = explore_video_filter_hash(channel_id)
+        decoded = decode_explore_video_cursor(
+            cursor, scope=scope, filter_hash=filter_hash
+        )
+        snapshot_at = decoded.snapshot_at if decoded else utcnow()
+
+        if owner_id is None:
+            visible_cte = """
+                SELECT video.id AS video_id,
+                       COALESCE(video.source_fetched_at, 'epoch'::timestamptz) AS first_seen_at
+                FROM videos video
+            """
+            visible_params: list[Any] = []
+        else:
+            visible_cte = """
+                SELECT membership.video_id,
+                       min(GREATEST(membership.first_seen_at, subscription.created_at)) AS first_seen_at
+                FROM collection_target_videos membership
+                JOIN collection_subscriptions subscription
+                  ON subscription.target_id = membership.target_id
+                 AND subscription.user_id = %s::uuid
+                GROUP BY membership.video_id
+            """
+            visible_params = [owner_id]
+
+        channel_filter = ""
+        filter_params: list[Any] = []
+        if channel_id:
+            channel_filter = "AND channel.youtube_channel_id = %s"
+            filter_params.append(channel_id)
+        cursor_filter = ""
+        cursor_params: list[Any] = []
+        if decoded:
+            cursor_filter = """
+              AND (
+                COALESCE(video.published_at, video.source_fetched_at, 'epoch'::timestamptz),
+                COALESCE(video.source_fetched_at, 'epoch'::timestamptz),
+                video.youtube_video_id
+              ) < (%s, %s, %s)
+            """
+            cursor_params.extend(
+                [decoded.effective_at, decoded.fetched_at, decoded.youtube_video_id]
+            )
+
+        with self._connection() as connection, connection.cursor() as db_cursor:
+            db_cursor.execute(
+                f"""
+                WITH visible_video AS ({visible_cte})
+                SELECT count(*)::bigint AS total
+                FROM visible_video visible
+                JOIN videos video ON video.id = visible.video_id
+                LEFT JOIN channels channel ON channel.id = video.channel_id
+                WHERE visible.first_seen_at <= %s
+                {channel_filter}
+                """,
+                (*visible_params, snapshot_at, *filter_params),
+            )
+            total = int(db_cursor.fetchone()["total"])
+            db_cursor.execute(
+                f"""
+                WITH visible_video AS ({visible_cte})
+                SELECT video.id::text, video.youtube_video_id, channel.youtube_channel_id,
+                       video.title, video.description, video.published_at,
+                       video.duration_seconds, video.privacy_status, video.made_for_kids,
+                       COALESCE(video.source_fetched_at, 'epoch'::timestamptz) AS source_fetched_at,
+                       jsonb_build_object(
+                         'viewCount', COALESCE(stats.view_count, 0),
+                         'likeCount', COALESCE(stats.like_count, 0),
+                         'commentCount', COALESCE(stats.comment_count, 0)
+                       ) AS statistics
+                FROM visible_video visible
+                JOIN videos video ON video.id = visible.video_id
+                LEFT JOIN channels channel ON channel.id = video.channel_id
+                LEFT JOIN LATERAL (
+                  SELECT view_count, like_count, comment_count
+                  FROM video_stat_snapshots snapshot
+                  WHERE snapshot.video_id = video.id
+                  ORDER BY snapshot.fetched_at DESC LIMIT 1
+                ) stats ON TRUE
+                WHERE visible.first_seen_at <= %s
+                {channel_filter}
+                {cursor_filter}
+                ORDER BY COALESCE(video.published_at, video.source_fetched_at, 'epoch'::timestamptz) DESC,
+                         COALESCE(video.source_fetched_at, 'epoch'::timestamptz) DESC,
+                         video.youtube_video_id DESC
+                LIMIT %s
+                """,
+                (
+                    *visible_params,
+                    snapshot_at,
+                    *filter_params,
+                    *cursor_params,
+                    limit + 1,
+                ),
+            )
+            candidates = [self._video(row) for row in db_cursor.fetchall()]
+            has_more = len(candidates) > limit
+            videos = candidates[:limit]
+            next_cursor = (
+                encode_explore_video_cursor(
+                    videos[-1],
+                    snapshot_at=snapshot_at,
+                    scope=scope,
+                    filter_hash=filter_hash,
+                )
+                if has_more and videos else None
+            )
+            return {
+                "videos": videos,
+                "next_cursor": next_cursor,
+                "snapshot_at": snapshot_at,
+                "total": total,
+            }
+
+    def list_explore(
+        self, *, limit: int = 60, offset: int = 0, channel_id: str | None = None, owner_id: str | None = None
+    ) -> dict[str, Any]:
+        # Compatibility wrapper: keep the old offset contract while reusing the
+        # set-based channel aggregate. New clients use the keyset endpoint.
+        channels = self.list_explore_channels(owner_id=owner_id)
+        with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT v.id::text, v.youtube_video_id, c.youtube_channel_id, v.title, v.description, v.published_at,
-                       v.duration_seconds, v.privacy_status, v.made_for_kids, v.source_fetched_at,
-                       jsonb_build_object('viewCount', COALESCE(stats.view_count, 0), 'likeCount', COALESCE(stats.like_count, 0), 'commentCount', COALESCE(stats.comment_count, 0)) AS statistics
-                FROM videos v
-                LEFT JOIN channels c ON c.id = v.channel_id
-                LEFT JOIN LATERAL (SELECT view_count, like_count, comment_count FROM video_stat_snapshots WHERE video_id = v.id ORDER BY fetched_at DESC LIMIT 1) stats ON TRUE
-                WHERE (
-                  %s::uuid IS NULL
-                  OR EXISTS (
-                    SELECT 1 FROM collection_target_videos membership
-                    JOIN collection_subscriptions subscription ON subscription.target_id = membership.target_id
-                    WHERE membership.video_id = v.id AND subscription.user_id = %s::uuid
-                  )
+                WITH visible_video AS (
+                  SELECT DISTINCT video.id
+                  FROM videos video
+                  LEFT JOIN collection_target_videos membership ON membership.video_id = video.id
+                  LEFT JOIN collection_subscriptions subscription
+                    ON subscription.target_id = membership.target_id
+                   AND subscription.user_id = %s::uuid
+                  WHERE %s::uuid IS NULL OR subscription.id IS NOT NULL
                 )
-                  AND (%s::text IS NULL OR c.youtube_channel_id = %s)
-                ORDER BY v.published_at DESC NULLS LAST, v.source_fetched_at DESC NULLS LAST
+                SELECT video.id::text, video.youtube_video_id, channel.youtube_channel_id,
+                       video.title, video.description, video.published_at,
+                       video.duration_seconds, video.privacy_status, video.made_for_kids,
+                       COALESCE(video.source_fetched_at, 'epoch'::timestamptz) AS source_fetched_at,
+                       jsonb_build_object(
+                         'viewCount', COALESCE(stats.view_count, 0),
+                         'likeCount', COALESCE(stats.like_count, 0),
+                         'commentCount', COALESCE(stats.comment_count, 0)
+                       ) AS statistics
+                FROM visible_video visible
+                JOIN videos video ON video.id = visible.id
+                LEFT JOIN channels channel ON channel.id = video.channel_id
+                LEFT JOIN LATERAL (
+                  SELECT view_count, like_count, comment_count
+                  FROM video_stat_snapshots snapshot
+                  WHERE snapshot.video_id = video.id
+                  ORDER BY snapshot.fetched_at DESC LIMIT 1
+                ) stats ON TRUE
+                WHERE (%s::text IS NULL OR channel.youtube_channel_id = %s)
+                ORDER BY COALESCE(video.published_at, video.source_fetched_at, 'epoch'::timestamptz) DESC,
+                         video.source_fetched_at DESC, video.youtube_video_id DESC
                 LIMIT %s OFFSET %s
                 """,
                 (owner_id, owner_id, channel_id, channel_id, limit + 1, offset),
@@ -2552,23 +4040,50 @@ class PostgresRepository(CollectionRepository):
         def escaped_pattern(value: str) -> str:
             return "%" + value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
 
-        exact_patterns = [escaped_pattern(term) for term in terms]
-        normalized_terms = [normalize_search_text(term) for term in terms]
-        first_patterns = [escaped_pattern(term[0]) for term in normalized_terms if term]
-        last_patterns = [escaped_pattern(term[-1]) for term in normalized_terms if term]
-        candidate_limit = 5_000
+        exact_patterns = [escaped_pattern(term.casefold()) for term in terms]
+        normalized_query = normalize_search_text(query)
+        short_query = len(normalized_query) == 2
+        prefix_pattern = (
+            normalized_query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        )
+        # ACL is applied inside each candidate query, before this hard cap.
+        candidate_limit = min(300, max(100, limit * 10))
 
         with self._connection() as connection, connection.cursor() as cursor:
             video_results: list[dict[str, Any]] = []
             if scope in {"all", "videos"}:
+                if short_query:
+                    video_join = ""
+                    video_match = """
+                      (v.youtube_video_id ILIKE %s ESCAPE '\\'
+                       OR ltrim(COALESCE(c.handle, ''), '@') ILIKE %s ESCAPE '\\'
+                       OR COALESCE(v.title, '') ILIKE %s ESCAPE '\\')
+                    """
+                    video_order = "v.source_fetched_at DESC NULLS LAST"
+                    video_params: tuple[Any, ...] = (
+                        owner_id, owner_id, prefix_pattern, prefix_pattern, prefix_pattern, candidate_limit
+                    )
+                elif self.enable_search_trigram:
+                    video_join = "JOIN video_search_documents search_document ON search_document.video_id = v.id"
+                    video_match = "(search_document.document ILIKE ALL(%s) OR search_document.document %% %s)"
+                    video_order = "similarity(search_document.document, %s) DESC, v.source_fetched_at DESC NULLS LAST"
+                    video_params = (
+                        owner_id, owner_id, exact_patterns, normalized_query, normalized_query, candidate_limit
+                    )
+                else:
+                    video_join = ""
+                    video_match = "lower(concat_ws(' ', v.title, v.description, c.title, c.handle)) ILIKE ALL(%s)"
+                    video_order = "v.source_fetched_at DESC NULLS LAST"
+                    video_params = (owner_id, owner_id, exact_patterns, candidate_limit)
                 cursor.execute(
-                """
+                f"""
                 SELECT v.id::text, v.youtube_video_id, c.youtube_channel_id, c.title AS channel_title,
                        c.handle AS channel_handle, v.title, v.description, v.published_at,
                        v.duration_seconds, v.privacy_status, v.made_for_kids, v.source_fetched_at,
                        jsonb_build_object('viewCount', COALESCE(stats.view_count, 0), 'likeCount', COALESCE(stats.like_count, 0), 'commentCount', COALESCE(stats.comment_count, 0)) AS statistics
                 FROM videos v
                 LEFT JOIN channels c ON c.id = v.channel_id
+                {video_join}
                 LEFT JOIN LATERAL (
                   SELECT view_count, like_count, comment_count FROM video_stat_snapshots
                   WHERE video_id = v.id ORDER BY fetched_at DESC LIMIT 1
@@ -2581,31 +4096,52 @@ class PostgresRepository(CollectionRepository):
                       WHERE membership.video_id = v.id AND subscription.user_id = %s::uuid
                     )
                   )
-                  AND (
-                    concat_ws(' ', v.title, v.description, c.title, c.handle) ILIKE ALL(%s)
-                    OR (
-                      concat_ws(' ', v.title, v.description, c.title, c.handle) ILIKE ALL(%s)
-                      AND concat_ws(' ', v.title, v.description, c.title, c.handle) ILIKE ALL(%s)
-                    )
-                  )
-                ORDER BY CASE WHEN concat_ws(' ', v.title, v.description, c.title, c.handle) ILIKE ALL(%s) THEN 0 ELSE 1 END,
-                         v.source_fetched_at DESC NULLS LAST
+                  AND {video_match}
+                ORDER BY {video_order}
                 LIMIT %s
                 """,
-                (owner_id, owner_id, exact_patterns, first_patterns, last_patterns, exact_patterns, candidate_limit),
+                video_params,
                 )
                 for row in cursor.fetchall():
-                    score, matched_fields = rank_text_fields(query, {
-                        "title": row.get("title"), "description": row.get("description"),
-                        "channel": row.get("channel_title"), "handle": row.get("channel_handle"),
-                    })
+                    if short_query:
+                        short_fields = {
+                            "id": row.get("youtube_video_id"),
+                            "title": row.get("title"),
+                            "handle": row.get("channel_handle"),
+                        }
+                        matched_fields = [
+                            name
+                            for name, value in short_fields.items()
+                            if value
+                            and normalize_search_text(str(value)).startswith(normalized_query)
+                        ]
+                        score = 1.0 if matched_fields else 0.0
+                    else:
+                        score, matched_fields = rank_text_fields(query, {
+                            "id": row.get("youtube_video_id"),
+                            "title": row.get("title"), "description": row.get("description"),
+                            "channel": row.get("channel_title"), "handle": row.get("channel_handle"),
+                        })
                     if matched_fields:
                         video_results.append({"video": self._video(row), "score": score, "matched_fields": matched_fields})
 
             comment_results: list[dict[str, Any]] = []
-            if scope in {"all", "comments"}:
+            if scope in {"all", "comments"} and not short_query:
+                if self.enable_search_trigram:
+                    comment_match = """
+                      (lower(COALESCE(cm.text_display, '')) ILIKE ALL(%s)
+                       OR lower(COALESCE(cm.text_display, '')) %% %s)
+                    """
+                    comment_order = "similarity(lower(COALESCE(cm.text_display, '')), %s) DESC, cm.source_fetched_at DESC NULLS LAST"
+                    comment_params: tuple[Any, ...] = (
+                        owner_id, owner_id, exact_patterns, normalized_query, normalized_query, candidate_limit
+                    )
+                else:
+                    comment_match = "lower(COALESCE(cm.text_display, '')) ILIKE ALL(%s)"
+                    comment_order = "cm.source_fetched_at DESC NULLS LAST"
+                    comment_params = (owner_id, owner_id, exact_patterns, candidate_limit)
                 cursor.execute(
-                """
+                f"""
                 SELECT cm.id::text AS comment_id, cm.youtube_comment_id, cm.youtube_parent_comment_id,
                        cm.youtube_thread_id, cm.author_channel_id, cm.author_display_name, cm.text_display, cm.like_count, cm.published_at AS comment_published_at,
                        cm.updated_at AS comment_updated_at, cm.source_fetched_at AS comment_fetched_at,
@@ -2629,18 +4165,12 @@ class PostgresRepository(CollectionRepository):
                       WHERE membership.video_id = v.id AND subscription.user_id = %s::uuid
                     )
                   )
-                  AND (
-                    cm.text_display ILIKE ALL(%s)
-                    OR (
-                      cm.text_display ILIKE ALL(%s)
-                      AND cm.text_display ILIKE ALL(%s)
-                    )
-                  )
-                ORDER BY CASE WHEN cm.text_display ILIKE ALL(%s) THEN 0 ELSE 1 END,
-                         cm.source_fetched_at DESC NULLS LAST
+                  AND cm.text_display IS NOT NULL
+                  AND {comment_match}
+                ORDER BY {comment_order}
                 LIMIT %s
                 """,
-                (owner_id, owner_id, exact_patterns, first_patterns, last_patterns, exact_patterns, candidate_limit),
+                comment_params,
                 )
                 for row in cursor.fetchall():
                     score, matched_fields = rank_text_fields(query, {"comment": row.get("text_display")})

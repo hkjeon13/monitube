@@ -6,7 +6,11 @@ import hashlib
 from typing import Literal
 
 from .channel_resolution import resolve_channel_input
+from .cache import DerivedCache
+from .fuzzy_search import normalize_search_text
 from .contracts import (
+    ActiveParentJob,
+    ActiveParentJobsResponse,
     ChannelLookup,
     ChannelCollectionSource,
     ChannelResolutionResponse,
@@ -25,6 +29,8 @@ from .contracts import (
     CollectionRequestCreate,
     CollectionRequestResponse,
     ExploreResponse,
+    ExploreChannelsResponse,
+    ExploreVideosPageResponse,
     SearchCommentResult,
     SearchVideoResult,
     TargetPin,
@@ -36,6 +42,10 @@ from .contracts import (
     KeywordCollectionSource,
     PartialError,
     SourceResultsResponse,
+    SourceOverviewResponse,
+    SourceOverviewSummary,
+    SourceTopVideos,
+    SourceVideosPageResponse,
     UnifiedSearchResponse,
     SourceConfig,
     VideoCommentsResponse,
@@ -48,6 +58,10 @@ from .contracts import (
 from .domain import CollectionSubmission, CommentRecord, JobRecord, SourceRecord, SourceType, VideoRecord
 from .repositories import CollectionRepository
 from .video_resolution import resolve_video_input
+
+
+class InvalidSearchQueryError(ValueError):
+    """A search query that becomes too short after normalization."""
 
 
 def _source_contract(record: SourceRecord) -> CollectionSource:
@@ -152,9 +166,24 @@ class CollectionService:
     upstream credential configuration and never accepts caller-selected credentials.
     """
 
-    def __init__(self, repository: CollectionRepository, *, runtime_config_id: str | None = None) -> None:
+    def __init__(
+        self,
+        repository: CollectionRepository,
+        *,
+        runtime_config_id: str | None = None,
+        derived_cache: DerivedCache | None = None,
+    ) -> None:
         self.repository = repository
         self.runtime_config_id = runtime_config_id
+        self.derived_cache = derived_cache
+
+    def _explore_cache_generation(self, owner_id: str) -> int | str:
+        reader = getattr(self.repository, "get_owner_explore_generation", None)
+        if callable(reader):
+            return reader(owner_id=owner_id)
+        if self.derived_cache:
+            return self.derived_cache.owner_generation(owner_id)
+        return 0
 
     def resolve_channel(self, input_value: str) -> ChannelResolutionResponse:
         resolution = resolve_channel_input(input_value)
@@ -322,6 +351,18 @@ class CollectionService:
             for record in self.repository.list_jobs_for_source(source_id, limit=limit, owner_id=owner_id)
         ]
 
+    def list_active_parent_jobs(self, *, owner_id: str) -> ActiveParentJobsResponse:
+        return ActiveParentJobsResponse(
+            jobs=[
+                ActiveParentJob(
+                    sourceId=item["source_id"],
+                    targetId=item.get("target_id"),
+                    job=_job_contract(item["job"]),
+                )
+                for item in self.repository.list_active_parent_jobs(owner_id=owner_id)
+            ]
+        )
+
     def get_source_results(self, source_id: str, *, owner_id: str | None = None) -> SourceResultsResponse:
         result = self.repository.get_source_results(source_id, owner_id=owner_id)
         source = _source_contract(result["source"])
@@ -333,6 +374,82 @@ class CollectionService:
             videos=[_video_contract(video) for video in result["videos"]],
             commentSummary=_comment_summary(summary),
             analysis=AnalysisSummary.model_validate(summary),
+        )
+
+    def get_source_overview(
+        self, source_id: str, *, owner_id: str | None = None
+    ) -> SourceOverviewResponse:
+        if self.derived_cache and self.derived_cache.enabled:
+            # Resolve current ACL and the non-cached subscription DTO first.
+            source_record = self.repository.get_source(source_id, owner_id=owner_id)
+            version_reader = getattr(self.repository, "get_scope_data_version", None)
+            if callable(version_reader):
+                data_version = version_reader(
+                    target_id=source_record.target_id,
+                    source_id=source_record.id,
+                )
+                scope_id = source_record.target_id or f"source-{source_record.id}"
+                cache_key = self.derived_cache.target_summary_key(scope_id, data_version)
+
+                def load_derived() -> dict[str, object]:
+                    loaded = self.repository.get_source_overview(source_id, owner_id=owner_id)
+                    top = loaded.get("top_videos", {})
+                    return {
+                        "summary": SourceOverviewSummary.model_validate(
+                            loaded["summary"]
+                        ).model_dump(mode="json"),
+                        "topVideos": SourceTopVideos(
+                            views=[_video_contract(video) for video in top.get("views", [])],
+                            likes=[_video_contract(video) for video in top.get("likes", [])],
+                            comments=[_video_contract(video) for video in top.get("comments", [])],
+                        ).model_dump(mode="json"),
+                    }
+
+                cached = self.derived_cache.get_or_load(
+                    cache_key, load_derived, ttl_seconds=45
+                )
+                return SourceOverviewResponse(
+                    source=_source_contract(source_record),
+                    latestJob=(
+                        _job_contract(source_record.latest_job)
+                        if source_record.latest_job else None
+                    ),
+                    summary=SourceOverviewSummary.model_validate(cached["summary"]),
+                    topVideos=SourceTopVideos.model_validate(cached["topVideos"]),
+                )
+
+        result = self.repository.get_source_overview(source_id, owner_id=owner_id)
+        top_videos = result.get("top_videos", {})
+        return SourceOverviewResponse(
+            source=_source_contract(result["source"]),
+            latestJob=_job_contract(result["latest_job"]) if result.get("latest_job") else None,
+            summary=SourceOverviewSummary.model_validate(result["summary"]),
+            topVideos=SourceTopVideos(
+                views=[_video_contract(video) for video in top_videos.get("views", [])],
+                likes=[_video_contract(video) for video in top_videos.get("likes", [])],
+                comments=[_video_contract(video) for video in top_videos.get("comments", [])],
+            ),
+        )
+
+    def get_source_videos_page(
+        self,
+        source_id: str,
+        *,
+        owner_id: str | None = None,
+        cursor: str | None = None,
+        limit: int = 60,
+    ) -> SourceVideosPageResponse:
+        result = self.repository.get_source_videos_page(
+            source_id,
+            owner_id=owner_id,
+            cursor=cursor,
+            limit=limit,
+        )
+        return SourceVideosPageResponse(
+            videos=[_video_contract(video) for video in result["videos"]],
+            nextCursor=result.get("next_cursor"),
+            snapshotAt=result["snapshot_at"],
+            total=result["total"],
         )
 
     def get_video_comments(self, video_id: str, *, owner_id: str | None = None) -> VideoCommentsResponse:
@@ -419,6 +536,68 @@ class CollectionService:
             nextOffset=result.get("next_offset"),
         )
 
+    def explore_channels(self, *, owner_id: str | None = None) -> ExploreChannelsResponse:
+        def load() -> dict[str, object]:
+            channels = []
+            for item in self.repository.list_explore_channels(owner_id=owner_id):
+                channel = dict(item)
+                pin = channel.pop("pin", None)
+                channels.append({**channel, "pin": self._pin_contract(pin) if pin else None})
+            return ExploreChannelsResponse(channels=channels).model_dump(mode="json")
+
+        if self.derived_cache and self.derived_cache.enabled and owner_id is not None:
+            filter_hash = self.derived_cache.filter_hash({"kind": "channels"})
+            key = self.derived_cache.owner_explore_key(
+                owner_id,
+                filter_hash,
+                self._explore_cache_generation(owner_id),
+            )
+            return ExploreChannelsResponse.model_validate(
+                self.derived_cache.get_or_load(key, load, ttl_seconds=45)
+            )
+        return ExploreChannelsResponse.model_validate(load())
+
+    def explore_videos_page(
+        self,
+        *,
+        owner_id: str | None = None,
+        channel_id: str | None = None,
+        cursor: str | None = None,
+        limit: int = 60,
+    ) -> ExploreVideosPageResponse:
+        def load() -> dict[str, object]:
+            result = self.repository.list_explore_videos_page(
+                owner_id=owner_id,
+                channel_id=channel_id,
+                cursor=cursor,
+                limit=limit,
+            )
+            return ExploreVideosPageResponse(
+                videos=[_video_contract(video) for video in result["videos"]],
+                nextCursor=result.get("next_cursor"),
+                snapshotAt=result["snapshot_at"],
+                total=result["total"],
+            ).model_dump(mode="json")
+
+        if self.derived_cache and self.derived_cache.enabled and owner_id is not None:
+            filter_hash = self.derived_cache.filter_hash(
+                {
+                    "kind": "videos",
+                    "channelId": channel_id,
+                    "cursor": cursor,
+                    "limit": limit,
+                }
+            )
+            key = self.derived_cache.owner_explore_key(
+                owner_id,
+                filter_hash,
+                self._explore_cache_generation(owner_id),
+            )
+            return ExploreVideosPageResponse.model_validate(
+                self.derived_cache.get_or_load(key, load, ttl_seconds=45)
+            )
+        return ExploreVideosPageResponse.model_validate(load())
+
     def channel_subscriber_history(
         self, youtube_channel_id: str, *, owner_id: str | None = None
     ) -> list[ChannelSubscriberSnapshot]:
@@ -433,7 +612,14 @@ class CollectionService:
     def search_collected(
         self, query: str, *, owner_id: str | None = None, limit: int = 20, scope: str = "all"
     ) -> UnifiedSearchResponse:
+        normalized_query = normalize_search_text(query)
+        if len(normalized_query) <= 1:
+            raise InvalidSearchQueryError("Search query must contain at least two normalized characters")
         result = self.repository.search_collected(query=query, limit=limit, owner_id=owner_id, scope=scope)
+        if len(normalized_query) == 2:
+            # Two-character searches are deliberately prefix-only for bounded
+            # video metadata fields; comment contains-search starts at 3 chars.
+            result = {**result, "comments": []}
         return UnifiedSearchResponse(
             query=query,
             videos=[

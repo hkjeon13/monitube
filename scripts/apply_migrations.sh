@@ -1,6 +1,29 @@
 #!/bin/sh
 set -eu
 
+usage() {
+  echo "usage: apply_migrations.sh [--check|--status]" >&2
+  exit 2
+}
+
+mode="apply"
+case "${1:-}" in
+  "") ;;
+  --check) mode="check" ;;
+  --status) mode="status" ;;
+  *) usage ;;
+esac
+[ "$#" -le 1 ] || usage
+
+bootstrap_pg_stat_statements="${MONITUBE_BOOTSTRAP_PG_STAT_STATEMENTS:-true}"
+case "$bootstrap_pg_stat_statements" in
+  true|false) ;;
+  *)
+    echo "MONITUBE_BOOTSTRAP_PG_STAT_STATEMENTS must be true or false." >&2
+    exit 2
+    ;;
+esac
+
 # This script runs inside the Compose `migrate` service. It deliberately uses
 # PG* variables instead of a URL so connection credentials are never echoed.
 export PGHOST="${POSTGRES_HOST:-postgres}"
@@ -23,15 +46,18 @@ until psql_cmd -q -c 'SELECT 1' >/dev/null 2>&1; do
   sleep 1
 done
 
-psql_cmd -q -c '
-  CREATE TABLE IF NOT EXISTS monitube_schema_migrations (
-    filename TEXT PRIMARY KEY,
-    applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
-  )
-'
+ledger_exists() {
+  psql_cmd -Atq -c "SELECT to_regclass('public.monitube_schema_migrations') IS NOT NULL" | grep -qx 't'
+}
 
 is_applied() {
+  ledger_exists || return 1
   psql_cmd -Atq -c 'SELECT filename FROM monitube_schema_migrations' | grep -Fqx "$1"
+}
+
+extension_installed() {
+  extension_literal=$(sql_literal "$1")
+  psql_cmd -Atq -c "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = '$extension_literal')" | grep -qx 't'
 }
 
 sql_literal() {
@@ -70,6 +96,48 @@ if [ ! -f /migrations/001_initial_schema.sql ]; then
   exit 1
 fi
 
+if [ "$mode" = "check" ] || [ "$mode" = "status" ]; then
+  pending=0
+
+  if [ "$bootstrap_pg_stat_statements" = "true" ] && ! extension_installed pg_stat_statements; then
+    echo "pending extension: pg_stat_statements"
+    pending=$((pending + 1))
+  fi
+
+  for migration_path in /migrations/[0-9][0-9][0-9]_*.sql; do
+    [ -f "$migration_path" ] || continue
+    migration_name=$(basename "$migration_path")
+    if is_applied "$migration_name"; then
+      [ "$mode" = "status" ] && echo "applied migration: $migration_name"
+    else
+      echo "pending migration: $migration_name"
+      pending=$((pending + 1))
+    fi
+  done
+
+  if [ "$pending" -gt 0 ]; then
+    echo "Database has $pending pending migration or extension item(s)."
+    [ "$mode" = "check" ] && exit 10
+  else
+    echo "Database migrations and required extensions are current."
+  fi
+  exit 0
+fi
+
+psql_cmd -q -c '
+  CREATE TABLE IF NOT EXISTS monitube_schema_migrations (
+    filename TEXT PRIMARY KEY,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  )
+'
+
+if [ "$bootstrap_pg_stat_statements" = "true" ]; then
+  # Loading the library is a PostgreSQL startup setting. Creating the extension
+  # here is idempotent and lets the deploy script verify both halves after a
+  # configuration restart.
+  psql_cmd -q -c 'CREATE EXTENSION IF NOT EXISTS pg_stat_statements'
+fi
+
 for migration_path in /migrations/[0-9][0-9][0-9]_*.sql; do
   [ -f "$migration_path" ] || continue
   migration_name=$(basename "$migration_path")
@@ -91,4 +159,4 @@ for migration_path in /migrations/[0-9][0-9][0-9]_*.sql; do
   apply_migration "$migration_path" "$migration_name"
 done
 
-echo "Database migrations are current."
+echo "Database migrations and required extensions are current."

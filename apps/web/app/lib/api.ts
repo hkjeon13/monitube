@@ -68,7 +68,16 @@ export interface SourceAnalysis {
   latestCommentPublishedAt?: string;
   topWords: TopWord[];
   generatedAt?: string;
+  asOfJobId?: string;
+  dataVersion?: number;
+  status?: "fresh" | "stale" | "building" | "failed";
+  topWordsStatus?: "fresh" | "stale" | "building" | "failed";
+  partialData?: boolean;
+  coverage?: Record<string, unknown>;
 }
+
+export type SourceVideoMetric = "views" | "likes" | "comments";
+export type SourceTopVideos = Record<SourceVideoMetric, CollectedVideo[]>;
 
 export interface SourceResults {
   source: SourceSummary;
@@ -76,6 +85,31 @@ export interface SourceResults {
   videos: CollectedVideo[];
   commentSummary?: CommentSummary;
   analysis?: SourceAnalysis;
+  topVideos?: SourceTopVideos;
+  videosNextCursor?: string;
+  videosSnapshotAt?: string;
+  videosTotal?: number;
+  videoPagination?: "cursor" | "legacy";
+}
+
+export interface SourceOverview {
+  source: SourceSummary;
+  latestJob?: JobStatus;
+  summary?: SourceAnalysis;
+  topVideos: SourceTopVideos;
+}
+
+export interface PagedSourceVideos {
+  videos: CollectedVideo[];
+  nextCursor?: string;
+  snapshotAt?: string;
+  total: number;
+}
+
+export interface ActiveSourceJob {
+  sourceId: string;
+  targetId?: string;
+  job: JobStatus;
 }
 
 export interface CollectedComment {
@@ -418,6 +452,61 @@ function normalizeTopWords(value: unknown): TopWord[] {
   });
 }
 
+function normalizeAnalysis(value: unknown): SourceAnalysis | undefined {
+  const analysis = asRecord(value);
+  if (!analysis) return undefined;
+
+  const status = asText(analysis.status);
+  const topWordsStatus = asText(analysis.topWordsStatus ?? analysis.top_words_status);
+  return {
+    ...(asNumber(analysis.videoCount ?? analysis.video_count) === undefined
+      ? {}
+      : { videoCount: asNumber(analysis.videoCount ?? analysis.video_count) }),
+    ...(asNumber(analysis.commentCount ?? analysis.comment_count) === undefined
+      ? {}
+      : { commentCount: asNumber(analysis.commentCount ?? analysis.comment_count) }),
+    ...(asText(analysis.latestVideoPublishedAt ?? analysis.latest_video_published_at)
+      ? { latestVideoPublishedAt: asText(analysis.latestVideoPublishedAt ?? analysis.latest_video_published_at) }
+      : {}),
+    ...(asText(analysis.latestCommentPublishedAt ?? analysis.latest_comment_published_at)
+      ? { latestCommentPublishedAt: asText(analysis.latestCommentPublishedAt ?? analysis.latest_comment_published_at) }
+      : {}),
+    topWords: normalizeTopWords(analysis.topWords ?? analysis.top_words),
+    ...(asText(analysis.generatedAt ?? analysis.generated_at)
+      ? { generatedAt: asText(analysis.generatedAt ?? analysis.generated_at) }
+      : {}),
+    ...(asText(analysis.asOfJobId ?? analysis.as_of_job_id)
+      ? { asOfJobId: asText(analysis.asOfJobId ?? analysis.as_of_job_id) }
+      : {}),
+    ...(asNumber(analysis.dataVersion ?? analysis.data_version) === undefined
+      ? {}
+      : { dataVersion: asNumber(analysis.dataVersion ?? analysis.data_version) }),
+    ...(["fresh", "stale", "building", "failed"].includes(status ?? "")
+      ? { status: status as SourceAnalysis["status"] }
+      : {}),
+    ...(["fresh", "stale", "building", "failed"].includes(topWordsStatus ?? "")
+      ? { topWordsStatus: topWordsStatus as SourceAnalysis["topWordsStatus"] }
+      : {}),
+    ...(asBoolean(analysis.partialData ?? analysis.partial_data) === undefined
+      ? {}
+      : { partialData: asBoolean(analysis.partialData ?? analysis.partial_data) }),
+    ...(asRecord(analysis.coverage) ? { coverage: asRecord(analysis.coverage) ?? {} } : {}),
+  };
+}
+
+function normalizeTopVideos(value: unknown): SourceTopVideos {
+  const record = asRecord(value) ?? {};
+  const normalizeList = (metric: SourceVideoMetric) => asArray(record[metric]).flatMap((video) => {
+    const normalized = normalizeVideo(video);
+    return normalized ? [normalized] : [];
+  });
+  return {
+    views: normalizeList("views"),
+    likes: normalizeList("likes"),
+    comments: normalizeList("comments"),
+  };
+}
+
 function normalizeCommentSummary(value: unknown): CommentSummary | undefined {
   const record = asRecord(value);
   if (!record) return undefined;
@@ -589,8 +678,24 @@ export async function createCollectionRequest(
   };
 }
 
-export async function getJob(jobId: string) {
-  return request<JobStatus>(`/v1/jobs/${encodeURIComponent(jobId)}`, { method: "GET" });
+export async function getJob(jobId: string, signal?: AbortSignal): Promise<JobStatus> {
+  const response = await request<unknown>(`/v1/jobs/${encodeURIComponent(jobId)}`, { method: "GET", signal });
+  const job = normalizeJob(response);
+  if (!job) throw new ApiError("작업 상태 응답을 해석할 수 없습니다.", 502);
+  return job;
+}
+
+export async function listActiveJobs(signal?: AbortSignal): Promise<ActiveSourceJob[]> {
+  const response = await request<unknown>("/v1/jobs/active", { method: "GET", signal });
+  const record = asRecord(response);
+  return firstArray(record ?? {}, ["jobs", "items", "data"]).flatMap((item) => {
+    const itemRecord = asRecord(item);
+    const sourceId = asText(itemRecord?.sourceId ?? itemRecord?.source_id);
+    const job = normalizeJob(itemRecord?.job ?? item);
+    if (!sourceId || !job) return [];
+    const targetId = asText(itemRecord?.targetId ?? itemRecord?.target_id);
+    return [{ sourceId, ...(targetId ? { targetId } : {}), job }];
+  });
 }
 
 export async function listSourceJobs(sourceId: string): Promise<JobStatus[]> {
@@ -617,9 +722,10 @@ export async function deleteSource(sourceId: string): Promise<void> {
   await request<void>(`/v1/sources/${encodeURIComponent(sourceId)}`, { method: "DELETE" });
 }
 
-export async function getSourceResults(sourceId: string): Promise<SourceResults> {
+export async function getSourceResults(sourceId: string, signal?: AbortSignal): Promise<SourceResults> {
   const response = await request<unknown>(`/v1/sources/${encodeURIComponent(sourceId)}/results`, {
     method: "GET",
+    signal,
   });
   const record = asRecord(response) ?? {};
   const source = normalizeSource(record.source) ?? {
@@ -632,27 +738,8 @@ export async function getSourceResults(sourceId: string): Promise<SourceResults>
 
   const directSummary = normalizeCommentSummary(record.commentSummary ?? record.comment_summary);
   const analysis = asRecord(record.analysis);
-  const analysisTopWords = normalizeTopWords(analysis?.topWords ?? analysis?.top_words);
-  const analysisSummary = analysis
-    ? {
-        ...(asNumber(analysis.videoCount ?? analysis.video_count) === undefined
-          ? {}
-          : { videoCount: asNumber(analysis.videoCount ?? analysis.video_count) }),
-        ...(asNumber(analysis.commentCount ?? analysis.comment_count) === undefined
-          ? {}
-          : { commentCount: asNumber(analysis.commentCount ?? analysis.comment_count) }),
-        ...(asText(analysis.latestVideoPublishedAt ?? analysis.latest_video_published_at)
-          ? { latestVideoPublishedAt: asText(analysis.latestVideoPublishedAt ?? analysis.latest_video_published_at) }
-          : {}),
-        ...(asText(analysis.latestCommentPublishedAt ?? analysis.latest_comment_published_at)
-          ? { latestCommentPublishedAt: asText(analysis.latestCommentPublishedAt ?? analysis.latest_comment_published_at) }
-          : {}),
-        topWords: analysisTopWords,
-        ...(asText(analysis.generatedAt ?? analysis.generated_at)
-          ? { generatedAt: asText(analysis.generatedAt ?? analysis.generated_at) }
-          : {}),
-      }
-    : undefined;
+  const analysisSummary = normalizeAnalysis(analysis);
+  const analysisTopWords = analysisSummary?.topWords ?? [];
   const commentSummary = directSummary
     ? {
         ...directSummary,
@@ -679,7 +766,93 @@ export async function getSourceResults(sourceId: string): Promise<SourceResults>
     }),
     ...(commentSummary ? { commentSummary } : {}),
     ...(analysisSummary ? { analysis: analysisSummary } : {}),
+    videoPagination: "legacy",
   };
+}
+
+export async function getSourceOverview(sourceId: string, signal?: AbortSignal): Promise<SourceOverview> {
+  const response = await request<unknown>(`/v1/sources/${encodeURIComponent(sourceId)}/overview`, {
+    method: "GET",
+    signal,
+  });
+  const record = asRecord(response) ?? {};
+  const source = normalizeSource(record.source);
+  if (!source) throw new ApiError("수집 대상 개요를 해석할 수 없습니다.", 502);
+  const latestJob = normalizeJob(record.latestJob ?? record.latest_job);
+  const summary = normalizeAnalysis(record.summary ?? record.analysis);
+  return {
+    source,
+    ...(latestJob ? { latestJob } : {}),
+    ...(summary ? { summary } : {}),
+    topVideos: normalizeTopVideos(record.topVideos ?? record.top_videos),
+  };
+}
+
+export async function getSourceVideos(
+  sourceId: string,
+  options: { cursor?: string; limit?: number; signal?: AbortSignal } = {},
+): Promise<PagedSourceVideos> {
+  const query = new URLSearchParams({ limit: String(Math.min(100, Math.max(1, options.limit ?? 60))) });
+  if (options.cursor) query.set("cursor", options.cursor);
+  const response = await request<unknown>(
+    `/v1/sources/${encodeURIComponent(sourceId)}/videos?${query.toString()}`,
+    { method: "GET", signal: options.signal },
+  );
+  const record = asRecord(response) ?? {};
+  const videos = firstArray(record, ["videos", "items", "results"]).flatMap((video) => {
+    const normalized = normalizeVideo(video);
+    return normalized ? [normalized] : [];
+  });
+  const nextCursor = asText(record.nextCursor ?? record.next_cursor);
+  const snapshotAt = asText(record.snapshotAt ?? record.snapshot_at);
+  return {
+    videos,
+    ...(nextCursor ? { nextCursor } : {}),
+    ...(snapshotAt ? { snapshotAt } : {}),
+    total: asNumber(record.total ?? record.totalCount ?? record.total_count) ?? videos.length,
+  };
+}
+
+function isUnavailableAdditiveEndpoint(error: unknown) {
+  return error instanceof ApiError && [404, 405, 501].includes(error.status);
+}
+
+/**
+ * Load the bounded source workspace when the additive API is available. During
+ * rolling deployments an older API may not expose it yet, so only unsupported
+ * endpoint responses fall back to the legacy, unbounded results contract.
+ */
+export async function getSourceWorkspace(sourceId: string, signal?: AbortSignal): Promise<SourceResults> {
+  try {
+    const [overview, page] = await Promise.all([
+      getSourceOverview(sourceId, signal),
+      getSourceVideos(sourceId, { signal }),
+    ]);
+    const commentSummary = overview.summary
+      ? {
+          total: overview.summary.commentCount ?? 0,
+          ...(overview.summary.latestCommentPublishedAt
+            ? { latestPublishedAt: overview.summary.latestCommentPublishedAt }
+            : {}),
+          topWords: overview.summary.topWords,
+        }
+      : undefined;
+    return {
+      source: overview.source,
+      ...(overview.latestJob ? { latestJob: overview.latestJob } : {}),
+      videos: page.videos,
+      ...(commentSummary ? { commentSummary } : {}),
+      ...(overview.summary ? { analysis: overview.summary } : {}),
+      topVideos: overview.topVideos,
+      ...(page.nextCursor ? { videosNextCursor: page.nextCursor } : {}),
+      ...(page.snapshotAt ? { videosSnapshotAt: page.snapshotAt } : {}),
+      videosTotal: page.total,
+      videoPagination: "cursor",
+    };
+  } catch (error) {
+    if (!isUnavailableAdditiveEndpoint(error)) throw error;
+    return getSourceResults(sourceId, signal);
+  }
 }
 
 export async function getVideoCommentThreads(

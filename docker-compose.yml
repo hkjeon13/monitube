@@ -12,6 +12,17 @@ x-app-environment: &app-environment
   S3_REGION: ${S3_REGION:-us-east-1}
   S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-true}
   ENABLE_DERIVED_ANALYTICS: ${ENABLE_DERIVED_ANALYTICS:-false}
+  ENABLE_SOURCE_OVERVIEW_V2: ${ENABLE_SOURCE_OVERVIEW_V2:-false}
+  ENABLE_TARGET_SUMMARY_WRITE: ${ENABLE_TARGET_SUMMARY_WRITE:-false}
+  ENABLE_TARGET_SUMMARY_READ: ${ENABLE_TARGET_SUMMARY_READ:-false}
+  ENABLE_ANALYSIS_WORKER: ${ENABLE_ANALYSIS_WORKER:-false}
+  ENABLE_VIDEO_KEYSET_PAGINATION: ${ENABLE_VIDEO_KEYSET_PAGINATION:-false}
+  ENABLE_COMMENT_BATCH_WRITE: ${ENABLE_COMMENT_BATCH_WRITE:-false}
+  ENABLE_COMMENT_ROLLUP_DUAL_WRITE: ${ENABLE_COMMENT_ROLLUP_DUAL_WRITE:-false}
+  ENABLE_COMMENT_ROLLUP_READ: ${ENABLE_COMMENT_ROLLUP_READ:-false}
+  ENABLE_EXPLORE_ROLLUP: ${ENABLE_EXPLORE_ROLLUP:-false}
+  ENABLE_SEARCH_TRIGRAM: ${ENABLE_SEARCH_TRIGRAM:-false}
+  ENABLE_REDIS_DERIVED_CACHE: ${ENABLE_REDIS_DERIVED_CACHE:-false}
 
 x-youtube-runtime-secret: &youtube-runtime-secret
   # The deployment script resolves this to a server-only, mode-0600 env file.
@@ -23,6 +34,46 @@ services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    stop_grace_period: ${POSTGRES_STOP_GRACE_PERIOD:-2m}
+    shm_size: ${POSTGRES_SHM_SIZE:-1gb}
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=${POSTGRES_SHARED_PRELOAD_LIBRARIES:-pg_stat_statements}
+      - -c
+      - shared_buffers=${POSTGRES_SHARED_BUFFERS:-512MB}
+      - -c
+      - effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-2GB}
+      - -c
+      - work_mem=${POSTGRES_WORK_MEM:-8MB}
+      - -c
+      - maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-256MB}
+      - -c
+      - autovacuum_work_mem=${POSTGRES_AUTOVACUUM_WORK_MEM:-128MB}
+      - -c
+      - max_connections=${POSTGRES_MAX_CONNECTIONS:-60}
+      - -c
+      - random_page_cost=${POSTGRES_RANDOM_PAGE_COST:-1.1}
+      - -c
+      - effective_io_concurrency=${POSTGRES_EFFECTIVE_IO_CONCURRENCY:-200}
+      - -c
+      - max_wal_size=${POSTGRES_MAX_WAL_SIZE:-4GB}
+      - -c
+      - checkpoint_completion_target=${POSTGRES_CHECKPOINT_COMPLETION_TARGET:-0.9}
+      - -c
+      - wal_compression=${POSTGRES_WAL_COMPRESSION:-on}
+      - -c
+      - track_io_timing=${POSTGRES_TRACK_IO_TIMING:-on}
+      - -c
+      - idle_in_transaction_session_timeout=${POSTGRES_IDLE_IN_TRANSACTION_SESSION_TIMEOUT:-30s}
+      - -c
+      - log_min_duration_statement=${POSTGRES_LOG_MIN_DURATION_STATEMENT:-500ms}
+      - -c
+      - log_temp_files=${POSTGRES_LOG_TEMP_FILES:-64MB}
+      - -c
+      - log_parameter_max_length=${POSTGRES_LOG_PARAMETER_MAX_LENGTH:-0}
+      - -c
+      - log_parameter_max_length_on_error=${POSTGRES_LOG_PARAMETER_MAX_LENGTH_ON_ERROR:-0}
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-monitube}
       POSTGRES_USER: ${POSTGRES_USER:-monitube}
@@ -43,7 +94,17 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes"]
+    stop_grace_period: 30s
+    # Redis contains only reproducible derived cache entries. Keep it bounded
+    # and avoid AOF writes competing with PostgreSQL on the same Docker disk.
+    command:
+      - redis-server
+      - --appendonly
+      - ${REDIS_APPENDONLY:-no}
+      - --maxmemory
+      - ${REDIS_MAXMEMORY:-512mb}
+      - --maxmemory-policy
+      - ${REDIS_MAXMEMORY_POLICY:-allkeys-lru}
     ports:
       - "${REDIS_BIND_ADDRESS:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
     volumes:
@@ -57,6 +118,7 @@ services:
   minio:
     image: minio/minio:RELEASE.2024-11-07T00-52-20Z
     restart: unless-stopped
+    stop_grace_period: 30s
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-monitube-local}
@@ -91,6 +153,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-monitube}
       POSTGRES_USER: ${POSTGRES_USER:-monitube}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-local-only}
+      MONITUBE_BOOTSTRAP_PG_STAT_STATEMENTS: ${MONITUBE_BOOTSTRAP_PG_STAT_STATEMENTS:-true}
     volumes:
       - ./database/migrations:/migrations:ro
       - ./scripts/apply_migrations.sh:/usr/local/bin/apply_migrations.sh:ro
@@ -104,10 +167,15 @@ services:
     build:
       context: .
       dockerfile: infra/docker/api.Dockerfile
+    image: monitube-api:${MONITUBE_IMAGE_TAG:-local}
     restart: unless-stopped
+    stop_grace_period: ${API_STOP_GRACE_PERIOD:-30s}
     environment:
       <<: *app-environment
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      DB_POOL_MIN_SIZE: ${API_DB_POOL_MIN_SIZE:-1}
+      DB_POOL_MAX_SIZE: ${API_DB_POOL_MAX_SIZE:-8}
+      DB_POOL_TIMEOUT_SECONDS: ${API_DB_POOL_TIMEOUT_SECONDS:-5}
     command: ["uv", "run", "--no-sync", "--directory", "apps/api", "uvicorn", "monitube_api.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
     ports:
       - "${API_BIND_ADDRESS:-127.0.0.1}:${API_PORT:-8000}:8000"
@@ -117,11 +185,15 @@ services:
       migrate:
         condition: service_completed_successfully
       redis:
-        condition: service_healthy
+        # Derived cache is optional; startup/readiness must fail open to
+        # PostgreSQL when Redis is unavailable.
+        condition: service_started
       minio-init:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      # Docker service health represents readiness. /health remains the
+      # process-only liveness endpoint used by the deployment smoke test.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready', timeout=3)"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -132,11 +204,16 @@ services:
     build:
       context: .
       dockerfile: infra/docker/worker.Dockerfile
+    image: monitube-worker:${MONITUBE_IMAGE_TAG:-local}
     restart: unless-stopped
+    stop_grace_period: ${WORKER_STOP_GRACE_PERIOD:-180s}
     environment:
       <<: *app-environment
       MONITUBE_API_BASE_URL: ${MONITUBE_API_BASE_URL:-http://api:8000}
       PYTHONPATH: /workspace/apps/api:/workspace/apps/worker
+      DB_POOL_MIN_SIZE: ${WORKER_DB_POOL_MIN_SIZE:-1}
+      DB_POOL_MAX_SIZE: ${WORKER_DB_POOL_MAX_SIZE:-2}
+      DB_POOL_TIMEOUT_SECONDS: ${WORKER_DB_POOL_TIMEOUT_SECONDS:-10}
     command: ["python", "-m", "monitube_worker.worker"]
     depends_on:
       postgres:
@@ -144,7 +221,36 @@ services:
       migrate:
         condition: service_completed_successfully
       redis:
+        condition: service_started
+      minio-init:
+        condition: service_completed_successfully
+      api:
         condition: service_healthy
+
+  analysis-worker:
+    build:
+      context: .
+      dockerfile: infra/docker/worker.Dockerfile
+    image: monitube-worker:${MONITUBE_IMAGE_TAG:-local}
+    restart: unless-stopped
+    stop_grace_period: ${ANALYSIS_WORKER_STOP_GRACE_PERIOD:-180s}
+    mem_limit: ${ANALYSIS_WORKER_MEMORY_LIMIT:-1g}
+    cpus: ${ANALYSIS_WORKER_CPU_LIMIT:-1.0}
+    environment:
+      <<: *app-environment
+      MONITUBE_API_BASE_URL: ${MONITUBE_API_BASE_URL:-http://api:8000}
+      PYTHONPATH: /workspace/apps/api:/workspace/apps/worker
+      DB_POOL_MIN_SIZE: ${ANALYSIS_DB_POOL_MIN_SIZE:-1}
+      DB_POOL_MAX_SIZE: ${ANALYSIS_DB_POOL_MAX_SIZE:-2}
+      DB_POOL_TIMEOUT_SECONDS: ${ANALYSIS_DB_POOL_TIMEOUT_SECONDS:-10}
+    command: ["python", "-m", "monitube_worker.analysis_worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
       minio-init:
         condition: service_completed_successfully
       api:
@@ -157,7 +263,9 @@ services:
       args:
         NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-/api}
         MONITUBE_WEB_API_PROXY_TARGET: ${MONITUBE_WEB_API_PROXY_TARGET_DOCKER:-http://api:8000}
+    image: monitube-web:${MONITUBE_IMAGE_TAG:-local}
     restart: unless-stopped
+    stop_grace_period: 30s
     environment:
       NODE_ENV: production
       NEXT_TELEMETRY_DISABLED: "1"

@@ -22,6 +22,21 @@ class Settings:
     environment: str
     worker_poll_seconds: float
     worker_lease_seconds: int
+    redis_url: str | None
+    db_pool_min_size: int
+    db_pool_max_size: int
+    db_pool_timeout_seconds: float
+    enable_source_overview_v2: bool
+    enable_target_summary_write: bool
+    enable_target_summary_read: bool
+    enable_analysis_worker: bool
+    enable_video_keyset_pagination: bool
+    enable_comment_batch_write: bool
+    enable_comment_rollup_dual_write: bool
+    enable_comment_rollup_read: bool
+    enable_explore_rollup: bool
+    enable_search_trigram: bool
+    enable_redis_derived_cache: bool
 
     @property
     def key_fingerprint(self) -> str | None:
@@ -63,6 +78,15 @@ class Settings:
                 return default
             return value if value > 0 else default
 
+        def enabled(name: str, default: bool = False) -> bool:
+            value = values.get(name)
+            if value is None:
+                return default
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+
+        pool_min_size = positive_int("DB_POOL_MIN_SIZE", 1)
+        pool_max_size = max(pool_min_size, positive_int("DB_POOL_MAX_SIZE", 8))
+
         return cls(
             database_url=database_url,
             youtube_api_key=keys[0] if keys else None,
@@ -76,6 +100,21 @@ class Settings:
             environment=values.get("APP_ENV", "development").strip() or "development",
             worker_poll_seconds=positive_float("WORKER_POLL_SECONDS", 3.0),
             worker_lease_seconds=positive_int("WORKER_LEASE_SECONDS", 120),
+            redis_url=optional("REDIS_URL"),
+            db_pool_min_size=pool_min_size,
+            db_pool_max_size=pool_max_size,
+            db_pool_timeout_seconds=positive_float("DB_POOL_TIMEOUT_SECONDS", 3.0),
+            enable_source_overview_v2=enabled("ENABLE_SOURCE_OVERVIEW_V2"),
+            enable_target_summary_write=enabled("ENABLE_TARGET_SUMMARY_WRITE"),
+            enable_target_summary_read=enabled("ENABLE_TARGET_SUMMARY_READ"),
+            enable_analysis_worker=enabled("ENABLE_ANALYSIS_WORKER"),
+            enable_video_keyset_pagination=enabled("ENABLE_VIDEO_KEYSET_PAGINATION"),
+            enable_comment_batch_write=enabled("ENABLE_COMMENT_BATCH_WRITE"),
+            enable_comment_rollup_dual_write=enabled("ENABLE_COMMENT_ROLLUP_DUAL_WRITE"),
+            enable_comment_rollup_read=enabled("ENABLE_COMMENT_ROLLUP_READ", False),
+            enable_explore_rollup=enabled("ENABLE_EXPLORE_ROLLUP", False),
+            enable_search_trigram=enabled("ENABLE_SEARCH_TRIGRAM"),
+            enable_redis_derived_cache=enabled("ENABLE_REDIS_DERIVED_CACHE", False),
         )
 
 
@@ -85,7 +124,23 @@ def create_repository(settings: Settings):
     from .postgres_repository import PostgresRepository
     from .repositories import InMemoryRepository
 
-    repository = PostgresRepository(settings.database_url) if settings.database_url else InMemoryRepository()
+    repository = (
+        PostgresRepository(
+            settings.database_url,
+            pool_min_size=settings.db_pool_min_size,
+            pool_max_size=settings.db_pool_max_size,
+            pool_timeout_seconds=settings.db_pool_timeout_seconds,
+            enable_target_summary_write=settings.enable_target_summary_write,
+            enable_target_summary_read=settings.enable_target_summary_read,
+            enable_comment_batch_write=settings.enable_comment_batch_write,
+            enable_comment_rollup_dual_write=settings.enable_comment_rollup_dual_write,
+            enable_comment_rollup_read=settings.enable_comment_rollup_read,
+            enable_explore_rollup=settings.enable_explore_rollup,
+            enable_search_trigram=settings.enable_search_trigram,
+        )
+        if settings.database_url
+        else InMemoryRepository()
+    )
     runtime_config_id = repository.bootstrap_runtime_config(
         environment=settings.environment,
         google_project_number=settings.youtube_google_project_number,

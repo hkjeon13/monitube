@@ -21,9 +21,18 @@ def _multi_user_client(repository: InMemoryRepository) -> TestClient:
 
 
 def test_health_and_channel_resolution_endpoints() -> None:
-    client = TestClient(create_app())
+    app = create_app()
+    assert app.state.collection_service.derived_cache is app.state.derived_cache
+    client = TestClient(app)
 
     assert client.get("/health").json() == {"status": "ok", "service": "monitube-api"}
+    assert client.get("/ready").json() == {
+        "status": "ready",
+        "checks": {
+            "repository": "in-memory",
+            "derivedCache": {"enabled": False, "status": "disabled"},
+        },
+    }
     response = client.post("/v1/channel-resolutions", json={"input": "youtube.com/@GoogleDevelopers"})
 
     assert response.status_code == 200
@@ -32,6 +41,22 @@ def test_health_and_channel_resolution_endpoints() -> None:
     video = client.post("/v1/video-resolutions", json={"input": "https://youtu.be/dQw4w9WgXcQ?t=42"})
     assert video.status_code == 200
     assert video.json() == {"kind": "short_url", "normalized": "dQw4w9WgXcQ"}
+
+
+def test_readiness_failure_is_retryable_without_leaking_database_errors() -> None:
+    repository = InMemoryRepository()
+
+    def fail_readiness() -> dict[str, object]:
+        raise RuntimeError("database-hostname-and-secret")
+
+    repository.check_readiness = fail_readiness  # type: ignore[attr-defined]
+    response = TestClient(create_app(repository=repository)).get("/ready")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "Database readiness check failed",
+        "retryable": True,
+    }
 
 
 def test_source_and_job_contract_is_project_free() -> None:
@@ -79,6 +104,40 @@ def test_source_and_job_contract_is_project_free() -> None:
     assert client.delete(f"/v1/sources/{source['id']}").status_code == 204
     assert client.get(f"/v1/sources/{source['id']}").status_code == 404
     assert client.get("/v1/projects").status_code == 404
+
+
+def test_active_jobs_returns_only_the_callers_parent_jobs() -> None:
+    repository = InMemoryRepository()
+    client = _multi_user_client(repository)
+    first = client.post(
+        "/v1/collection-requests",
+        headers={"X-Test-User": "user-a"},
+        json={"type": "video", "config": {"input": "activeJob01"}},
+    ).json()
+    second = client.post(
+        "/v1/collection-requests",
+        headers={"X-Test-User": "user-b"},
+        json={"type": "video", "config": {"input": "activeJob02"}},
+    ).json()
+    parent = repository.get_job(first["job"]["id"])
+    repository.enqueue_video_jobs(parent_job=parent, youtube_video_ids=["childVideo1"])
+
+    active = client.get("/v1/jobs/active", headers={"X-Test-User": "user-a"})
+
+    assert active.status_code == 200
+    assert active.json() == {
+        "jobs": [{
+            "sourceId": first["source"]["id"],
+            "targetId": first["targetId"],
+            "job": first["job"],
+        }]
+    }
+    assert client.get("/v1/jobs/active", headers={"X-Test-User": "user-b"}).json()["jobs"][0]["job"]["id"] == second["job"]["id"]
+
+    repository.transition_job(parent.id, JobState.RUNNING)
+    repository.transition_job(parent.id, JobState.COMPLETED)
+    # The still-queued child is intentionally not exposed to browser polling.
+    assert client.get("/v1/jobs/active", headers={"X-Test-User": "user-a"}).json() == {"jobs": []}
 
 
 def test_keyword_and_direct_video_sources_use_the_same_project_free_contract() -> None:
@@ -405,6 +464,15 @@ def test_explore_search_and_comment_reads_are_scoped_to_subscribed_targets() -> 
     first = submit_video("user-a", "dQw4w9WgXcQ")
     second = submit_video("user-b", "9bZkp7q19f0")
 
+    repository.upsert_channel({
+        "id": "channel-alpha-row", "youtube_channel_id": "UCalpha", "title": "Alpha channel",
+        "statistics": {}, "source_fetched_at": repository._sources[next(iter(repository._sources))].created_at,
+    })
+    repository.upsert_channel({
+        "id": "channel-beta-row", "youtube_channel_id": "UCbeta", "title": "Other channel",
+        "statistics": {}, "source_fetched_at": repository._sources[next(iter(repository._sources))].created_at,
+    })
+
     def worker_source_id(target_id: str) -> str:
         return next(source.id for source in repository._sources.values() if source.target_id == target_id)
 
@@ -440,6 +508,14 @@ def test_explore_search_and_comment_reads_are_scoped_to_subscribed_targets() -> 
     )
     repository.link_source_video(worker_source_id(str(first["targetId"])), alpha.youtube_video_id)
     repository.link_source_video(worker_source_id(str(second["targetId"])), beta.youtube_video_id)
+    neutral = repository.upsert_video(
+        VideoRecord(
+            id="video-neutral-row", youtube_video_id="neutral-video", youtube_channel_id="UCneutral",
+            title="neutral video", description=None, published_at=None, duration_seconds=None,
+            privacy_status="public", made_for_kids=False, statistics={}, source_fetched_at=alpha.source_fetched_at,
+        )
+    )
+    repository.link_source_video(worker_source_id(str(first["targetId"])), neutral.youtube_video_id)
     repository.upsert_comment(
         CommentRecord(
             id="alpha-comment-row",
@@ -459,11 +535,30 @@ def test_explore_search_and_comment_reads_are_scoped_to_subscribed_targets() -> 
     user_b_headers = {"X-Test-User": "user-b"}
     a_search = client.get("/v1/search", headers=user_a_headers, params={"q": "alpha"})
     b_search = client.get("/v1/search", headers=user_b_headers, params={"q": "alpha"})
+    a_explore_channels = client.get("/v1/explore/channels", headers=user_a_headers)
+    b_explore_channels = client.get("/v1/explore/channels", headers=user_b_headers)
+    a_explore_videos = client.get("/v1/explore/videos", headers=user_a_headers)
+    b_explore_videos = client.get("/v1/explore/videos", headers=user_b_headers)
+    a_explore_first_page = client.get(
+        "/v1/explore/videos", headers=user_a_headers, params={"limit": 1}
+    ).json()
 
     assert [item["video"]["id"] for item in a_search.json()["videos"]] == [alpha.youtube_video_id]
     assert [item["comment"]["id"] for item in a_search.json()["comments"]] == ["alpha-comment"]
     assert b_search.json()["videos"] == []
     assert b_search.json()["comments"] == []
+    assert [item["youtubeChannelId"] for item in a_explore_channels.json()["channels"]] == ["UCalpha"]
+    assert [item["youtubeChannelId"] for item in b_explore_channels.json()["channels"]] == ["UCbeta"]
+    assert {item["id"] for item in a_explore_videos.json()["videos"]} == {
+        alpha.youtube_video_id, neutral.youtube_video_id
+    }
+    assert [item["id"] for item in b_explore_videos.json()["videos"]] == [beta.youtube_video_id]
+    assert a_explore_first_page["nextCursor"]
+    assert client.get(
+        "/v1/explore/videos",
+        headers=user_b_headers,
+        params={"cursor": a_explore_first_page["nextCursor"]},
+    ).status_code == 400
     assert client.get(f"/v1/videos/{alpha.youtube_video_id}/comments", headers=user_b_headers).status_code == 404
     assert client.get(f"/v1/videos/{alpha.youtube_video_id}/comment-threads", headers=user_b_headers).status_code == 404
     assert client.get("/v1/comments/alpha-comment/replies", headers=user_b_headers).status_code == 404

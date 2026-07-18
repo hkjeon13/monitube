@@ -34,16 +34,22 @@ _STOP_WORDS = frozenset(
 )
 
 
-def top_words(comments: Iterable[CommentRecord], *, limit: int = 10) -> list[dict[str, int | str]]:
-    """Return stable, language-agnostic word counts from public comment text."""
+def top_words_from_texts(texts: Iterable[str | None], *, limit: int = 10) -> list[dict[str, int | str]]:
+    """Return stable word counts from a bounded stream of public text."""
 
     counts: Counter[str] = Counter()
-    for comment in comments:
-        for token in _WORD.findall(comment.text_display or ""):
+    for text in texts:
+        for token in _WORD.findall(text or ""):
             normalized = token.lower()
             if normalized not in _STOP_WORDS:
                 counts[normalized] += 1
     return [{"word": word, "count": count} for word, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]]
+
+
+def top_words(comments: Iterable[CommentRecord], *, limit: int = 10) -> list[dict[str, int | str]]:
+    """Return stable, language-agnostic word counts from public comments."""
+
+    return top_words_from_texts((comment.text_display for comment in comments), limit=limit)
 
 
 def build_summary(

@@ -3,6 +3,8 @@
 Monitube is a local-first scaffold for collecting YouTube channel, keyword-search, or direct-video results, then processing permitted video metadata and public comments. The service is designed to keep collection work durable: a worker can persist its checkpoint, wait for an allowed quota window, and resume without changing its assigned server runtime configuration.
 
 The implementation plan and policy constraints live in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
+The production database/read-path design and current cutover status live in
+[DATABASE_PERFORMANCE_OPTIMIZATION_PLAN.md](docs/DATABASE_PERFORMANCE_OPTIMIZATION_PLAN.md).
 
 ## Current implementation boundary
 
@@ -16,8 +18,9 @@ configuration. The in-memory repository remains an intentional fallback for isol
 tests or an API started without a database. The worker is a polling-collector runtime
 backed by the same durable schema; it performs live collection only when a configured
 adapter and server-managed key are available. The current MVP is centered on metadata
-and public-comment collection; caption collection is out of scope. Its deterministic collection summary
-(counts, timestamps, and top-word frequencies) is core MVP behavior; future
+and public-comment collection; caption collection is out of scope. Exact counts
+and timestamps come from bounded SQL/rollups, while top-word frequencies are
+produced by a separately leased, bounded analysis worker; future
 model/LLM-derived analytics are not performed by this scaffold. When no server-managed
 `YOUTUBE_API_KEY` is injected, the API and worker intentionally remain in
 fixture/no-op collection mode; this is a healthy, deployable state, not a
@@ -51,6 +54,7 @@ Local endpoints:
 | Web | http://localhost:3000 |
 | API | http://localhost:8000 |
 | API health | http://localhost:8000/health |
+| API readiness | http://localhost:8000/ready |
 | PostgreSQL | `localhost:5432` |
 | Redis | `localhost:6379` |
 | MinIO S3 endpoint | http://localhost:9000 |
@@ -76,13 +80,16 @@ Copy `.env.example` to `.env` and edit only local values. `.env` is ignored by G
 | Variable group | Host-mode value | Container value | Purpose |
 | --- | --- | --- | --- |
 | `DATABASE_URL` / `DATABASE_URL_DOCKER` | `localhost` PostgreSQL URL | `postgres` PostgreSQL URL | API and worker database connection |
-| `REDIS_URL` / `REDIS_URL_DOCKER` | `localhost` Redis URL | `redis` Redis URL | queue, lease, cache, and rate-limit connection |
+| `REDIS_URL` / `REDIS_URL_DOCKER` | `localhost` Redis URL | `redis` Redis URL | optional, reproducible derived-response cache |
 | `S3_ENDPOINT_URL` / `S3_ENDPOINT_URL_DOCKER` | `localhost:9000` | `minio:9000` | analysis-artifact storage endpoint |
 | `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET` | same | same | local MinIO analysis-artifact bucket access |
 | `*_BIND_ADDRESS` / `*_PORT` | `127.0.0.1` and local defaults | n/a | host binding and collision-safe published ports |
 | `NEXT_PUBLIC_API_BASE_URL` | browser-reachable API URL | passed into the web build/runtime | public browser configuration only |
 | `YOUTUBE_API_KEY` | optional local server secret | API/worker only | server-managed YouTube Data API access |
 | `MONITUBE_WORKER_REPLICAS` | `2` | deployment script only | number of concurrent collection workers |
+| `MONITUBE_ANALYSIS_WORKER_REPLICAS` | `1` | deployment script only | number of independent summary workers |
+| `*_DB_POOL_*` | per-process values | same | bounded PostgreSQL connection-pool budgets |
+| `ENABLE_*` performance flags | `false` by default | same | staged write/read/cache cutover controls |
 | `ENABLE_DERIVED_ANALYTICS` | `false` by default | same | policy gate for future model-generated/derived analytics |
 
 `NEXT_PUBLIC_*` values are intentionally browser-visible. Do not put API keys,
@@ -113,11 +120,13 @@ The Compose stack builds three application images:
 
 - `api` uses `infra/docker/api.Dockerfile`, installs `apps/api`, and starts `monitube_api.main:create_app` through Uvicorn with `--factory`.
 - `worker` uses `infra/docker/worker.Dockerfile`, installs the API package for shared contracts, then starts `python -m monitube_worker.worker` with `apps/api` and `apps/worker` on `PYTHONPATH`.
+- `analysis-worker` reuses the worker image but claims only bounded summary runs; it never competes for collection jobs.
 - `web` uses `infra/docker/web.Dockerfile`, builds `apps/web` with npm, and starts the Next.js production server on port 3000.
 
 The `migrate` one-shot service runs committed SQL migrations before API and worker
-startup. API waits for PostgreSQL, Redis, MinIO bootstrap, and a successful migration;
-worker waits for the API health check; web waits for the API health check.
+startup. API waits for PostgreSQL, optional Redis startup, MinIO bootstrap, and a
+successful migration; worker and web wait for API readiness. Redis failure does not
+fail API readiness because PostgreSQL remains the source of truth.
 
 PostgreSQL receives `database/migrations/001_initial_schema.sql` only when its named
 volume is first initialized. The `migrate` service records that initial baseline and
@@ -162,8 +171,10 @@ release/provisioning path. Give it the non-secret repository remote through
 the fixed directory. Later deployments run the checked-out script directly. The
 script refuses a dirty checkout, copies `.env.example` only when `.env` is missing,
 sets restrictive file permissions, keeps `YOUTUBE_API_KEY=` blank in that repository
-file, builds the runtime images, recreates API/worker/web, and verifies `/health`
-from inside the API container.
+file, rejects example production credentials, checks disk headroom, verifies a
+database backup before DB changes, applies expand-only migrations, recreates the
+services, and verifies `/health` plus `/ready`. Operational procedures are in
+[`scripts/runbooks`](scripts/runbooks).
 
 Do not put a YouTube key in `.env`, a shell command, Git configuration, logs, or a
 commit. The deployment host uses the regular, mode-`0600` file

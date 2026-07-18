@@ -102,6 +102,125 @@ class PaginatedRepliesClient:
         raise AssertionError(f"Unexpected endpoint: {endpoint}")
 
 
+class ReplyQuotaClient:
+    def __init__(self) -> None:
+        self.reply_calls = 0
+
+    @staticmethod
+    def bucket_for(_endpoint: str) -> QuotaBucket:
+        return QuotaBucket.CORE
+
+    def request(self, endpoint: str, _params: dict[str, object]):
+        if endpoint == "videos":
+            return {"items": [{
+                "id": "dQw4w9WgXcQ",
+                "snippet": {
+                    "channelId": "UCabcdefghijklmnopqrstuv",
+                    "channelTitle": "Example",
+                    "title": "Demo",
+                    "publishedAt": "2025-01-02T03:04:05Z",
+                },
+                "contentDetails": {"duration": "PT1M2S"},
+                "status": {"privacyStatus": "public", "madeForKids": False},
+                "statistics": {"commentCount": "3"},
+            }]}
+        if endpoint == "commentThreads":
+            return {
+                "items": [{
+                    "id": "thread-quota",
+                    "snippet": {
+                        "totalReplyCount": 2,
+                        "topLevelComment": {
+                            "id": "comment-quota",
+                            "snippet": {
+                                "textDisplay": "Top level",
+                                "publishedAt": "2025-01-03T00:00:00Z",
+                            },
+                        },
+                    },
+                }],
+                "nextPageToken": "uncommitted-parent-page",
+            }
+        if endpoint == "comments":
+            self.reply_calls += 1
+            if self.reply_calls == 1:
+                return {
+                    "items": [{
+                        "id": "reply-before-quota",
+                        "snippet": {
+                            "textDisplay": "First reply",
+                            "parentId": "comment-quota",
+                            "publishedAt": "2025-01-03T00:01:00Z",
+                        },
+                    }],
+                    "nextPageToken": "remaining-replies",
+                }
+            raise YouTubeApiError(
+                endpoint="comments",
+                bucket=QuotaBucket.CORE,
+                status_code=403,
+                payload={"error": {"errors": [{"reason": "quotaExceeded"}]}},
+            )
+        raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+
+def test_checkpoint_replacement_preserves_child_and_fanout_identity() -> None:
+    collector = YouTubeCollector(InMemoryRepository(), DirectVideoClient())
+    collector._active_checkpoint = {
+        "jobKind": "video",
+        "youtubeVideoId": "dQw4w9WgXcQ",
+        "fanoutDiscovered": True,
+        "fanoutVideoCount": 1,
+        "phaseProgress": {"videos": {"completed": 0, "total": 1}},
+    }
+
+    checkpoint = collector._checkpoint_payload(
+        stage="comments",
+        scope_key="dQw4w9WgXcQ",
+        page_token="next-page",
+        batch_cursor=2,
+    )
+
+    assert checkpoint["jobKind"] == "video"
+    assert checkpoint["youtubeVideoId"] == "dQw4w9WgXcQ"
+    assert checkpoint["fanoutDiscovered"] is True
+    assert checkpoint["fanoutVideoCount"] == 1
+    assert checkpoint["pageToken"] == "next-page"
+    assert "stage" not in collector._active_checkpoint
+
+
+def test_reply_quota_does_not_advance_uncommitted_parent_cursor() -> None:
+    repository = InMemoryRepository()
+    source = repository.create_source(
+        source_type=SourceType.VIDEO,
+        config={
+            "input": "dQw4w9WgXcQ",
+            "includeComments": True,
+            "maxCommentPagesPerVideo": 2,
+        },
+    )
+    job = repository.create_job(
+        source_id=source.id,
+        include_comments=True,
+        max_videos=1,
+        max_comments_per_video=2,
+    )
+
+    waiting = JobRunner(
+        repository,
+        YouTubeCollector(repository, ReplyQuotaClient()),
+    ).run(job.id)
+
+    assert waiting.state is JobState.WAITING_QUOTA
+    assert waiting.checkpoint["stage"] == "video_details"
+    assert waiting.checkpoint["youtubeVideoId"] == "dQw4w9WgXcQ"
+    assert waiting.checkpoint.get("pageToken") is None
+    assert waiting.checkpoint.get("pageToken") != "uncommitted-parent-page"
+    assert repository.existing_comment_ids(
+        ["comment-quota", "reply-before-quota"]
+    ) == {"comment-quota", "reply-before-quota"}
+
+
 def test_quota_error_logs_checkpoint_and_due_job_resumes_from_same_cursor() -> None:
     repository = InMemoryRepository()
     source = repository.create_source(
@@ -471,6 +590,7 @@ def test_direct_video_collection_persists_video_comments_and_summary() -> None:
     result = repository.get_source_results(source.id)
 
     assert completed.state is JobState.COMPLETED
+    assert completed.checkpoint["youtubeVideoId"] == "dQw4w9WgXcQ"
     assert result["videos"][0].title == "Demo"
     assert result["comments"][0].youtube_comment_id == "comment-1"
     assert result["analysis"]["topWords"][0]["word"] == "demo"

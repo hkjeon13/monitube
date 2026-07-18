@@ -33,6 +33,9 @@ def main() -> None:
         logger.warning("YOUTUBE_API_KEY is not configured; worker will not claim collection jobs.")
         while not shutdown_requested.wait(timeout=settings.worker_poll_seconds):
             logger.debug("Worker is awaiting the server-managed YouTube credential.")
+        close = getattr(repository, "close", None)
+        if callable(close):
+            close()
         logger.info("Monitube worker stopped.")
         return
 
@@ -76,6 +79,9 @@ def main() -> None:
                 collector.client.replace_keys(registered_keys)
         completed = runner.run(job.id)
         logger.info("Collection job %s entered %s", completed.id, completed.state.value)
+    close = getattr(repository, "close", None)
+    if callable(close):
+        close()
     logger.info("Monitube worker stopped.")
 
 

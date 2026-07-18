@@ -68,22 +68,46 @@ class YouTubeCollector:
         self._active_checkpoint: dict[str, Any] = {}
 
     def _checkpoint(self, job: JobRecord, *, stage: str, scope_key: str, page_token: str | None, batch_cursor: int = 0) -> None:
-        quota_retry_attempt = as_int(self._active_checkpoint.get("quotaRetryAttempt"))
-        phase_progress = self._active_checkpoint.get("phaseProgress")
-        keyword_expected_total = as_int(self._active_checkpoint.get("keywordExpectedTotal"))
-        self._active_checkpoint = {
+        checkpoint = self._checkpoint_payload(
+            stage=stage,
+            scope_key=scope_key,
+            page_token=page_token,
+            batch_cursor=batch_cursor,
+        )
+        self.repository.checkpoint_job(job.id, checkpoint)
+        self._active_checkpoint = checkpoint
+
+    def _checkpoint_payload(
+        self, *, stage: str, scope_key: str, page_token: str | None, batch_cursor: int = 0
+    ) -> dict[str, Any]:
+        """Build a candidate checkpoint without advancing the committed cursor."""
+
+        # These fields identify the durable unit of work or the completed
+        # discovery boundary. They must survive every detail/comment cursor
+        # replacement: losing ``jobKind`` turns a retried child into a full
+        # source collection, while losing ``youtubeVideoId`` also breaks shared
+        # target version invalidation at parent completion.
+        durable_keys = (
+            "jobKind",
+            "youtubeVideoId",
+            "fanoutDiscovered",
+            "fanoutVideoCount",
+            "phaseProgress",
+            "quotaRetryAttempt",
+            "keywordExpectedTotal",
+        )
+        preserved = {
+            key: self._active_checkpoint[key]
+            for key in durable_keys
+            if key in self._active_checkpoint
+        }
+        return {
+            **preserved,
             "stage": stage,
             "scopeKey": scope_key,
             "pageToken": page_token,
             "batchCursor": batch_cursor,
         }
-        if isinstance(phase_progress, dict):
-            self._active_checkpoint["phaseProgress"] = phase_progress
-        if quota_retry_attempt:
-            self._active_checkpoint["quotaRetryAttempt"] = quota_retry_attempt
-        if keyword_expected_total:
-            self._active_checkpoint["keywordExpectedTotal"] = keyword_expected_total
-        self.repository.checkpoint_job(job.id, self._active_checkpoint)
 
     def _set_phase_progress(
         self,
@@ -414,6 +438,30 @@ class YouTubeCollector:
             author_display_name=snippet.get("authorDisplayName"),
         )
 
+    def _persist_comment_page(
+        self,
+        comments: list[CommentRecord],
+        *,
+        job_id: str | None = None,
+        checkpoint: dict[str, Any] | None = None,
+    ) -> list[CommentRecord]:
+        """Use the batch writer when enabled, preserving a rollback switch."""
+
+        if getattr(self.repository, "enable_comment_batch_write", True):
+            stored = self.repository.persist_comment_page(
+                comments, job_id=job_id, checkpoint=checkpoint
+            )
+        else:
+            stored = [self.repository.upsert_comment(comment) for comment in comments]
+            if checkpoint is not None and job_id is not None:
+                self.repository.checkpoint_job(job_id, checkpoint)
+        # The in-memory resume cursor advances only after the data and matching
+        # checkpoint have committed. A reply-page quota/error before this point
+        # must leave the parent commentThreads cursor at its prior boundary.
+        if checkpoint is not None:
+            self._active_checkpoint = dict(checkpoint)
+        return stored
+
     def _collect_remaining_replies(
         self,
         job: JobRecord,
@@ -421,6 +469,7 @@ class YouTubeCollector:
         video_id: str,
         thread_id: str,
         parent_comment_id: str,
+        final_checkpoint: dict[str, Any] | None = None,
     ) -> int:
         """Fetch every reply page for a top-level comment.
 
@@ -442,18 +491,26 @@ class YouTubeCollector:
                 textFormat="plainText",
                 pageToken=page_token,
             )
-            for reply in payload.get("items", []):
-                if reply.get("id"):
-                    self.repository.upsert_comment(
-                        self._comment_from_item(
-                            video_id=video_id,
-                            thread_id=thread_id,
-                            item=reply,
-                            parent_id=parent_comment_id,
-                        )
-                    )
-                    count += 1
-            page_token = payload.get("nextPageToken")
+            reply_page = [
+                self._comment_from_item(
+                    video_id=video_id,
+                    thread_id=thread_id,
+                    item=reply,
+                    parent_id=parent_comment_id,
+                )
+                for reply in payload.get("items", [])
+                if reply.get("id")
+            ]
+            next_page_token = payload.get("nextPageToken")
+            checkpoint = final_checkpoint if not next_page_token else None
+            if reply_page or checkpoint is not None:
+                self._persist_comment_page(
+                    reply_page,
+                    job_id=job.id if checkpoint is not None else None,
+                    checkpoint=checkpoint,
+                )
+                count += len(reply_page)
+            page_token = next_page_token
             if not page_token:
                 return count
 
@@ -493,30 +550,58 @@ class YouTubeCollector:
                         page_comment_ids.append(str(reply["id"]))
             page_comment_ids = list(dict.fromkeys(page_comment_ids))
             known_comment_ids = self.repository.existing_comment_ids(page_comment_ids)
+            page_records: list[CommentRecord] = []
+            reply_traversals: list[tuple[str, str]] = []
             for thread in threads:
                 thread_id = str(thread.get("id") or "")
                 top = (thread.get("snippet") or {}).get("topLevelComment")
                 if top and top.get("id"):
-                    persisted = self.repository.upsert_comment(self._comment_from_item(video_id=video.youtube_video_id, thread_id=thread_id, item=top))
-                    count += 1
+                    top_record = self._comment_from_item(
+                        video_id=video.youtube_video_id,
+                        thread_id=thread_id,
+                        item=top,
+                    )
+                    page_records.append(top_record)
                     inline_replies = ((thread.get("replies") or {}).get("comments") or [])
                     total_replies = as_int((thread.get("snippet") or {}).get("totalReplyCount"))
                     if total_replies > len(inline_replies):
-                        count += self._collect_remaining_replies(
-                            job,
-                            video_id=video.youtube_video_id,
-                            thread_id=thread_id,
-                            parent_comment_id=persisted.youtube_comment_id,
-                        )
+                        reply_traversals.append((thread_id, top_record.youtube_comment_id))
                     else:
                         for reply in inline_replies:
                             if reply.get("id"):
-                                self.repository.upsert_comment(
-                                    self._comment_from_item(video_id=video.youtube_video_id, thread_id=thread_id, item=reply, parent_id=persisted.youtube_comment_id)
+                                page_records.append(
+                                    self._comment_from_item(
+                                        video_id=video.youtube_video_id,
+                                        thread_id=thread_id,
+                                        item=reply,
+                                        parent_id=top_record.youtube_comment_id,
+                                    )
                                 )
-                                count += 1
-            page_token = payload.get("nextPageToken")
-            self._checkpoint(job, stage="comments", scope_key=video.youtube_video_id, page_token=page_token, batch_cursor=page)
+            next_page_token = payload.get("nextPageToken")
+            checkpoint = self._checkpoint_payload(
+                stage="comments",
+                scope_key=video.youtube_video_id,
+                page_token=next_page_token,
+                batch_cursor=page,
+            )
+            if page_records:
+                self._persist_comment_page(
+                    page_records,
+                    job_id=job.id if not reply_traversals else None,
+                    checkpoint=checkpoint if not reply_traversals else None,
+                )
+                count += len(page_records)
+            for traversal_index, (thread_id, parent_comment_id) in enumerate(reply_traversals):
+                count += self._collect_remaining_replies(
+                    job,
+                    video_id=video.youtube_video_id,
+                    thread_id=thread_id,
+                    parent_comment_id=parent_comment_id,
+                    final_checkpoint=checkpoint if traversal_index == len(reply_traversals) - 1 else None,
+                )
+            if not page_records and not reply_traversals:
+                self._persist_comment_page([], job_id=job.id, checkpoint=checkpoint)
+            page_token = next_page_token
             # ``order=time`` makes the first all-known page the incremental
             # boundary. We still upsert that page above so likes/edits remain fresh.
             if incremental_refresh and page_comment_ids and len(known_comment_ids) == len(page_comment_ids):
@@ -570,7 +655,6 @@ class YouTubeCollector:
             if source.type is SourceType.VIDEO:
                 # A direct video request is already the smallest schedulable unit.
                 self._collect_video_job(job, source, video_id=str(source.config["input"]))
-                self.repository.save_analysis_summary(source.id)
                 return
             if source.type is SourceType.CHANNEL:
                 incremental_refresh = bool(source.coverage.get("complete") and source.coverage.get("collectAllVideos"))
@@ -611,7 +695,6 @@ class YouTubeCollector:
             raise RetryableCollectionError("Waiting for video collection jobs", retry_after_seconds=5)
         if failed:
             raise RuntimeError(f"{failed} video collection job(s) failed")
-        self.repository.save_analysis_summary(source.id)
         self._checkpoint(job, stage="completed", scope_key=source.id, page_token=None, batch_cursor=total)
 
     def _collect_video_ids_inline(
@@ -636,13 +719,16 @@ class YouTubeCollector:
             for index, video in enumerate(pending, start=1):
                 self._collect_comments(job, video, max_pages, incremental_refresh=incremental_refresh)
                 self._set_phase_progress(job, phase="comments", completed=done + index, total=len(videos), current_stage="collecting_comments")
-        self.repository.save_analysis_summary(source.id)
         self._checkpoint(job, stage="completed", scope_key=source.id, page_token=None, batch_cursor=len(videos))
 
     def _collect_video_job(self, job: JobRecord, source: Any, *, video_id: str | None = None) -> None:
         video_id = video_id or str(job.checkpoint.get("youtubeVideoId") or "")
         if not video_id:
             raise RuntimeError("Video job is missing youtubeVideoId")
+        # Direct-video parent jobs do not start with the child ``jobKind``
+        # checkpoint. Persist the video identity before the first detail cursor
+        # so retry routing and cross-target terminal invalidation remain exact.
+        self._active_checkpoint["youtubeVideoId"] = video_id
         videos = self._video_records(job, [video_id])
         for video in videos:
             self.repository.link_source_video(source.id, video.youtube_video_id)
