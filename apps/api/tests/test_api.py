@@ -465,5 +465,7 @@ def test_explore_search_and_comment_reads_are_scoped_to_subscribed_targets() -> 
     assert b_search.json()["videos"] == []
     assert b_search.json()["comments"] == []
     assert client.get(f"/v1/videos/{alpha.youtube_video_id}/comments", headers=user_b_headers).status_code == 404
+    assert client.get(f"/v1/videos/{alpha.youtube_video_id}/comment-threads", headers=user_b_headers).status_code == 404
+    assert client.get("/v1/comments/alpha-comment/replies", headers=user_b_headers).status_code == 404
     assert client.get("/v1/comments/alpha-comment", headers=user_b_headers).status_code == 404
     assert client.get(f"/v1/sources/{first['source']['id']}/results", headers=user_b_headers).status_code == 404

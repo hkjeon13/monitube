@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  ArrowLeftIcon,
   ArrowPathIcon,
   CheckCircleIcon,
   ChevronRightIcon,
@@ -44,12 +45,12 @@ import {
   getCommentDetail,
   searchCollected,
   getSourceResults,
-  getVideoComments,
+  getVideoCommentThreads,
   listSources,
   login,
   register,
   updateSource,
-  type CollectedComment,
+  type CommentThreadItem,
   type CollectedVideo,
   type CollectionRequestDisposition,
   type CollectedSearchData,
@@ -60,6 +61,7 @@ import {
   type SourceResults,
   type SourceSummary,
 } from "../lib/api";
+import { CommentRow, CommentThread } from "./comment-thread";
 
 type ViewMetric = "views" | "likes" | "comments";
 const searchScopeLabels: Record<CollectedSearchScope, string> = { all: "전체", videos: "영상", comments: "댓글" };
@@ -374,9 +376,9 @@ function isTerminalJob(job: JobStatus | null | undefined) {
   return job ? ["completed", "completed_with_warnings", "failed", "cancelled"].includes(job.state) : false;
 }
 
-function mergeComments(current: CollectedComment[], incoming: CollectedComment[]) {
-  const seen = new Set(current.map((comment) => comment.id));
-  return [...current, ...incoming.filter((comment) => !seen.has(comment.id))];
+function mergeCommentThreads(current: CommentThreadItem[], incoming: CommentThreadItem[]) {
+  const seen = new Set(current.map((item) => item.comment.id));
+  return [...current, ...incoming.filter((item) => !seen.has(item.comment.id))];
 }
 
 function videoMetric(video: CollectedVideo, metric: ViewMetric) {
@@ -503,7 +505,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   const [isResultsLoading, setIsResultsLoading] = useState(false);
   const [resultsError, setResultsError] = useState<string | null>(null);
   const [selectedVideo, setSelectedVideo] = useState<CollectedVideo | null>(null);
-  const [comments, setComments] = useState<CollectedComment[]>([]);
+  const [commentThreads, setCommentThreads] = useState<CommentThreadItem[]>([]);
   const [nextCommentsCursor, setNextCommentsCursor] = useState<string | undefined>();
   const [isCommentsLoading, setIsCommentsLoading] = useState(false);
   const [commentsError, setCommentsError] = useState<string | null>(null);
@@ -537,8 +539,8 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   const videoTriggerRef = useRef<HTMLElement | null>(null);
   const commentTriggerRef = useRef<HTMLElement | null>(null);
   const collectionDrawerRef = useRef<HTMLElement | null>(null);
-  const videoDrawerRef = useRef<HTMLElement | null>(null);
-  const commentDrawerRef = useRef<HTMLElement | null>(null);
+  const videoModalRef = useRef<HTMLElement | null>(null);
+  const commentThreadsLoadMoreRef = useRef<HTMLDivElement | null>(null);
   const exploreLoadMoreRef = useRef<HTMLDivElement | null>(null);
   const appliedSourceQueryRef = useRef<string | null>(null);
   const searchRequest = useRef(0);
@@ -760,15 +762,15 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     setIsCommentsLoading(true);
     setCommentsError(null);
     try {
-      const response = await getVideoComments(video.id, cursor);
+      const response = await getVideoCommentThreads(video.id, cursor);
       if (requestId !== commentsRequest.current) return;
-      setComments((current) => cursor ? mergeComments(current, response.comments) : response.comments);
+      setCommentThreads((current) => cursor ? mergeCommentThreads(current, response.items) : response.items);
       setNextCommentsCursor(response.nextCursor);
     } catch (caught) {
       if (requestId !== commentsRequest.current) return;
       setCommentsError(caught instanceof Error ? caught.message : "댓글을 불러오지 못했습니다.");
       if (!cursor) {
-        setComments([]);
+        setCommentThreads([]);
         setNextCommentsCursor(undefined);
       }
     } finally {
@@ -787,6 +789,11 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
 
   const closeVideoDrawer = useCallback(() => {
     setSelectedVideo(null);
+    setSelectedCommentId(null);
+    setSelectedCommentDetail(null);
+    setCommentThreads([]);
+    setNextCommentsCursor(undefined);
+    setCommentsError(null);
     restoreFocus(videoTriggerRef.current);
   }, [restoreFocus]);
 
@@ -805,6 +812,9 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
 
   const openVideoDrawer = useCallback((video: CollectedVideo, trigger: HTMLElement) => {
     videoTriggerRef.current = trigger;
+    setSelectedCommentId(null);
+    setSelectedCommentDetail(null);
+    setCommentDetailError(null);
     void loadComments(video);
   }, [loadComments]);
 
@@ -887,6 +897,17 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   }, [hasSearchQuery, isExploreLoadingMore, loadMoreExplore, page, exploreVideos.length, visibleExploreVideos.length]);
 
   useEffect(() => {
+    const sentinel = commentThreadsLoadMoreRef.current;
+    if (!selectedVideo || selectedCommentId || !nextCommentsCursor || !sentinel || isCommentsLoading) return;
+    const scrollRoot = videoModalRef.current?.querySelector<HTMLElement>(".video-modal-scroll") ?? null;
+    const observer = new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) void loadComments(selectedVideo, nextCommentsCursor);
+    }, { root: scrollRoot, rootMargin: "240px 0px" });
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [isCommentsLoading, loadComments, nextCommentsCursor, selectedCommentId, selectedVideo]);
+
+  useEffect(() => {
     if (!activeSourceId) {
       setSourceResults(null);
       return;
@@ -894,7 +915,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     setSelectedVideo(null);
     setSelectedCommentId(null);
     setSelectedCommentDetail(null);
-    setComments([]);
+    setCommentThreads([]);
     setNextCommentsCursor(undefined);
     setCommentsError(null);
     void refreshResults(activeSourceId);
@@ -924,7 +945,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   }, [job, jobSourceId, refreshResults]);
 
   useEffect(() => {
-    const drawer = isCollectionOpen ? collectionDrawerRef.current : selectedCommentId ? commentDrawerRef.current : selectedVideo ? videoDrawerRef.current : null;
+    const drawer = isCollectionOpen ? collectionDrawerRef.current : (selectedCommentId || selectedVideo) ? videoModalRef.current : null;
     if (!drawer) return;
 
     const previousOverflow = document.body.style.overflow;
@@ -1014,6 +1035,14 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   const breadcrumbPage = page === "overview" ? "Channels" : page === "explore" ? "Explore" : page === "sources" ? "Sources" : page === "keywords" ? "Keywords" : page === "jobs" ? "Jobs" : "Insights";
   const breadcrumbDetail = page === "overview" && selectedExploreChannel
     ? selectedExploreChannel.title ?? selectedExploreChannel.handle ?? selectedExploreChannel.youtubeChannelId
+    : null;
+  const activeModalVideo = selectedVideo ?? selectedCommentDetail?.video ?? null;
+  const selectedDetailThread = selectedCommentDetail
+    ? {
+        comment: selectedCommentDetail.parentComment ?? selectedCommentDetail.comment,
+        repliesPreview: selectedCommentDetail.replies,
+        storedReplyCount: selectedCommentDetail.storedReplyCount,
+      }
     : null;
 
   if (authUser === undefined) return <main className="login-page"><p className="explore-loading">세션을 확인하는 중입니다…</p></main>;
@@ -1232,7 +1261,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
                     <div className="search-result-heading"><div><p className="section-kicker">UNIFIED RESULTS</p><h3>“{submittedSearchQuery}” 검색 결과</h3></div><span>{formatCount((searchResults?.videos.length ?? 0) + (searchResults?.comments.length ?? 0))}개</span></div>
                     <div className="search-result-columns">
                       {submittedSearchScope !== "comments" && <section><h4>동영상</h4>{searchResults?.videos.map((result) => <button className="search-video-result" type="button" key={result.video.id} onClick={(event) => openVideoDrawer(result.video, event.currentTarget)}><img src={youtubeThumbnail(result.video.youtubeVideoId)} alt="" /><span><strong>{result.video.title}</strong><small>{result.matchedFields.map(searchFieldLabel).join(" · ")} · 유사도 {Math.round(result.score * 100)}%</small></span><ChevronRightIcon aria-hidden="true" /></button>)}{!isSearchLoading && (searchResults?.videos.length ?? 0) === 0 && <p className="search-empty">일치하는 동영상이 없습니다.</p>}</section>}
-                      {submittedSearchScope !== "videos" && <section><h4>댓글</h4>{searchResults?.comments.map((result) => <button className="search-comment-result" type="button" key={result.comment.id} onClick={(event) => void openCommentDetail(result.comment.id, event.currentTarget)}><strong>{result.video.title}</strong><p>{result.comment.text}</p><small>{result.channelTitle ?? "수집 채널"} · {result.matchedFields.map(searchFieldLabel).join(" · ")} · 유사도 {Math.round(result.score * 100)}%</small></button>)}{!isSearchLoading && (searchResults?.comments.length ?? 0) === 0 && <p className="search-empty">일치하는 댓글이 없습니다.</p>}</section>}
+                      {submittedSearchScope !== "videos" && <section><h4>댓글</h4>{searchResults?.comments.map((result) => <div className="search-comment-result" key={result.comment.id}><CommentRow compact comment={result.comment} context={<><strong>{result.video.title}</strong><small>{result.channelTitle ?? "수집 채널"} · {result.matchedFields.map(searchFieldLabel).join(" · ")} · 유사도 {Math.round(result.score * 100)}%</small></>} onOpenDetail={openCommentDetail} /></div>)}{!isSearchLoading && (searchResults?.comments.length ?? 0) === 0 && <p className="search-empty">일치하는 댓글이 없습니다.</p>}</section>}
                     </div>
                     {isSearchLoading && <p className="explore-loading">검색 결과를 갱신하는 중입니다…</p>}
                   </>
@@ -1591,41 +1620,72 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
         </div>
       )}
 
-      {selectedVideo && (
-        <div className="drawer-layer video-drawer-layer">
-          <div className="drawer-backdrop" aria-hidden="true" onClick={closeVideoDrawer} />
-          <aside ref={videoDrawerRef} className="video-drawer" role="dialog" aria-modal="true" aria-labelledby="video-drawer-title" tabIndex={-1}>
-            <div className="drawer-heading"><div><p className="section-kicker">VIDEO DETAIL</p><h2 id="video-drawer-title">{selectedVideo.title}</h2><p>{selectedVideo.youtubeVideoId}</p></div><button className="icon-button" type="button" aria-label="동영상 상세 창 닫기" data-drawer-initial-focus onClick={closeVideoDrawer}><XMarkIcon aria-hidden="true" /></button></div>
-            <dl className="video-meta-grid"><div><dt>게시일</dt><dd>{formatDate(selectedVideo.publishedAt)}</dd></div><div><dt>길이</dt><dd>{formatDuration(selectedVideo.durationSeconds)}</dd></div><div><dt>조회</dt><dd>{formatCount(selectedVideo.viewCount)}</dd></div><div><dt>좋아요</dt><dd>{formatCount(selectedVideo.likeCount)}</dd></div><div><dt>YouTube 댓글</dt><dd>{formatCount(selectedVideo.commentCount)}</dd></div><div><dt>공개 상태</dt><dd>{selectedVideo.privacyStatus ?? "—"}</dd></div></dl>
-            <section className="drawer-comments" aria-labelledby="comments-title"><div className="drawer-comments-heading"><div><p className="section-kicker">PUBLIC COMMENTS</p><h3 id="comments-title">수집된 공개 댓글</h3></div><button className="icon-button" type="button" aria-label="댓글 새로고침" disabled={isCommentsLoading} onClick={() => void loadComments(selectedVideo)}><ArrowPathIcon aria-hidden="true" /></button></div>
-              {commentsError && <p className="inline-error" role="status">{commentsError}</p>}
-              {isCommentsLoading && comments.length === 0 ? <p className="comments-loading">공개 댓글을 불러오는 중입니다…</p> : null}
-              {!isCommentsLoading && !commentsError && comments.length === 0 ? <p className="comments-loading">저장된 공개 댓글이 없거나 댓글 수집이 선택되지 않았습니다.</p> : null}
-              {comments.length > 0 && <div className="comment-list">{comments.map((comment) => <article className="comment-item" key={comment.id}><p>{comment.text}</p><footer><span>{formatDate(comment.publishedAt)}</span>{comment.likeCount !== undefined && <span>좋아요 {formatCount(comment.likeCount)}</span>}</footer></article>)}</div>}
-              {nextCommentsCursor && <button className="secondary-action comments-load-more" type="button" disabled={isCommentsLoading} onClick={() => void loadComments(selectedVideo, nextCommentsCursor)}>{isCommentsLoading ? "댓글을 불러오는 중…" : "댓글 더 보기"}</button>}
-            </section>
-          </aside>
-        </div>
-      )}
-
-      {selectedCommentId && (
-        <div className="drawer-layer video-drawer-layer">
-          <div className="drawer-backdrop" aria-hidden="true" onClick={closeCommentDetail} />
-          <aside ref={commentDrawerRef} className="video-drawer comment-detail-drawer" role="dialog" aria-modal="true" aria-labelledby="comment-detail-title" tabIndex={-1}>
-            <div className="drawer-heading"><div><p className="section-kicker">COMMENT DETAIL</p><h2 id="comment-detail-title">{selectedCommentDetail?.comment.authorName ?? "공개 댓글"}</h2><p>{selectedCommentDetail?.comment.authorChannelId ?? "작성자 채널 ID를 불러오는 중"}</p></div><button className="icon-button" type="button" aria-label="댓글 상세 창 닫기" data-drawer-initial-focus onClick={closeCommentDetail}><XMarkIcon aria-hidden="true" /></button></div>
-            {isCommentDetailLoading && <p className="comments-loading">댓글 상세 정보를 불러오는 중입니다…</p>}
-            {commentDetailError && <p className="inline-error" role="status">{commentDetailError}</p>}
-            {selectedCommentDetail && <>
-              <section className="comment-detail-section"><p className="section-kicker">SELECTED COMMENT</p><p className="comment-detail-text">{selectedCommentDetail.comment.text}</p><footer><span>{formatDate(selectedCommentDetail.comment.publishedAt)}</span>{selectedCommentDetail.comment.likeCount !== undefined && <span>좋아요 {formatCount(selectedCommentDetail.comment.likeCount)}</span>}</footer></section>
-              {selectedCommentDetail.replies.length > 0 && <section className="drawer-comments comment-replies" aria-labelledby="comment-replies-title"><div><p className="section-kicker">REPLIES</p><h3 id="comment-replies-title">이 댓글의 답글</h3></div><div className="comment-list">{selectedCommentDetail.replies.map((reply) => <article className="comment-item comment-reply-item" key={reply.id}>{reply.authorName && <strong>{reply.authorName}</strong>}<p>{reply.text}</p><footer><span>{formatDate(reply.publishedAt)}</span>{reply.likeCount !== undefined && <span>좋아요 {formatCount(reply.likeCount)}</span>}</footer></article>)}</div></section>}
-              <section className="comment-detail-section"><p className="section-kicker">ON VIDEO</p><button className="comment-detail-video" type="button" onClick={(event) => { closeCommentDetail(); openVideoDrawer(selectedCommentDetail.video, event.currentTarget); }}><strong>{selectedCommentDetail.video.title}</strong><span>{selectedCommentDetail.video.youtubeVideoId}</span><ChevronRightIcon aria-hidden="true" /></button></section>
-              <section className="drawer-comments comment-author-comments" aria-labelledby="author-comments-title"><div><p className="section-kicker">SAME AUTHOR</p><h3 id="author-comments-title">이 작성자의 다른 댓글</h3></div>
-                {!selectedCommentDetail.comment.authorChannelId && <p className="comments-loading">기존에 저장된 이 댓글에는 작성자 채널 ID가 없습니다. 댓글을 새로 수집하거나 갱신한 뒤부터 동일 작성자의 댓글을 함께 볼 수 있습니다.</p>}
-                {selectedCommentDetail.comment.authorChannelId && selectedCommentDetail.authorComments.length === 0 && <p className="comments-loading">같은 작성자의 다른 저장 댓글이 아직 없습니다.</p>}
-                {selectedCommentDetail.authorComments.length > 0 && <div className="comment-list">{selectedCommentDetail.authorComments.map((item) => <article className="comment-item comment-author-item" key={item.comment.id}><button type="button" onClick={(event) => void openCommentDetail(item.comment.id, event.currentTarget)}><p>{item.comment.text}</p><strong>{item.video.title}</strong><footer><span>{formatDate(item.comment.publishedAt)}</span>{item.comment.likeCount !== undefined && <span>좋아요 {formatCount(item.comment.likeCount)}</span>}</footer></button></article>)}</div>}
-              </section>
-            </>}
-          </aside>
+      {(selectedVideo || selectedCommentId) && (
+        <div className="video-modal-layer">
+          <div className="video-modal-backdrop" aria-hidden="true" onClick={selectedVideo ? closeVideoDrawer : closeCommentDetail} />
+          <section ref={videoModalRef} className="video-modal" role="dialog" aria-modal="true" aria-labelledby={selectedCommentId ? "comment-detail-title" : "video-modal-title"} tabIndex={-1}>
+            <div className="video-modal-toolbar">
+              {selectedCommentId && selectedVideo ? (
+                <button className="icon-button" type="button" aria-label="영상 댓글로 돌아가기" data-drawer-initial-focus onClick={closeCommentDetail}><ArrowLeftIcon aria-hidden="true" /></button>
+              ) : <span />}
+              <button className="icon-button" type="button" aria-label="상세 팝업 닫기" data-drawer-initial-focus={!selectedCommentId || !selectedVideo ? true : undefined} onClick={selectedVideo ? closeVideoDrawer : closeCommentDetail}><XMarkIcon aria-hidden="true" /></button>
+            </div>
+            <div className="video-modal-scroll">
+              {selectedCommentId ? (
+                <div className="comment-detail-view">
+                  <header className="comment-detail-header">
+                    <p className="section-kicker">COMMENT DETAIL</p>
+                    <h2 id="comment-detail-title">댓글 스레드</h2>
+                    {activeModalVideo && <p>{activeModalVideo.title}</p>}
+                  </header>
+                  {isCommentDetailLoading && <div className="comments-loading" role="status"><span className="loading-spinner" aria-hidden="true" />댓글 상세 정보를 불러오는 중입니다.</div>}
+                  {commentDetailError && <div className="inline-error" role="status">{commentDetailError}</div>}
+                  {selectedCommentDetail && selectedDetailThread && <>
+                    <section className="comment-detail-thread" aria-label="선택한 댓글 스레드">
+                      <CommentThread item={selectedDetailThread} onOpenDetail={openCommentDetail} selectedCommentId={selectedCommentId} />
+                    </section>
+                    <section className="comment-detail-video-section">
+                      <p className="section-kicker">ON VIDEO</p>
+                      <button className="comment-detail-video" type="button" onClick={(event) => { setSelectedCommentId(null); setSelectedCommentDetail(null); openVideoDrawer(selectedCommentDetail.video, event.currentTarget); }}>
+                        <img src={youtubeThumbnail(selectedCommentDetail.video.youtubeVideoId)} alt="" />
+                        <span><strong>{selectedCommentDetail.video.title}</strong><small>{selectedCommentDetail.video.youtubeVideoId}</small></span>
+                        <ChevronRightIcon aria-hidden="true" />
+                      </button>
+                    </section>
+                    <section className="comment-author-comments" aria-labelledby="author-comments-title">
+                      <div><p className="section-kicker">SAME AUTHOR</p><h3 id="author-comments-title">이 작성자의 다른 댓글</h3></div>
+                      {!selectedCommentDetail.comment.authorChannelId && <p className="comments-loading">저장된 작성자 식별 정보가 없어 다른 댓글을 연결할 수 없습니다.</p>}
+                      {selectedCommentDetail.comment.authorChannelId && selectedCommentDetail.authorComments.length === 0 && <p className="comments-loading">같은 작성자의 다른 저장 댓글이 아직 없습니다.</p>}
+                      {selectedCommentDetail.authorComments.length > 0 && <div className="comment-author-list">{selectedCommentDetail.authorComments.map((item) => <div className="comment-author-result" key={item.comment.id}><CommentRow compact comment={item.comment} context={<strong>{item.video.title}</strong>} onOpenDetail={openCommentDetail} /></div>)}</div>}
+                    </section>
+                  </>}
+                </div>
+              ) : selectedVideo ? (
+                <>
+                  <header className="video-modal-hero">
+                    <img className="video-modal-thumbnail" src={youtubeThumbnail(selectedVideo.youtubeVideoId)} alt={`${selectedVideo.title} 썸네일`} />
+                    <div className="video-modal-summary">
+                      <p className="section-kicker">VIDEO DETAIL</p>
+                      <h2 id="video-modal-title">{selectedVideo.title}</h2>
+                      <p className="video-modal-id">{selectedVideo.youtubeVideoId}</p>
+                      <p className="video-modal-description">{selectedVideo.description ?? "저장된 영상 설명이 없습니다."}</p>
+                      <dl className="video-meta-grid"><div><dt>게시일</dt><dd>{formatDate(selectedVideo.publishedAt)}</dd></div><div><dt>길이</dt><dd>{formatDuration(selectedVideo.durationSeconds)}</dd></div><div><dt>조회</dt><dd>{formatCount(selectedVideo.viewCount)}</dd></div><div><dt>좋아요</dt><dd>{formatCount(selectedVideo.likeCount)}</dd></div><div><dt>YouTube 댓글</dt><dd>{formatCount(selectedVideo.commentCount)}</dd></div><div><dt>공개 상태</dt><dd>{selectedVideo.privacyStatus ?? "—"}</dd></div></dl>
+                    </div>
+                  </header>
+                  <section className="video-comments" aria-labelledby="comments-title" aria-busy={isCommentsLoading}>
+                    <div className="video-comments-heading"><div><p className="section-kicker">PUBLIC COMMENTS</p><h3 id="comments-title">수집된 공개 댓글</h3></div><button className="icon-button" type="button" aria-label="댓글 새로고침" disabled={isCommentsLoading} onClick={() => void loadComments(selectedVideo)}><ArrowPathIcon aria-hidden="true" /></button></div>
+                    {commentsError && <div className="comment-load-error" role="status"><span>{commentsError}</span><button type="button" onClick={() => void loadComments(selectedVideo)}>다시 시도</button></div>}
+                    {isCommentsLoading && commentThreads.length === 0 && <div className="comments-loading" role="status"><span className="loading-spinner" aria-hidden="true" />공개 댓글을 불러오는 중입니다.</div>}
+                    {!isCommentsLoading && !commentsError && commentThreads.length === 0 && <p className="comments-loading">저장된 공개 댓글이 없거나 댓글 수집이 선택되지 않았습니다.</p>}
+                    {commentThreads.length > 0 && <div className="yt-comment-list">{commentThreads.map((item) => <CommentThread item={item} onOpenDetail={openCommentDetail} key={item.comment.id} />)}</div>}
+                    <div className="comment-load-sentinel" ref={commentThreadsLoadMoreRef} aria-hidden="true" />
+                    {isCommentsLoading && commentThreads.length > 0 && <div className="comment-list-loading" role="status"><span className="loading-spinner" aria-hidden="true" />댓글을 더 불러오는 중</div>}
+                    {nextCommentsCursor && !isCommentsLoading && <button className="comments-load-more" type="button" onClick={() => void loadComments(selectedVideo, nextCommentsCursor)}>댓글 더 보기</button>}
+                  </section>
+                </>
+              ) : null}
+            </div>
+          </section>
         </div>
       )}
 

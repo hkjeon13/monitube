@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import base64
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta
 import hashlib
+import json
 from threading import RLock
 from typing import Any, Iterable, Protocol
 
@@ -38,6 +40,29 @@ class NotFoundError(RepositoryError):
 
 class InvalidStateTransitionError(RepositoryError):
     pass
+
+
+def _comment_sort_key(comment: CommentRecord) -> tuple[datetime, str]:
+    return (comment.published_at or comment.source_fetched_at, comment.youtube_comment_id)
+
+
+def encode_comment_cursor(comment: CommentRecord) -> str:
+    payload = json.dumps(
+        {"at": _comment_sort_key(comment)[0].isoformat(), "id": comment.youtube_comment_id},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def decode_comment_cursor(cursor: str | None) -> tuple[datetime, str] | None:
+    if not cursor:
+        return None
+    try:
+        padding = "=" * (-len(cursor) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(cursor + padding).decode("utf-8"))
+        return datetime.fromisoformat(str(payload["at"])), str(payload["id"])
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+        raise RepositoryError("Invalid comment cursor") from exc
 
 
 class SourceRepository(Protocol):
@@ -156,6 +181,14 @@ class CollectionRepository(SourceRepository, JobRepository, CollectionRequestRep
     def get_source_results(self, source_id: str, *, owner_id: str | None = None) -> dict[str, Any]: ...
 
     def get_video_comments(self, video_id: str, *, owner_id: str | None = None) -> dict[str, Any]: ...
+
+    def get_video_comment_threads(
+        self, video_id: str, *, owner_id: str | None = None, cursor: str | None = None, limit: int = 20
+    ) -> dict[str, Any]: ...
+
+    def get_comment_replies(
+        self, comment_id: str, *, owner_id: str | None = None, cursor: str | None = None, limit: int = 20
+    ) -> dict[str, Any]: ...
 
     def get_comment_detail(self, comment_id: str, *, owner_id: str | None = None) -> dict[str, Any]: ...
 
@@ -1237,16 +1270,29 @@ class InMemoryRepository(CollectionRepository):
             video = self._videos.get(comment.youtube_video_id)
             if not video:
                 raise NotFoundError(f"Video '{comment.youtube_video_id}' was not found")
+            parent_comment = (
+                self._comments.get(comment.youtube_parent_comment_id)
+                if comment.youtube_parent_comment_id
+                else None
+            )
+            root_comment_id = parent_comment.youtube_comment_id if parent_comment else comment.youtube_comment_id
             replies = [
                 item
                 for item in self._comments.values()
-                if item.youtube_parent_comment_id == comment.youtube_comment_id
+                if item.youtube_parent_comment_id == root_comment_id
                 and (visible_video_ids is None or item.youtube_video_id in visible_video_ids)
             ]
             # Render a thread in conversation order.  ``source_fetched_at`` is
             # a deterministic fallback for older records without a publish date.
             replies.sort(key=lambda item: (item.published_at or item.source_fetched_at, item.youtube_comment_id))
             reply_ids = {item.youtube_comment_id for item in replies}
+            stored_reply_count = len(replies)
+            display_replies = replies[:2]
+            if comment.youtube_parent_comment_id and comment.youtube_comment_id not in {
+                item.youtube_comment_id for item in display_replies
+            }:
+                display_replies.append(comment)
+                display_replies.sort(key=_comment_sort_key)
             author_comments = []
             if comment.author_channel_id:
                 for item in self._comments.values():
@@ -1266,7 +1312,9 @@ class InMemoryRepository(CollectionRepository):
             return {
                 "comment": comment,
                 "video": video,
-                "replies": replies,
+                "parent_comment": parent_comment,
+                "replies": display_replies,
+                "stored_reply_count": stored_reply_count,
                 "author_comments": author_comments[:50],
             }
 
@@ -1544,3 +1592,81 @@ class InMemoryRepository(CollectionRepository):
                 raise NotFoundError(f"Video '{video_id}' was not found")
             comments = self._comments_for_video_ids({video_id})
             return {"video": video, "comments": comments, "summary": build_summary([video], comments)}
+
+    def get_video_comment_threads(
+        self, video_id: str, *, owner_id: str | None = None, cursor: str | None = None, limit: int = 20
+    ) -> dict[str, Any]:
+        with self._lock:
+            video = self._videos.get(video_id)
+            if not video:
+                raise NotFoundError(f"Video '{video_id}' was not found")
+            visible_video_ids = self._visible_video_ids_locked(owner_id)
+            if visible_video_ids is not None and video_id not in visible_video_ids:
+                raise NotFoundError(f"Video '{video_id}' was not found")
+
+            cursor_key = decode_comment_cursor(cursor)
+            top_level = sorted(
+                (
+                    comment
+                    for comment in self._comments.values()
+                    if comment.youtube_video_id == video_id and not comment.youtube_parent_comment_id
+                ),
+                key=_comment_sort_key,
+                reverse=True,
+            )
+            if cursor_key:
+                top_level = [comment for comment in top_level if _comment_sort_key(comment) < cursor_key]
+            page = top_level[: limit + 1]
+            has_more = len(page) > limit
+            page = page[:limit]
+
+            items: list[dict[str, Any]] = []
+            for comment in page:
+                replies = sorted(
+                    (
+                        reply
+                        for reply in self._comments.values()
+                        if reply.youtube_parent_comment_id == comment.youtube_comment_id
+                    ),
+                    key=_comment_sort_key,
+                )
+                items.append({
+                    "comment": comment,
+                    "replies_preview": replies[:2],
+                    "stored_reply_count": len(replies),
+                })
+            return {
+                "video": video,
+                "items": items,
+                "next_cursor": encode_comment_cursor(page[-1]) if has_more and page else None,
+            }
+
+    def get_comment_replies(
+        self, comment_id: str, *, owner_id: str | None = None, cursor: str | None = None, limit: int = 20
+    ) -> dict[str, Any]:
+        with self._lock:
+            comment = self._comments.get(comment_id)
+            if not comment:
+                raise NotFoundError(f"Comment '{comment_id}' was not found")
+            visible_video_ids = self._visible_video_ids_locked(owner_id)
+            if visible_video_ids is not None and comment.youtube_video_id not in visible_video_ids:
+                raise NotFoundError(f"Comment '{comment_id}' was not found")
+            root_comment_id = comment.youtube_parent_comment_id or comment.youtube_comment_id
+            cursor_key = decode_comment_cursor(cursor)
+            replies = sorted(
+                (
+                    reply
+                    for reply in self._comments.values()
+                    if reply.youtube_parent_comment_id == root_comment_id
+                ),
+                key=_comment_sort_key,
+            )
+            if cursor_key:
+                replies = [reply for reply in replies if _comment_sort_key(reply) > cursor_key]
+            page = replies[: limit + 1]
+            has_more = len(page) > limit
+            page = page[:limit]
+            return {
+                "comments": page,
+                "next_cursor": encode_comment_cursor(page[-1]) if has_more and page else None,
+            }

@@ -395,6 +395,23 @@ class VideoCommentsResponse(ApiModel):
     summary: CommentSummary = Field(default_factory=CommentSummary)
 
 
+class CommentThreadItem(ApiModel):
+    comment: CollectedComment
+    repliesPreview: list[CollectedComment] = Field(default_factory=list)
+    storedReplyCount: int = Field(default=0, ge=0)
+
+
+class VideoCommentThreadsResponse(ApiModel):
+    video: CollectedVideo
+    items: list[CommentThreadItem] = Field(default_factory=list)
+    nextCursor: str | None = None
+
+
+class CommentRepliesResponse(ApiModel):
+    comments: list[CollectedComment] = Field(default_factory=list)
+    nextCursor: str | None = None
+
+
 class AuthorCommentResult(ApiModel):
     comment: CollectedComment
     video: CollectedVideo
@@ -404,6 +421,8 @@ class AuthorCommentResult(ApiModel):
 class CommentDetailResponse(ApiModel):
     comment: CollectedComment
     video: CollectedVideo
+    parentComment: CollectedComment | None = None
+    storedReplyCount: int = Field(default=0, ge=0)
     # Replies belong to the selected comment's thread.  They are intentionally
     # separate from ``authorComments`` because a reply can be written by any
     # viewer, not only the selected comment's author.

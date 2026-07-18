@@ -14,7 +14,9 @@ from .contracts import (
     CollectedComment,
     CollectedVideo,
     AuthorCommentResult,
+    CommentRepliesResponse,
     CommentDetailResponse,
+    CommentThreadItem,
     CommentSummary,
     CollectionSource,
     CollectionSourceCreate,
@@ -36,6 +38,7 @@ from .contracts import (
     UnifiedSearchResponse,
     SourceConfig,
     VideoCommentsResponse,
+    VideoCommentThreadsResponse,
     VideoStatistics,
     VideoCollectionSource,
     VideoSourceConfig,
@@ -339,10 +342,42 @@ class CollectionService:
             summary=_comment_summary(result["summary"]),
         )
 
+    def get_video_comment_threads(
+        self, video_id: str, *, owner_id: str | None = None, cursor: str | None = None, limit: int = 20
+    ) -> VideoCommentThreadsResponse:
+        result = self.repository.get_video_comment_threads(
+            video_id, owner_id=owner_id, cursor=cursor, limit=limit
+        )
+        return VideoCommentThreadsResponse(
+            video=_video_contract(result["video"]),
+            items=[
+                CommentThreadItem(
+                    comment=_comment_contract(item["comment"]),
+                    repliesPreview=[_comment_contract(reply) for reply in item["replies_preview"]],
+                    storedReplyCount=item["stored_reply_count"],
+                )
+                for item in result["items"]
+            ],
+            nextCursor=result.get("next_cursor"),
+        )
+
+    def get_comment_replies(
+        self, comment_id: str, *, owner_id: str | None = None, cursor: str | None = None, limit: int = 20
+    ) -> CommentRepliesResponse:
+        result = self.repository.get_comment_replies(
+            comment_id, owner_id=owner_id, cursor=cursor, limit=limit
+        )
+        return CommentRepliesResponse(
+            comments=[_comment_contract(comment) for comment in result["comments"]],
+            nextCursor=result.get("next_cursor"),
+        )
+
     def get_comment_detail(self, comment_id: str, *, owner_id: str | None = None) -> CommentDetailResponse:
         result = self.repository.get_comment_detail(comment_id, owner_id=owner_id)
         return CommentDetailResponse(
             comment=_comment_contract(result["comment"]), video=_video_contract(result["video"]),
+            parentComment=_comment_contract(result["parent_comment"]) if result.get("parent_comment") else None,
+            storedReplyCount=result.get("stored_reply_count", len(result.get("replies", []))),
             replies=[_comment_contract(reply) for reply in result.get("replies", [])],
             authorComments=[AuthorCommentResult(
                 comment=_comment_contract(item["comment"]), video=_video_contract(item["video"]),

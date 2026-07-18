@@ -39,6 +39,7 @@ export interface CollectedVideo {
   youtubeVideoId: string;
   channelId?: string;
   title: string;
+  description?: string;
   publishedAt?: string;
   viewCount?: number;
   likeCount?: number;
@@ -80,19 +81,35 @@ export interface SourceResults {
 export interface CollectedComment {
   id: string;
   text: string;
+  videoId?: string;
+  parentCommentId?: string;
+  threadId?: string;
   publishedAt?: string;
   likeCount?: number;
   authorName?: string;
   authorChannelId?: string;
 }
 
-export interface PagedComments {
+export interface CommentThreadItem {
+  comment: CollectedComment;
+  repliesPreview: CollectedComment[];
+  storedReplyCount: number;
+}
+
+export interface PagedCommentThreads {
+  items: CommentThreadItem[];
+  nextCursor?: string;
+}
+
+export interface PagedCommentReplies {
   comments: CollectedComment[];
   nextCursor?: string;
 }
 
 export interface CommentDetailData {
   comment: CollectedComment;
+  parentComment?: CollectedComment;
+  storedReplyCount: number;
   video: CollectedVideo;
   replies: CollectedComment[];
   authorComments: Array<{
@@ -363,6 +380,7 @@ function normalizeVideo(value: unknown): CollectedVideo | null {
       ? { channelId: asText(record.channelId ?? record.channel_id ?? record.youtubeChannelId ?? record.youtube_channel_id) }
       : {}),
     title: asText(record.title ?? record.name) ?? "제목 없는 동영상",
+    ...(asText(record.description ?? record.summary) ? { description: asText(record.description ?? record.summary) } : {}),
     ...(asText(record.publishedAt ?? record.published_at ?? record.published) ? {
       publishedAt: asText(record.publishedAt ?? record.published_at ?? record.published),
     } : {}),
@@ -421,6 +439,11 @@ function normalizeComment(value: unknown): CollectedComment | null {
   return {
     id,
     text,
+    ...(asText(record.videoId ?? record.video_id) ? { videoId: asText(record.videoId ?? record.video_id) } : {}),
+    ...(asText(record.parentCommentId ?? record.parent_comment_id)
+      ? { parentCommentId: asText(record.parentCommentId ?? record.parent_comment_id) }
+      : {}),
+    ...(asText(record.threadId ?? record.thread_id) ? { threadId: asText(record.threadId ?? record.thread_id) } : {}),
     ...(asText(record.publishedAt ?? record.published_at ?? record.published)
       ? { publishedAt: asText(record.publishedAt ?? record.published_at ?? record.published) }
       : {}),
@@ -656,19 +679,44 @@ export async function getSourceResults(sourceId: string): Promise<SourceResults>
   };
 }
 
-export async function getVideoComments(videoId: string, cursor?: string): Promise<PagedComments> {
-  const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
-  const response = await request<unknown>(`/v1/videos/${encodeURIComponent(videoId)}/comments${query}`, {
+export async function getVideoCommentThreads(videoId: string, cursor?: string): Promise<PagedCommentThreads> {
+  const query = new URLSearchParams({ limit: "20" });
+  if (cursor) query.set("cursor", cursor);
+  const response = await request<unknown>(`/v1/videos/${encodeURIComponent(videoId)}/comment-threads?${query.toString()}`, {
     method: "GET",
   });
-  const record = asRecord(response);
-  const commentValues = Array.isArray(response)
-    ? response
-    : firstArray(record ?? {}, ["comments", "items", "results", "data"]);
+  const record = asRecord(response) ?? {};
   const nextCursor = asText(record?.nextCursor ?? record?.next_cursor ?? record?.nextPageToken ?? record?.next_page_token);
 
   return {
-    comments: commentValues.flatMap((comment) => {
+    items: firstArray(record, ["items", "threads", "results"]).flatMap((item) => {
+      const itemRecord = asRecord(item);
+      const comment = normalizeComment(itemRecord?.comment);
+      if (!comment) return [];
+      const repliesPreview = firstArray(itemRecord ?? {}, ["repliesPreview", "replies_preview", "replies"]).flatMap((reply) => {
+        const normalized = normalizeComment(reply);
+        return normalized ? [normalized] : [];
+      });
+      return [{
+        comment,
+        repliesPreview,
+        storedReplyCount: asNumber(itemRecord?.storedReplyCount ?? itemRecord?.stored_reply_count) ?? repliesPreview.length,
+      }];
+    }),
+    ...(nextCursor ? { nextCursor } : {}),
+  };
+}
+
+export async function getCommentReplies(commentId: string, cursor?: string): Promise<PagedCommentReplies> {
+  const query = new URLSearchParams({ limit: "20" });
+  if (cursor) query.set("cursor", cursor);
+  const response = await request<unknown>(`/v1/comments/${encodeURIComponent(commentId)}/replies?${query.toString()}`, {
+    method: "GET",
+  });
+  const record = asRecord(response) ?? {};
+  const nextCursor = asText(record.nextCursor ?? record.next_cursor);
+  return {
+    comments: firstArray(record, ["comments", "items", "replies"]).flatMap((comment) => {
       const normalized = normalizeComment(comment);
       return normalized ? [normalized] : [];
     }),
@@ -680,16 +728,19 @@ export async function getCommentDetail(commentId: string): Promise<CommentDetail
   const response = await request<unknown>(`/v1/comments/${encodeURIComponent(commentId)}`, { method: "GET" });
   const record = asRecord(response) ?? {};
   const comment = normalizeComment(record.comment);
+  const parentComment = normalizeComment(record.parentComment ?? record.parent_comment);
   const video = normalizeVideo(record.video);
   if (!comment || !video) throw new ApiError("댓글 상세 정보를 해석하지 못했습니다.", 500);
 
   return {
     comment,
+    ...(parentComment ? { parentComment } : {}),
+    storedReplyCount: asNumber(record.storedReplyCount ?? record.stored_reply_count) ?? 0,
     video,
     replies: firstArray(record, ["replies", "replyComments", "reply_comments"]).flatMap((item) => {
       const itemRecord = asRecord(item);
       const reply = normalizeComment(itemRecord?.comment ?? item);
-      return reply && reply.id !== comment.id ? [reply] : [];
+      return reply ? [reply] : [];
     }),
     authorComments: firstArray(record, ["authorComments", "author_comments"]).flatMap((item) => {
       const itemRecord = asRecord(item);

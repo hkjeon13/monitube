@@ -69,6 +69,70 @@ def test_source_results_and_video_comments_are_queryable() -> None:
     assert comments.json()["comments"][0]["text"] == "Great FastAPI video"
 
 
+def test_comment_threads_use_stable_top_level_pages_and_reply_pages() -> None:
+    repository = InMemoryRepository()
+    client, _, worker_source_id = _subscribed_video_source(repository, "threadVid01")
+    video = repository.upsert_video(
+        VideoRecord(
+            id="thread-video-row", youtube_video_id="threadVid01", youtube_channel_id="UCthreads",
+            title="Threaded comments", description="Example", published_at=datetime(2025, 1, 1, tzinfo=UTC),
+            duration_seconds=60, privacy_status="public", made_for_kids=False, statistics={},
+            source_fetched_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+    )
+    repository.link_source_video(worker_source_id, video.youtube_video_id)
+    for index in range(1, 4):
+        repository.upsert_comment(
+            CommentRecord(
+                id=f"top-row-{index}", youtube_comment_id=f"top-{index}", youtube_video_id=video.youtube_video_id,
+                youtube_parent_comment_id=None, youtube_thread_id=f"thread-{index}", text_display=f"원댓글 {index}",
+                author_channel_id=f"UCauthor{index}", author_display_name=f"작성자 {index}", like_count=index,
+                published_at=datetime(2025, 1, index + 1, tzinfo=UTC), updated_at=None,
+                source_fetched_at=datetime(2025, 1, index + 1, tzinfo=UTC),
+            )
+        )
+    for index in range(1, 4):
+        repository.upsert_comment(
+            CommentRecord(
+                id=f"reply-row-{index}", youtube_comment_id=f"reply-{index}", youtube_video_id=video.youtube_video_id,
+                youtube_parent_comment_id="top-3", youtube_thread_id="thread-3", text_display=f"답글 {index}",
+                author_channel_id=f"UCreplier{index}", author_display_name=f"답글 작성자 {index}", like_count=index,
+                published_at=datetime(2025, 1, 5, index, tzinfo=UTC), updated_at=None,
+                source_fetched_at=datetime(2025, 1, 5, index, tzinfo=UTC),
+            )
+        )
+
+    first = client.get("/v1/videos/threadVid01/comment-threads", params={"limit": 2})
+    assert first.status_code == 200
+    first_body = first.json()
+    assert [item["comment"]["id"] for item in first_body["items"]] == ["top-3", "top-2"]
+    assert first_body["items"][0]["storedReplyCount"] == 3
+    assert [reply["id"] for reply in first_body["items"][0]["repliesPreview"]] == ["reply-1", "reply-2"]
+    assert first_body["nextCursor"]
+
+    second = client.get(
+        "/v1/videos/threadVid01/comment-threads",
+        params={"limit": 2, "cursor": first_body["nextCursor"]},
+    )
+    assert second.status_code == 200
+    assert [item["comment"]["id"] for item in second.json()["items"]] == ["top-1"]
+    assert second.json()["nextCursor"] is None
+
+    first_replies = client.get("/v1/comments/top-3/replies", params={"limit": 2})
+    assert [comment["id"] for comment in first_replies.json()["comments"]] == ["reply-1", "reply-2"]
+    second_replies = client.get(
+        "/v1/comments/top-3/replies",
+        params={"limit": 2, "cursor": first_replies.json()["nextCursor"]},
+    )
+    assert [comment["id"] for comment in second_replies.json()["comments"]] == ["reply-3"]
+
+    reply_detail = client.get("/v1/comments/reply-2")
+    assert reply_detail.status_code == 200
+    assert reply_detail.json()["parentComment"]["id"] == "top-3"
+    assert reply_detail.json()["storedReplyCount"] == 3
+    assert [reply["id"] for reply in reply_detail.json()["replies"]] == ["reply-1", "reply-2"]
+
+
 def test_explore_videos_are_ordered_by_latest_published_date() -> None:
     repository = InMemoryRepository()
     older = repository.upsert_video(
