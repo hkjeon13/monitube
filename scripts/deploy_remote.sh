@@ -164,7 +164,7 @@ for attempt in $(seq 1 30); do
   if compose exec -T api python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)" >/dev/null 2>&1; then
     log "API health check passed."
     log "Recreating web and worker services."
-    compose up --detach --force-recreate --no-deps web --scale "worker=${WORKER_REPLICAS}" worker
+    compose up --detach --force-recreate --no-deps --scale "worker=${WORKER_REPLICAS}" web worker
     compose ps
     exit 0
   fi
