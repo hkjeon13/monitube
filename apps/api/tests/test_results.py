@@ -156,11 +156,17 @@ def test_unified_search_finds_titles_and_tolerates_a_comment_typo() -> None:
         )
     )
     title = client.get("/v1/search", params={"q": "배포"})
+    videos_only = client.get("/v1/search", params={"q": "배포", "scope": "videos"})
+    comments_only = client.get("/v1/search", params={"q": "배포", "scope": "comments"})
     typo = client.get("/v1/search", params={"q": "설먕이"})
     title_only_comment = client.get("/v1/search", params={"q": "FastAPI"})
 
     assert title.status_code == 200
     assert title.json()["videos"][0]["video"]["title"] == "FastAPI 배포 가이드"
+    assert len(videos_only.json()["videos"]) == 1
+    assert videos_only.json()["comments"] == []
+    assert comments_only.json()["videos"] == []
+    assert len(comments_only.json()["comments"]) == 1
     assert typo.status_code == 200
     assert typo.json()["comments"][0]["comment"]["id"] == "comment-1"
     assert title_only_comment.status_code == 200

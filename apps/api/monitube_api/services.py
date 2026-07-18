@@ -387,9 +387,9 @@ class CollectionService:
         ]
 
     def search_collected(
-        self, query: str, *, owner_id: str | None = None, limit: int = 20
+        self, query: str, *, owner_id: str | None = None, limit: int = 20, scope: str = "all"
     ) -> UnifiedSearchResponse:
-        result = self.repository.search_collected(query=query, limit=limit, owner_id=owner_id)
+        result = self.repository.search_collected(query=query, limit=limit, owner_id=owner_id, scope=scope)
         return UnifiedSearchResponse(
             query=query,
             videos=[

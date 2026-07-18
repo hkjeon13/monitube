@@ -99,7 +99,7 @@ class CollectionRequestRepository(Protocol):
         self, *, youtube_channel_id: str, limit: int = 180, owner_id: str | None = None
     ) -> list[dict[str, Any]]: ...
 
-    def search_collected(self, *, query: str, limit: int = 20, owner_id: str | None = None) -> dict[str, Any]: ...
+    def search_collected(self, *, query: str, limit: int = 20, owner_id: str | None = None, scope: str = "all") -> dict[str, Any]: ...
 
 
 class CollectionRepository(SourceRepository, JobRepository, CollectionRequestRepository, Protocol):
@@ -1432,37 +1432,39 @@ class InMemoryRepository(CollectionRepository):
                 "hiddenSubscriberCount": channel["statistics"].get("hiddenSubscriberCount"),
             }]
 
-    def search_collected(self, *, query: str, limit: int = 20, owner_id: str | None = None) -> dict[str, Any]:
+    def search_collected(self, *, query: str, limit: int = 20, owner_id: str | None = None, scope: str = "all") -> dict[str, Any]:
         with self._lock:
             visible_video_ids = self._visible_video_ids_locked(owner_id)
             video_results: list[dict[str, Any]] = []
             comment_results: list[dict[str, Any]] = []
-            for video in self._videos.values():
-                if visible_video_ids is not None and video.youtube_video_id not in visible_video_ids:
-                    continue
-                channel = self._channels.get(video.youtube_channel_id or "", {})
-                score, matched_fields = rank_text_fields(query, {
-                    "title": video.title,
-                    "description": video.description,
-                    "channel": channel.get("title"),
-                    "handle": channel.get("handle"),
-                })
-                if matched_fields:
-                    video_results.append({"video": video, "score": score, "matched_fields": matched_fields})
-
-            for comment in self._comments.values():
-                video = self._videos.get(comment.youtube_video_id)
-                if not video:
-                    continue
-                if visible_video_ids is not None and video.youtube_video_id not in visible_video_ids:
-                    continue
-                channel = self._channels.get(video.youtube_channel_id or "", {})
-                score, matched_fields = rank_text_fields(query, {"comment": comment.text_display})
-                if matched_fields:
-                    comment_results.append({
-                        "comment": comment, "video": video, "channel_title": channel.get("title"),
-                        "score": score, "matched_fields": matched_fields,
+            if scope in {"all", "videos"}:
+                for video in self._videos.values():
+                    if visible_video_ids is not None and video.youtube_video_id not in visible_video_ids:
+                        continue
+                    channel = self._channels.get(video.youtube_channel_id or "", {})
+                    score, matched_fields = rank_text_fields(query, {
+                        "title": video.title,
+                        "description": video.description,
+                        "channel": channel.get("title"),
+                        "handle": channel.get("handle"),
                     })
+                    if matched_fields:
+                        video_results.append({"video": video, "score": score, "matched_fields": matched_fields})
+
+            if scope in {"all", "comments"}:
+                for comment in self._comments.values():
+                    video = self._videos.get(comment.youtube_video_id)
+                    if not video:
+                        continue
+                    if visible_video_ids is not None and video.youtube_video_id not in visible_video_ids:
+                        continue
+                    channel = self._channels.get(video.youtube_channel_id or "", {})
+                    score, matched_fields = rank_text_fields(query, {"comment": comment.text_display})
+                    if matched_fields:
+                        comment_results.append({
+                            "comment": comment, "video": video, "channel_title": channel.get("title"),
+                            "score": score, "matched_fields": matched_fields,
+                        })
 
             video_results.sort(key=lambda item: (item["score"], item["video"].source_fetched_at), reverse=True)
             comment_results.sort(key=lambda item: (item["score"], item["comment"].source_fetched_at), reverse=True)

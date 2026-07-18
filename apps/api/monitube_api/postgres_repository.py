@@ -2271,7 +2271,7 @@ class PostgresRepository(CollectionRepository):
                 for row in reversed(cursor.fetchall())
             ]
 
-    def search_collected(self, *, query: str, limit: int = 20, owner_id: str | None = None) -> dict[str, Any]:
+    def search_collected(self, *, query: str, limit: int = 20, owner_id: str | None = None, scope: str = "all") -> dict[str, Any]:
         """Search persisted public data with a Jaro-Winkler tolerance layer.
 
         Search scoring deliberately runs in the application so results are
@@ -2291,7 +2291,9 @@ class PostgresRepository(CollectionRepository):
         candidate_limit = 5_000
 
         with self._connection() as connection, connection.cursor() as cursor:
-            cursor.execute(
+            video_results: list[dict[str, Any]] = []
+            if scope in {"all", "videos"}:
+                cursor.execute(
                 """
                 SELECT v.id::text, v.youtube_video_id, c.youtube_channel_id, c.title AS channel_title,
                        c.handle AS channel_handle, v.title, v.description, v.published_at,
@@ -2323,17 +2325,18 @@ class PostgresRepository(CollectionRepository):
                 LIMIT %s
                 """,
                 (owner_id, owner_id, exact_patterns, first_patterns, last_patterns, exact_patterns, candidate_limit),
-            )
-            video_results: list[dict[str, Any]] = []
-            for row in cursor.fetchall():
-                score, matched_fields = rank_text_fields(query, {
-                    "title": row.get("title"), "description": row.get("description"),
-                    "channel": row.get("channel_title"), "handle": row.get("channel_handle"),
-                })
-                if matched_fields:
-                    video_results.append({"video": self._video(row), "score": score, "matched_fields": matched_fields})
+                )
+                for row in cursor.fetchall():
+                    score, matched_fields = rank_text_fields(query, {
+                        "title": row.get("title"), "description": row.get("description"),
+                        "channel": row.get("channel_title"), "handle": row.get("channel_handle"),
+                    })
+                    if matched_fields:
+                        video_results.append({"video": self._video(row), "score": score, "matched_fields": matched_fields})
 
-            cursor.execute(
+            comment_results: list[dict[str, Any]] = []
+            if scope in {"all", "comments"}:
+                cursor.execute(
                 """
                 SELECT cm.id::text AS comment_id, cm.youtube_comment_id, cm.youtube_parent_comment_id,
                        cm.youtube_thread_id, cm.author_channel_id, cm.author_display_name, cm.text_display, cm.like_count, cm.published_at AS comment_published_at,
@@ -2370,32 +2373,31 @@ class PostgresRepository(CollectionRepository):
                 LIMIT %s
                 """,
                 (owner_id, owner_id, exact_patterns, first_patterns, last_patterns, exact_patterns, candidate_limit),
-            )
-            comment_results: list[dict[str, Any]] = []
-            for row in cursor.fetchall():
-                score, matched_fields = rank_text_fields(query, {"comment": row.get("text_display")})
-                if not matched_fields:
-                    continue
-                comment = self._comment({
+                )
+                for row in cursor.fetchall():
+                    score, matched_fields = rank_text_fields(query, {"comment": row.get("text_display")})
+                    if not matched_fields:
+                        continue
+                    comment = self._comment({
                     "id": row["comment_id"], "youtube_comment_id": row["youtube_comment_id"],
                     "youtube_video_id": row["youtube_video_id"], "youtube_parent_comment_id": row.get("youtube_parent_comment_id"),
                     "youtube_thread_id": row.get("youtube_thread_id"), "author_channel_id": row.get("author_channel_id"),
                     "author_display_name": row.get("author_display_name"), "text_display": row.get("text_display"),
                     "like_count": row.get("like_count"), "published_at": row.get("comment_published_at"),
                     "updated_at": row.get("comment_updated_at"), "source_fetched_at": row.get("comment_fetched_at"),
-                })
-                video = self._video({
+                    })
+                    video = self._video({
                     "id": row["video_db_id"], "youtube_video_id": row["youtube_video_id"],
                     "youtube_channel_id": row.get("youtube_channel_id"), "title": row.get("title"),
                     "description": row.get("description"), "published_at": row.get("published_at"),
                     "duration_seconds": row.get("duration_seconds"), "privacy_status": row.get("privacy_status"),
                     "made_for_kids": row.get("made_for_kids"), "source_fetched_at": row.get("source_fetched_at"),
                     "statistics": row.get("statistics"),
-                })
-                comment_results.append({
-                    "comment": comment, "video": video, "channel_title": row.get("channel_title"),
-                    "score": score, "matched_fields": matched_fields,
-                })
+                    })
+                    comment_results.append({
+                        "comment": comment, "video": video, "channel_title": row.get("channel_title"),
+                        "score": score, "matched_fields": matched_fields,
+                    })
 
             video_results.sort(key=lambda item: (item["score"], item["video"].source_fetched_at), reverse=True)
             comment_results.sort(key=lambda item: (item["score"], item["comment"].source_fetched_at), reverse=True)

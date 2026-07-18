@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import secrets
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -273,8 +273,9 @@ def create_app(repository: CollectionRepository | None = None, settings: Setting
         service: Service,
         q: str = Query(min_length=2, max_length=200),
         limit: int = Query(default=20, ge=1, le=50), user: User = None,
+        scope: Literal["all", "videos", "comments"] = Query(default="all"),
     ) -> UnifiedSearchResponse:
-        return service.search_collected(q, owner_id=user.id, limit=limit)
+        return service.search_collected(q, owner_id=user.id, limit=limit, scope=scope)
 
     @router.put("/collection-targets/{target_id}/pin", response_model=TargetPin, tags=["pins"])
     def set_target_pin(target_id: str, payload: TargetPinUpdate, service: Service, user: User) -> TargetPin:

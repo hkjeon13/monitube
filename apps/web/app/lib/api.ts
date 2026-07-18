@@ -161,6 +161,8 @@ export interface CollectedSearchData {
   comments: CollectedSearchComment[];
 }
 
+export type CollectedSearchScope = "all" | "videos" | "comments";
+
 const defaultApiBaseUrl = "http://localhost:8000";
 
 function configuredBaseUrl() {
@@ -729,8 +731,8 @@ export async function getChannelSubscriberHistory(channelId: string): Promise<Ch
   });
 }
 
-export async function searchCollected(query: string): Promise<CollectedSearchData> {
-  const response = await request<unknown>(`/v1/search?q=${encodeURIComponent(query)}&limit=20`, { method: "GET" });
+export async function searchCollected(query: string, scope: CollectedSearchScope = "all"): Promise<CollectedSearchData> {
+  const response = await request<unknown>(`/v1/search?q=${encodeURIComponent(query)}&scope=${encodeURIComponent(scope)}&limit=20`, { method: "GET" });
   const record = asRecord(response);
   return {
     query: asText(record?.query) ?? query,

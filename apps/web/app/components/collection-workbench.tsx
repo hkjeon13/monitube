@@ -53,6 +53,7 @@ import {
   type CollectedVideo,
   type CollectionRequestDisposition,
   type CollectedSearchData,
+  type CollectedSearchScope,
   type ChannelSubscriberSnapshot,
   type CommentDetailData,
   type ExploreData,
@@ -61,6 +62,7 @@ import {
 } from "../lib/api";
 
 type ViewMetric = "views" | "likes" | "comments";
+const searchScopeLabels: Record<CollectedSearchScope, string> = { all: "전체", videos: "영상", comments: "댓글" };
 export type WorkspacePage = "overview" | "explore" | "sources" | "keywords" | "jobs" | "insights";
 type FormState = {
   sourceType: CollectionSourceType;
@@ -521,7 +523,9 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   const [subscriberHistory, setSubscriberHistory] = useState<ChannelSubscriberSnapshot[]>([]);
   const [exploreVisibleCount, setExploreVisibleCount] = useState(12);
   const [searchQuery, setSearchQuery] = useState("");
+  const [searchScope, setSearchScope] = useState<CollectedSearchScope>("all");
   const [submittedSearchQuery, setSubmittedSearchQuery] = useState("");
+  const [submittedSearchScope, setSubmittedSearchScope] = useState<CollectedSearchScope>("all");
   const [searchRun, setSearchRun] = useState(0);
   const [searchResults, setSearchResults] = useState<CollectedSearchData | null>(null);
   const [isSearchLoading, setIsSearchLoading] = useState(false);
@@ -658,6 +662,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     }
     searchRequest.current += 1;
     setSubmittedSearchQuery(query);
+    setSubmittedSearchScope(searchScope);
     setSearchResults(null);
     setSearchError(null);
     setIsSearchLoading(true);
@@ -673,7 +678,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
       return;
     }
     const requestId = ++searchRequest.current;
-    void searchCollected(query)
+    void searchCollected(query, submittedSearchScope)
       .then((result) => {
         if (requestId === searchRequest.current) setSearchResults(result);
       })
@@ -685,7 +690,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
       .finally(() => {
         if (requestId === searchRequest.current) setIsSearchLoading(false);
       });
-  }, [page, searchRun, submittedSearchQuery]);
+  }, [page, searchRun, submittedSearchQuery, submittedSearchScope]);
 
   const toggleSubscriptionRefresh = useCallback(async (source: SourceSummary) => {
     setUpdatingSourceId(source.id);
@@ -1147,13 +1152,33 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
         <section className="explore-section" id="explore" aria-label="Explore" tabIndex={-1}>
           {exploreError && <p className="inline-error" role="status">{exploreError}</p>}
           <form className="explore-search" role="search" onSubmit={submitCollectedSearch}>
-            <MagnifyingGlassIcon aria-hidden="true" />
+            <label className="visually-hidden" htmlFor="collected-search-scope">검색 대상</label>
+            <select
+              id="collected-search-scope"
+              className="explore-search-scope"
+              value={searchScope}
+              onChange={(event) => {
+                const nextScope = event.target.value as CollectedSearchScope;
+                setSearchScope(nextScope);
+                if (searchQuery.trim().length >= 2) {
+                  searchRequest.current += 1;
+                  setSubmittedSearchQuery(searchQuery.trim());
+                  setSubmittedSearchScope(nextScope);
+                  setSearchResults(null);
+                  setSearchError(null);
+                  setIsSearchLoading(true);
+                  setSearchRun((current) => current + 1);
+                }
+              }}
+            >
+              {Object.entries(searchScopeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+            </select>
             <label className="visually-hidden" htmlFor="collected-search">수집 데이터 통합 검색</label>
             <input
               id="collected-search"
               value={searchQuery}
               onChange={(event) => setSearchQuery(event.target.value)}
-              placeholder="영상 제목, 채널, 댓글 검색"
+              placeholder={searchScope === "videos" ? "영상 제목, 채널 검색" : searchScope === "comments" ? "댓글 검색" : "영상 제목, 채널, 댓글 검색"}
               type="search"
               autoComplete="off"
             />
@@ -1167,15 +1192,15 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
                   <div className="search-results-skeleton" aria-busy="true" aria-label="검색 결과를 불러오는 중">
                     <div className="search-result-heading"><div><p className="section-kicker">UNIFIED RESULTS</p><h3>“{submittedSearchQuery}” 검색 중</h3></div></div>
                     <div className="search-result-columns">
-                      {["동영상", "댓글"].map((title) => <section key={title}><h4>{title}</h4>{Array.from({ length: 5 }, (_, index) => <div className="search-skeleton-item" key={index}><span className="search-skeleton-line search-skeleton-title" /><span className="search-skeleton-line search-skeleton-copy" /><span className="search-skeleton-line search-skeleton-meta" /></div>)}</section>)}
+                      {(submittedSearchScope === "all" ? ["동영상", "댓글"] : [searchScopeLabels[submittedSearchScope]]).map((title) => <section key={title}><h4>{title}</h4>{Array.from({ length: 5 }, (_, index) => <div className="search-skeleton-item" key={index}><span className="search-skeleton-line search-skeleton-title" /><span className="search-skeleton-line search-skeleton-copy" /><span className="search-skeleton-line search-skeleton-meta" /></div>)}</section>)}
                     </div>
                   </div>
                 ) : (
                   <>
                     <div className="search-result-heading"><div><p className="section-kicker">UNIFIED RESULTS</p><h3>“{submittedSearchQuery}” 검색 결과</h3></div><span>{formatCount((searchResults?.videos.length ?? 0) + (searchResults?.comments.length ?? 0))}개</span></div>
                     <div className="search-result-columns">
-                      <section><h4>동영상</h4>{searchResults?.videos.map((result) => <button className="search-video-result" type="button" key={result.video.id} onClick={(event) => openVideoDrawer(result.video, event.currentTarget)}><img src={youtubeThumbnail(result.video.youtubeVideoId)} alt="" /><span><strong>{result.video.title}</strong><small>{result.matchedFields.map(searchFieldLabel).join(" · ")} · 유사도 {Math.round(result.score * 100)}%</small></span><ChevronRightIcon aria-hidden="true" /></button>)}{!isSearchLoading && (searchResults?.videos.length ?? 0) === 0 && <p className="search-empty">일치하는 동영상이 없습니다.</p>}</section>
-                      <section><h4>댓글</h4>{searchResults?.comments.map((result) => <button className="search-comment-result" type="button" key={result.comment.id} onClick={(event) => void openCommentDetail(result.comment.id, event.currentTarget)}><strong>{result.video.title}</strong><p>{result.comment.text}</p><small>{result.channelTitle ?? "수집 채널"} · {result.matchedFields.map(searchFieldLabel).join(" · ")} · 유사도 {Math.round(result.score * 100)}%</small></button>)}{!isSearchLoading && (searchResults?.comments.length ?? 0) === 0 && <p className="search-empty">일치하는 댓글이 없습니다.</p>}</section>
+                      {submittedSearchScope !== "comments" && <section><h4>동영상</h4>{searchResults?.videos.map((result) => <button className="search-video-result" type="button" key={result.video.id} onClick={(event) => openVideoDrawer(result.video, event.currentTarget)}><img src={youtubeThumbnail(result.video.youtubeVideoId)} alt="" /><span><strong>{result.video.title}</strong><small>{result.matchedFields.map(searchFieldLabel).join(" · ")} · 유사도 {Math.round(result.score * 100)}%</small></span><ChevronRightIcon aria-hidden="true" /></button>)}{!isSearchLoading && (searchResults?.videos.length ?? 0) === 0 && <p className="search-empty">일치하는 동영상이 없습니다.</p>}</section>}
+                      {submittedSearchScope !== "videos" && <section><h4>댓글</h4>{searchResults?.comments.map((result) => <button className="search-comment-result" type="button" key={result.comment.id} onClick={(event) => void openCommentDetail(result.comment.id, event.currentTarget)}><strong>{result.video.title}</strong><p>{result.comment.text}</p><small>{result.channelTitle ?? "수집 채널"} · {result.matchedFields.map(searchFieldLabel).join(" · ")} · 유사도 {Math.round(result.score * 100)}%</small></button>)}{!isSearchLoading && (searchResults?.comments.length ?? 0) === 0 && <p className="search-empty">일치하는 댓글이 없습니다.</p>}</section>}
                     </div>
                     {isSearchLoading && <p className="explore-loading">검색 결과를 갱신하는 중입니다…</p>}
                   </>
