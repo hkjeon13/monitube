@@ -4,7 +4,7 @@ SERVICE ?=
 
 .DEFAULT_GOAL := help
 
-.PHONY: help env build infra-up up down restart ps logs migrate api worker web shell-api db-shell redis-cli minio-console verify reset-local
+.PHONY: help env build infra-up up down restart ps logs migrate api worker web shell-api db-shell redis-cli minio-console check verify reset-local
 
 help: ## Show available local-development commands.
 	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z0-9_-]+:.*##/ {printf "%-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -58,6 +58,11 @@ redis-cli: ## Open redis-cli against the local Redis container.
 
 minio-console: ## Print the local MinIO Console address.
 	@echo "http://localhost:$${MINIO_CONSOLE_PORT:-9001}"
+
+check: ## Run API tests and verify the production web build.
+	uv run --project apps/api pytest
+	cd apps/web && npm run typecheck
+	cd apps/web && npm run build
 
 verify: ## Show service status and probe the API health endpoint.
 	@set -a; . ./.env 2>/dev/null || true; set +a; $(COMPOSE) ps

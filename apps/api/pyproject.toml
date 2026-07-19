@@ -20,8 +20,9 @@ dev = [
     "pytest>=8.0,<9.0",
 ]
 
-[tool.setuptools]
-packages = ["monitube_api"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["monitube_api*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
