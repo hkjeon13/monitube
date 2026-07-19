@@ -2522,6 +2522,106 @@ class PostgresRepository(CollectionRepository):
                 for row in cursor.fetchall()
             ]
 
+    def list_recent_failed_parent_jobs(
+        self, *, owner_id: str, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """Return owner-scoped failed coordinator jobs in reverse failure order."""
+
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                WITH visible_parent_failures AS MATERIALIZED (
+                  SELECT subscription.id::text AS public_source_id,
+                         target.id::text AS public_target_id,
+                         target.type AS public_source_type,
+                         COALESCE(NULLIF(subscription.display_config, '{}'::jsonb), target.config)
+                           AS public_source_config,
+                         target.canonical_key AS public_canonical_key,
+                         job.updated_at AS failed_at,
+                         job.*
+                  FROM collection_subscriptions subscription
+                  JOIN collection_targets target ON target.id = subscription.target_id
+                  JOIN sync_jobs job ON job.target_id = target.id
+                  WHERE subscription.user_id = %s
+                    AND job.updated_at >= subscription.created_at
+                    AND job.parent_job_id IS NULL
+                    AND job.state = 'failed'
+
+                  UNION ALL
+
+                  SELECT source.id::text AS public_source_id,
+                         NULL::text AS public_target_id,
+                         source.type AS public_source_type,
+                         source.config AS public_source_config,
+                         NULL::text AS public_canonical_key,
+                         job.updated_at AS failed_at,
+                         job.*
+                  FROM collection_sources source
+                  JOIN sync_jobs job ON job.source_id = source.id
+                  WHERE source.owner_id = %s
+                    AND source.target_id IS NULL
+                    AND job.target_id IS NULL
+                    AND job.parent_job_id IS NULL
+                    AND job.state = 'failed'
+                  ORDER BY failed_at DESC, id DESC
+                  LIMIT %s
+                ),
+                ranked_failed_children AS (
+                  SELECT child.parent_job_id,
+                         child.pause_reason AS representative_child_pause_reason,
+                         child.partial_errors AS representative_child_partial_errors,
+                         count(*) OVER (PARTITION BY child.parent_job_id)::integer
+                           AS failed_child_count,
+                         row_number() OVER (
+                           PARTITION BY child.parent_job_id
+                           ORDER BY
+                             CASE
+                               WHEN NULLIF(btrim(child.pause_reason), '') IS NOT NULL
+                                 OR jsonb_array_length(COALESCE(child.partial_errors, '[]'::jsonb)) > 0
+                               THEN 0 ELSE 1
+                             END,
+                             child.updated_at DESC,
+                             child.id DESC
+                         ) AS failure_rank
+                  FROM sync_jobs child
+                  JOIN visible_parent_failures parent ON parent.id = child.parent_job_id
+                  WHERE child.parent_job_id IS NOT NULL
+                    AND child.state = 'failed'
+                )
+                SELECT parent.*,
+                       COALESCE(child.failed_child_count, 0)::integer AS failed_child_count,
+                       child.representative_child_pause_reason,
+                       COALESCE(child.representative_child_partial_errors, '[]'::jsonb)
+                         AS representative_child_partial_errors
+                FROM visible_parent_failures parent
+                LEFT JOIN ranked_failed_children child
+                  ON child.parent_job_id = parent.id AND child.failure_rank = 1
+                ORDER BY parent.failed_at DESC, parent.id DESC
+                """,
+                (owner_id, owner_id, limit),
+            )
+            return [
+                {
+                    "source_id": str(row["public_source_id"]),
+                    "target_id": str(row["public_target_id"])
+                    if row.get("public_target_id")
+                    else None,
+                    "source_type": SourceType(row["public_source_type"]),
+                    "source_config": dict(row.get("public_source_config") or {}),
+                    "canonical_key": row.get("public_canonical_key"),
+                    "failed_at": row["failed_at"],
+                    "job": self._job(row),
+                    "failed_child_count": int(row.get("failed_child_count") or 0),
+                    "representative_child_pause_reason": row.get(
+                        "representative_child_pause_reason"
+                    ),
+                    "representative_child_partial_errors": list(
+                        row.get("representative_child_partial_errors") or []
+                    ),
+                }
+                for row in cursor.fetchall()
+            ]
+
     @staticmethod
     def _visible_video_cte(target_id: str | None) -> str:
         if target_id:

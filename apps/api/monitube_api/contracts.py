@@ -446,6 +446,25 @@ class ActiveParentJobsResponse(ApiModel):
     jobs: list[ActiveParentJob] = Field(default_factory=list)
 
 
+class RecentJobFailure(ApiModel):
+    """A failed coordinator job mapped to the caller's public source."""
+
+    sourceId: str
+    targetId: str | None = None
+    sourceType: SourceType
+    sourceLabel: str
+    failedAt: datetime
+    reason: str = Field(min_length=1)
+    errorCode: str | None = None
+    retryable: bool | None = None
+    failedChildCount: int = Field(default=0, ge=0)
+    job: JobStatus
+
+
+class RecentJobFailuresResponse(ApiModel):
+    failures: list[RecentJobFailure] = Field(default_factory=list)
+
+
 class SourceResultsResponse(ApiModel):
     source: CollectionSource
     latestJob: JobStatus | None = None

@@ -112,6 +112,19 @@ export interface ActiveSourceJob {
   job: JobStatus;
 }
 
+export interface RecentJobFailure {
+  sourceId: string;
+  targetId?: string;
+  sourceType: string;
+  sourceLabel: string;
+  failedAt: string;
+  reason: string;
+  errorCode?: string;
+  retryable?: boolean;
+  failedChildCount: number;
+  job: JobStatus;
+}
+
 export interface CollectedComment {
   id: string;
   text: string;
@@ -695,6 +708,37 @@ export async function listActiveJobs(signal?: AbortSignal): Promise<ActiveSource
     if (!sourceId || !job) return [];
     const targetId = asText(itemRecord?.targetId ?? itemRecord?.target_id);
     return [{ sourceId, ...(targetId ? { targetId } : {}), job }];
+  });
+}
+
+export async function listRecentJobFailures(limit = 10, signal?: AbortSignal): Promise<RecentJobFailure[]> {
+  const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.min(50, Math.floor(limit))) : 10;
+  const response = await request<unknown>(`/v1/jobs/recent-failures?limit=${safeLimit}`, { method: "GET", signal });
+  const record = asRecord(response);
+  const values = Array.isArray(response) ? response : firstArray(record ?? {}, ["failures", "items", "data"]);
+  return values.flatMap((item) => {
+    const itemRecord = asRecord(item);
+    const sourceId = asText(itemRecord?.sourceId ?? itemRecord?.source_id);
+    const failedAt = asText(itemRecord?.failedAt ?? itemRecord?.failed_at);
+    const reason = asText(itemRecord?.reason);
+    const retryable = asBoolean(itemRecord?.retryable);
+    const failedChildCount = asNumber(itemRecord?.failedChildCount ?? itemRecord?.failed_child_count);
+    const job = normalizeJob(itemRecord?.job);
+    if (!sourceId || !failedAt || !reason || failedChildCount === undefined || !job) return [];
+    const targetId = asText(itemRecord?.targetId ?? itemRecord?.target_id);
+    const errorCode = asText(itemRecord?.errorCode ?? itemRecord?.error_code);
+    return [{
+      sourceId,
+      ...(targetId ? { targetId } : {}),
+      sourceType: asText(itemRecord?.sourceType ?? itemRecord?.source_type) ?? "unknown",
+      sourceLabel: asText(itemRecord?.sourceLabel ?? itemRecord?.source_label) ?? sourceId,
+      failedAt,
+      reason,
+      ...(errorCode ? { errorCode } : {}),
+      ...(retryable === undefined ? {} : { retryable }),
+      failedChildCount: Math.max(0, Math.floor(failedChildCount)),
+      job,
+    }];
   });
 }
 

@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from fastapi import Request
 from fastapi.testclient import TestClient
 
@@ -138,6 +140,218 @@ def test_active_jobs_returns_only_the_callers_parent_jobs() -> None:
     repository.transition_job(parent.id, JobState.COMPLETED)
     # The still-queued child is intentionally not exposed to browser polling.
     assert client.get("/v1/jobs/active", headers={"X-Test-User": "user-a"}).json() == {"jobs": []}
+
+
+def test_recent_failures_sanitize_shared_jobs_and_aggregate_child_reasons() -> None:
+    repository = InMemoryRepository()
+    client = _multi_user_client(repository)
+    first = client.post(
+        "/v1/collection-requests",
+        headers={"X-Test-User": "user-a"},
+        json={"type": "video", "config": {"input": "sharedFail1"}},
+    ).json()
+
+    historical = repository.get_job(first["job"]["id"])
+    repository.transition_job(historical.id, JobState.RUNNING)
+    repository.transition_job(
+        historical.id,
+        JobState.FAILED,
+        current_stage="failed",
+        pause_reason="Historical failure",
+        partial_errors=[{
+            "scope": "source",
+            "sourceId": historical.source_id,
+            "code": "stale_warning",
+            "retryable": True,
+            "message": "An earlier warning, not the fatal cause",
+        }],
+    )
+
+    # The second user subscribes after the historical job was created. A new
+    # shared-target job is created, but the older failure must remain invisible.
+    second = client.post(
+        "/v1/collection-requests",
+        headers={"X-Test-User": "user-b"},
+        json={"type": "video", "config": {"input": "sharedFail1"}},
+    ).json()
+    assert second["targetId"] == first["targetId"]
+    assert second["source"]["id"] != first["source"]["id"]
+    assert second["job"]["id"] != historical.id
+    assert client.get(
+        "/v1/jobs/recent-failures",
+        headers={"X-Test-User": "user-b"},
+    ).json() == {"failures": []}
+
+    parent = repository.get_job(second["job"]["id"])
+    repository.enqueue_video_jobs(parent_job=parent, youtube_video_ids=["failedChild"])
+    child = next(job for job in repository._jobs.values() if job.parent_job_id == parent.id)
+    repository.transition_job(child.id, JobState.RUNNING)
+    repository.transition_job(
+        child.id,
+        JobState.FAILED,
+        current_stage="failed",
+        pause_reason="Child permission denied",
+        partial_errors=[{
+            "scope": "video",
+            "sourceId": child.source_id,
+            "code": "child_permission",
+            "retryable": False,
+            "message": "Child structured failure",
+        }],
+    )
+    repository.transition_job(parent.id, JobState.RUNNING)
+    failed = repository.transition_job(
+        parent.id,
+        JobState.FAILED,
+        current_stage="failed",
+        pause_reason="Parent fallback reason",
+        partial_errors=[{
+            "scope": "source",
+            "sourceId": parent.source_id,
+            "code": "parent_failure",
+            "retryable": True,
+            "message": "Parent structured failure",
+        }],
+    )
+
+    # A later parent exercises the structured child path without pause_reason.
+    third = client.post(
+        "/v1/collection-requests",
+        headers={"X-Test-User": "user-a"},
+        json={"type": "video", "config": {"input": "sharedFail1"}},
+    ).json()
+    structured_parent = repository.get_job(third["job"]["id"])
+    repository.enqueue_video_jobs(
+        parent_job=structured_parent,
+        youtube_video_ids=["structuredChild"],
+    )
+    structured_child = next(
+        job
+        for job in repository._jobs.values()
+        if job.parent_job_id == structured_parent.id
+    )
+    repository.transition_job(structured_child.id, JobState.RUNNING)
+    repository.transition_job(
+        structured_child.id,
+        JobState.FAILED,
+        current_stage="failed",
+        partial_errors=[{
+            "scope": "video",
+            "sourceId": structured_child.source_id,
+            "code": "child_transient",
+            "retryable": True,
+            "message": "Structured child failure",
+        }],
+    )
+    repository.transition_job(structured_parent.id, JobState.RUNNING)
+    repository.transition_job(
+        structured_parent.id,
+        JobState.FAILED,
+        current_stage="failed",
+        pause_reason="Parent fallback must not replace child detail",
+    )
+
+    first_response = client.get(
+        "/v1/jobs/recent-failures?limit=10",
+        headers={"X-Test-User": "user-a"},
+    )
+    second_response = client.get(
+        "/v1/jobs/recent-failures?limit=10",
+        headers={"X-Test-User": "user-b"},
+    )
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    assert len(first_response.json()["failures"]) == 3
+    assert len(second_response.json()["failures"]) == 2
+    first_failures = {
+        item["job"]["id"]: item for item in first_response.json()["failures"]
+    }
+    second_failures = {
+        item["job"]["id"]: item for item in second_response.json()["failures"]
+    }
+    failure = first_failures[parent.id]
+    assert failure["sourceId"] == first["source"]["id"]
+    assert failure["targetId"] == first["targetId"]
+    assert failure["sourceType"] == "video"
+    assert failure["sourceLabel"] == "sharedFail1"
+    assert datetime.fromisoformat(failure["failedAt"].replace("Z", "+00:00")) == failed.updated_at
+    assert failure["reason"] == "Child permission denied"
+    assert failure["errorCode"] is None
+    assert failure["retryable"] is None
+    assert failure["failedChildCount"] == 1
+    assert failure["job"]["id"] == parent.id
+    assert failure["job"]["state"] == "failed"
+    assert failure["job"]["pauseReason"] == "Parent fallback reason"
+    assert failure["job"]["partialErrors"][0]["sourceId"] == first["source"]["id"]
+    assert parent.source_id not in first_response.text
+
+    second_failure = second_failures[parent.id]
+    assert second_failure["job"]["id"] == parent.id
+    assert second_failure["sourceId"] == second["source"]["id"]
+    assert second_failure["job"]["partialErrors"][0]["sourceId"] == second["source"]["id"]
+    assert parent.source_id not in second_response.text
+
+    structured_failure = first_failures[structured_parent.id]
+    assert structured_failure["reason"] == "Structured child failure"
+    assert structured_failure["errorCode"] == "child_transient"
+    assert structured_failure["retryable"] is True
+    assert structured_failure["failedChildCount"] == 1
+
+    historical_failure = first_failures[historical.id]
+    assert historical_failure["job"]["id"] == historical.id
+    assert historical_failure["reason"] == "Historical failure"
+    assert historical_failure["errorCode"] is None
+    assert historical_failure["retryable"] is None
+    assert historical_failure["failedChildCount"] == 0
+    assert client.get(
+        "/v1/jobs/recent-failures",
+        headers={"X-Test-User": "user-with-no-sources"},
+    ).json() == {"failures": []}
+    assert client.get("/v1/jobs/recent-failures?limit=0").status_code == 422
+    assert client.get("/v1/jobs/recent-failures?limit=51").status_code == 422
+
+
+def test_recent_failures_include_shared_job_joined_before_it_failed() -> None:
+    repository = InMemoryRepository()
+    client = _multi_user_client(repository)
+    first = client.post(
+        "/v1/collection-requests",
+        headers={"X-Test-User": "user-a"},
+        json={"type": "video", "config": {"input": "lateJoin001"}},
+    ).json()
+    second = client.post(
+        "/v1/collection-requests",
+        headers={"X-Test-User": "user-b"},
+        json={"type": "video", "config": {"input": "lateJoin001"}},
+    ).json()
+
+    assert second["job"]["id"] == first["job"]["id"]
+    assert second["source"]["id"] != first["source"]["id"]
+
+    shared_job = repository.get_job(first["job"]["id"])
+    repository.transition_job(shared_job.id, JobState.RUNNING)
+    repository.transition_job(
+        shared_job.id,
+        JobState.FAILED,
+        current_stage="failed",
+        pause_reason="The joined shared job failed",
+    )
+
+    first_failure = client.get(
+        "/v1/jobs/recent-failures",
+        headers={"X-Test-User": "user-a"},
+    ).json()["failures"]
+    second_failure = client.get(
+        "/v1/jobs/recent-failures",
+        headers={"X-Test-User": "user-b"},
+    ).json()["failures"]
+
+    assert len(first_failure) == 1
+    assert len(second_failure) == 1
+    assert first_failure[0]["sourceId"] == first["source"]["id"]
+    assert second_failure[0]["sourceId"] == second["source"]["id"]
+    assert second_failure[0]["reason"] == "The joined shared job failed"
 
 
 def test_keyword_and_direct_video_sources_use_the_same_project_free_contract() -> None:

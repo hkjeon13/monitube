@@ -16,6 +16,7 @@ import {
   PlayIcon,
   PlusIcon,
   QueueListIcon,
+  Cog6ToothIcon,
   SparklesIcon,
   Squares2X2Icon,
   XMarkIcon,
@@ -49,6 +50,7 @@ import {
   getSourceWorkspace,
   getVideoCommentThreads,
   listActiveJobs,
+  listRecentJobFailures,
   listSources,
   login,
   register,
@@ -63,6 +65,7 @@ import {
   type CommentDetailData,
   type ExploreData,
   type ActiveSourceJob,
+  type RecentJobFailure,
   type SourceResults,
   type SourceSummary,
 } from "../lib/api";
@@ -89,18 +92,65 @@ type FormState = {
   includeComments: boolean;
 };
 
-const initialForm: FormState = {
-  sourceType: "channel",
-  channelInput: "",
-  videoInput: "",
-  keyword: "",
-  publishedAfter: "",
-  publishedBefore: "",
+type CollectionPreferences = {
+  defaultSourceType: "channel" | "keyword";
+  includeComments: boolean;
+  order: KeywordSourceConfig["order"];
+  relevanceLanguage: string;
+  regionCode: string;
+};
+
+const defaultCollectionPreferences: CollectionPreferences = {
+  defaultSourceType: "channel",
+  includeComments: true,
+  order: "date",
   relevanceLanguage: "ko",
   regionCode: "KR",
-  order: "date",
-  includeComments: true,
 };
+
+function formFromPreferences(preferences: CollectionPreferences): FormState {
+  return {
+    sourceType: preferences.defaultSourceType,
+    channelInput: "",
+    videoInput: "",
+    keyword: "",
+    publishedAfter: "",
+    publishedBefore: "",
+    relevanceLanguage: preferences.relevanceLanguage,
+    regionCode: preferences.regionCode,
+    order: preferences.order,
+    includeComments: preferences.includeComments,
+  };
+}
+
+const initialForm = formFromPreferences(defaultCollectionPreferences);
+
+function preferencesStorageKey(username: string) {
+  return `monitube:collection-defaults:v1:${encodeURIComponent(username)}`;
+}
+
+function normalizePreferences(value: unknown): CollectionPreferences {
+  const record = typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  const sourceType = record.defaultSourceType;
+  const order = record.order;
+  const language = typeof record.relevanceLanguage === "string" ? record.relevanceLanguage.trim() : "";
+  const region = typeof record.regionCode === "string" ? record.regionCode.trim() : "";
+  const validLanguage = language.length >= 2
+    && language.length <= 10
+    && /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,6})?$/.test(language);
+  const validRegion = region.length === 2 && /^[A-Za-z]{2}$/.test(region);
+  return {
+    defaultSourceType: sourceType === "keyword" ? "keyword" : "channel",
+    includeComments: typeof record.includeComments === "boolean"
+      ? record.includeComments
+      : defaultCollectionPreferences.includeComments,
+    order: order === "relevance" || order === "viewCount" ? order : "date",
+    relevanceLanguage: validLanguage ? language.toLowerCase() : defaultCollectionPreferences.relevanceLanguage,
+    regionCode: validRegion ? region.toUpperCase() : defaultCollectionPreferences.regionCode,
+  };
+}
 
 const bucketLabels: Record<QuotaBucket, string> = {
   search_queries: "검색 요청",
@@ -556,6 +606,9 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   const [requestedSourceId, setRequestedSourceId] = useState<string | null>(null);
   const [authUser, setAuthUser] = useState<string | null | undefined>(undefined);
   const [form, setForm] = useState<FormState>(initialForm);
+  const [preferences, setPreferences] = useState<CollectionPreferences>(defaultCollectionPreferences);
+  const [settingsDraft, setSettingsDraft] = useState<CollectionPreferences>(defaultCollectionPreferences);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isStarting, setIsStarting] = useState(false);
@@ -599,15 +652,20 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   const [searchResults, setSearchResults] = useState<CollectedSearchData | null>(null);
   const [isSearchLoading, setIsSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+  const [recentFailures, setRecentFailures] = useState<RecentJobFailure[]>([]);
+  const [isRecentFailuresLoading, setIsRecentFailuresLoading] = useState(false);
+  const [recentFailuresError, setRecentFailuresError] = useState<string | null>(null);
   const resultsRequest = useRef(0);
   const resultsAbortController = useRef<AbortController | null>(null);
   const sourceVideosAbortController = useRef<AbortController | null>(null);
   const sourceVideosInFlightRef = useRef(false);
   const commentsRequest = useRef(0);
   const collectionTriggerRef = useRef<HTMLElement | null>(null);
+  const settingsTriggerRef = useRef<HTMLElement | null>(null);
   const videoTriggerRef = useRef<HTMLElement | null>(null);
   const commentTriggerRef = useRef<HTMLElement | null>(null);
   const collectionDrawerRef = useRef<HTMLElement | null>(null);
+  const settingsDrawerRef = useRef<HTMLElement | null>(null);
   const videoModalRef = useRef<HTMLElement | null>(null);
   const commentThreadsLoadMoreRef = useRef<HTMLDivElement | null>(null);
   const sourceVideosLoadMoreRef = useRef<HTMLDivElement | null>(null);
@@ -621,10 +679,41 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   const activeJobsEndpointSupportedRef = useRef<boolean | null>(null);
   const handledTerminalJobsRef = useRef<Set<string>>(new Set());
   const wakeActiveJobsPollRef = useRef<(() => void) | null>(null);
+  const authUserRef = useRef<string | null | undefined>(undefined);
+  const recentFailuresAbortControllerRef = useRef<AbortController | null>(null);
+  const recentFailuresGenerationRef = useRef(0);
+
+  const changeAuthUser = useCallback((nextUser: string | null) => {
+    authUserRef.current = nextUser;
+    recentFailuresAbortControllerRef.current?.abort();
+    recentFailuresAbortControllerRef.current = null;
+    recentFailuresGenerationRef.current += 1;
+    setRecentFailures([]);
+    setRecentFailuresError(null);
+    setIsRecentFailuresLoading(false);
+    setIsSettingsOpen(false);
+    setAuthUser(nextUser);
+  }, []);
 
   useEffect(() => {
-    void getCurrentUser().then((user) => setAuthUser(user?.username ?? null)).catch(() => setAuthUser(null));
-  }, []);
+    void getCurrentUser().then((user) => changeAuthUser(user?.username ?? null)).catch(() => changeAuthUser(null));
+  }, [changeAuthUser]);
+
+  useEffect(() => {
+    if (authUser === undefined) return;
+    let next = defaultCollectionPreferences;
+    if (authUser) {
+      try {
+        const stored = window.localStorage.getItem(preferencesStorageKey(authUser));
+        if (stored) next = normalizePreferences(JSON.parse(stored));
+      } catch {
+        next = defaultCollectionPreferences;
+      }
+    }
+    setPreferences(next);
+    setSettingsDraft(next);
+    setForm(formFromPreferences(next));
+  }, [authUser]);
 
   const requestBody = useMemo(() => sourceRequest(form), [form]);
   const validationError = useMemo(() => validate(requestBody), [requestBody]);
@@ -689,6 +778,41 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     setForm((current) => ({ ...current, [key]: value }));
     setError(null);
   };
+
+  const refreshRecentFailures = useCallback(async () => {
+    const requestedUser = authUser;
+    if (!requestedUser || page !== "jobs") return;
+    recentFailuresAbortControllerRef.current?.abort();
+    const controller = new AbortController();
+    recentFailuresAbortControllerRef.current = controller;
+    const generation = ++recentFailuresGenerationRef.current;
+    setIsRecentFailuresLoading(true);
+    setRecentFailuresError(null);
+    try {
+      const failures = await listRecentJobFailures(10, controller.signal);
+      if (!controller.signal.aborted
+        && generation === recentFailuresGenerationRef.current
+        && authUserRef.current === requestedUser) {
+        setRecentFailures(failures);
+      }
+    } catch (caught) {
+      if (!isAbortError(caught)
+        && !controller.signal.aborted
+        && generation === recentFailuresGenerationRef.current
+        && authUserRef.current === requestedUser) {
+        setRecentFailuresError(caught instanceof Error ? caught.message : "최근 수집 실패 현황을 불러오지 못했습니다.");
+      }
+    } finally {
+      if (recentFailuresAbortControllerRef.current === controller) {
+        recentFailuresAbortControllerRef.current = null;
+      }
+      if (!controller.signal.aborted
+        && generation === recentFailuresGenerationRef.current
+        && authUserRef.current === requestedUser) {
+        setIsRecentFailuresLoading(false);
+      }
+    }
+  }, [authUser, page]);
 
   const openSourceWorkspace = useCallback((sourceId: string) => {
     router.push(`/channels?source=${encodeURIComponent(sourceId)}`);
@@ -927,6 +1051,11 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     restoreFocus(collectionTriggerRef.current);
   }, [restoreFocus]);
 
+  const closeSettingsDrawer = useCallback(() => {
+    setIsSettingsOpen(false);
+    restoreFocus(settingsTriggerRef.current);
+  }, [restoreFocus]);
+
   const closeVideoDrawer = useCallback(() => {
     setSelectedVideo(null);
     setSelectedCommentId(null);
@@ -947,8 +1076,52 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
 
   const openCollectionDrawer = (event: MouseEvent<HTMLButtonElement>, sourceType?: CollectionSourceType) => {
     collectionTriggerRef.current = event.currentTarget;
-    if (sourceType) setForm((current) => ({ ...current, sourceType }));
+    const nextForm = formFromPreferences(preferences);
+    if (sourceType === "channel" || sourceType === "keyword") nextForm.sourceType = sourceType;
+    setForm(nextForm);
+    setError(null);
     setIsCollectionOpen(true);
+  };
+
+  const openSettingsDrawer = (event: MouseEvent<HTMLButtonElement>) => {
+    settingsTriggerRef.current = event.currentTarget;
+    setSettingsDraft(preferences);
+    setError(null);
+    setIsSettingsOpen(true);
+  };
+
+  const saveSettings = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!authUser) return;
+    const next = normalizePreferences(settingsDraft);
+    try {
+      window.localStorage.setItem(preferencesStorageKey(authUser), JSON.stringify(next));
+    } catch {
+      setError("이 브라우저에 기본 설정을 저장하지 못했습니다. 저장 공간 또는 개인정보 보호 설정을 확인하세요.");
+      return;
+    }
+    setPreferences(next);
+    setSettingsDraft(next);
+    setForm(formFromPreferences(next));
+    setError(null);
+    setNotice("기본 수집 설정을 저장했습니다. 다음 수집 대상 추가부터 적용됩니다.");
+    closeSettingsDrawer();
+  };
+
+  const resetSettings = () => {
+    if (!authUser) return;
+    try {
+      window.localStorage.removeItem(preferencesStorageKey(authUser));
+    } catch {
+      setError("이 브라우저에서 기본 설정을 초기화하지 못했습니다.");
+      return;
+    }
+    const next = { ...defaultCollectionPreferences };
+    setPreferences(next);
+    setSettingsDraft(next);
+    setForm(formFromPreferences(next));
+    setError(null);
+    setNotice("기본 수집 설정을 초기화했습니다.");
   };
 
   const openVideoDrawer = useCallback((video: CollectedVideo, trigger: HTMLElement) => {
@@ -1008,6 +1181,14 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   }, []);
 
   useEffect(() => {
+    authUserRef.current = authUser;
+    recentFailuresAbortControllerRef.current?.abort();
+    recentFailuresAbortControllerRef.current = null;
+    recentFailuresGenerationRef.current += 1;
+    setRecentFailures([]);
+    setRecentFailuresError(null);
+    setIsRecentFailuresLoading(false);
+    setIsSettingsOpen(false);
     if (authUser !== null) return;
     resultsAbortController.current?.abort();
     sourceVideosAbortController.current?.abort();
@@ -1028,6 +1209,16 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   useEffect(() => {
     if (authUser) void refreshSources();
   }, [authUser, refreshSources]);
+
+  useEffect(() => {
+    if (!authUser || page !== "jobs") return;
+    void refreshRecentFailures();
+    return () => {
+      recentFailuresAbortControllerRef.current?.abort();
+      recentFailuresAbortControllerRef.current = null;
+      recentFailuresGenerationRef.current += 1;
+    };
+  }, [authUser, page, refreshRecentFailures]);
 
   useEffect(() => {
     if (!requestedSourceId || appliedSourceQueryRef.current === requestedSourceId) return;
@@ -1220,13 +1411,19 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
               ? refreshResults(selectedSourceId)
               : Promise.resolve(),
             refreshExplore(),
+            // The active-jobs endpoint intentionally returns non-terminal jobs
+            // only. A disappeared running job may have failed, so Status must
+            // re-read the authoritative failure list for every terminal exit.
+            page === "jobs"
+              ? refreshRecentFailures()
+              : Promise.resolve(),
           ]);
         }
       } catch (caught) {
         if (isAbortError(caught) || stopped) return;
         if (caught instanceof ApiError && caught.status === 401) {
           stopped = true;
-          setAuthUser(null);
+          changeAuthUser(null);
           return;
         }
         failureCount += 1;
@@ -1256,10 +1453,14 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
       if (wakeActiveJobsPollRef.current === handleVisibilityChange) wakeActiveJobsPollRef.current = null;
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [authUser, refreshExplore, refreshResults, refreshSources]);
+  }, [authUser, changeAuthUser, page, refreshExplore, refreshRecentFailures, refreshResults, refreshSources]);
 
   useEffect(() => {
-    const drawer = isCollectionOpen ? collectionDrawerRef.current : (selectedCommentId || selectedVideo) ? videoModalRef.current : null;
+    const drawer = isSettingsOpen
+      ? settingsDrawerRef.current
+      : isCollectionOpen
+        ? collectionDrawerRef.current
+        : (selectedCommentId || selectedVideo) ? videoModalRef.current : null;
     if (!drawer) return;
 
     const previousOverflow = document.body.style.overflow;
@@ -1275,7 +1476,8 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     const keepFocusInDrawer = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
-        if (isCollectionOpen) closeCollectionDrawer();
+        if (isSettingsOpen) closeSettingsDrawer();
+        else if (isCollectionOpen) closeCollectionDrawer();
         else if (selectedCommentId) closeCommentDetail();
         else closeVideoDrawer();
         return;
@@ -1309,7 +1511,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
       document.body.style.overflow = previousOverflow;
       document.body.style.overscrollBehavior = previousOverscrollBehavior;
     };
-  }, [closeCollectionDrawer, closeCommentDetail, closeVideoDrawer, isCollectionOpen, selectedCommentId, selectedVideo]);
+  }, [closeCollectionDrawer, closeCommentDetail, closeSettingsDrawer, closeVideoDrawer, isCollectionOpen, isSettingsOpen, selectedCommentId, selectedVideo]);
 
   const launchJob = useCallback(async () => {
     if (validationError) {
@@ -1355,8 +1557,9 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     { id: "explore" as const, label: "Explore", href: "/", Icon: Squares2X2Icon },
     { id: "overview" as const, label: "Channels", href: "/channels", Icon: HomeIcon },
     { id: "sources" as const, label: "Sources", href: "/sources", Icon: FolderIcon },
+    { id: "jobs" as const, label: "Status", href: "/jobs", Icon: QueueListIcon },
   ];
-  const breadcrumbPage = page === "overview" ? "Channels" : page === "explore" ? "Explore" : page === "sources" ? "Sources" : page === "keywords" ? "Keywords" : page === "jobs" ? "Jobs" : "Insights";
+  const breadcrumbPage = page === "overview" ? "Channels" : page === "explore" ? "Explore" : page === "sources" ? "Sources" : page === "keywords" ? "Keywords" : page === "jobs" ? "Status" : "Insights";
   const breadcrumbDetail = page === "overview" && selectedExploreChannel
     ? selectedExploreChannel.title ?? selectedExploreChannel.handle ?? selectedExploreChannel.youtubeChannelId
     : null;
@@ -1370,7 +1573,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     : null;
 
   if (authUser === undefined) return <main className="login-page"><p className="explore-loading">세션을 확인하는 중입니다…</p></main>;
-  if (!authUser) return <LoginScreen onAuthenticated={setAuthUser} />;
+  if (!authUser) return <LoginScreen onAuthenticated={changeAuthUser} />;
 
   return (
     <div className={`app-shell page-${page}`}>
@@ -1398,15 +1601,20 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
       </aside>
 
       <main className="dashboard-main">
-        <nav className="dashboard-breadcrumb" aria-label="현재 위치">
-          <Link href="/" aria-label="Monitube 홈">Monitube</Link>
-          <ChevronRightIcon aria-hidden="true" />
-          {breadcrumbDetail ? <Link href="/channels">{breadcrumbPage}</Link> : <span aria-current="page">{breadcrumbPage}</span>}
-          {breadcrumbDetail && <>
+        <div className="dashboard-utilitybar">
+          <nav className="dashboard-breadcrumb" aria-label="현재 위치">
+            <Link href="/" aria-label="Monitube 홈">Monitube</Link>
             <ChevronRightIcon aria-hidden="true" />
-            <span aria-current="page" title={breadcrumbDetail}>{breadcrumbDetail}</span>
-          </>}
-        </nav>
+            {breadcrumbDetail ? <Link href="/channels">{breadcrumbPage}</Link> : <span aria-current="page">{breadcrumbPage}</span>}
+            {breadcrumbDetail && <>
+              <ChevronRightIcon aria-hidden="true" />
+              <span aria-current="page" title={breadcrumbDetail}>{breadcrumbDetail}</span>
+            </>}
+          </nav>
+          <button className="settings-button" type="button" onClick={openSettingsDrawer} aria-label="기본 설정 열기" aria-haspopup="dialog" aria-expanded={isSettingsOpen}>
+            <Cog6ToothIcon aria-hidden="true" />
+          </button>
+        </div>
         {page !== "explore" && page !== "sources" && page !== "keywords" && <header className="dashboard-topbar" id="source-selector" tabIndex={-1}>
           <label className="source-select">
             <span className="visually-hidden">수집 대상 선택</span>
@@ -1452,6 +1660,68 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
             </button>
           </div>
         </header>}
+
+        {page === "jobs" && (
+          <section className="status-page" aria-labelledby="status-page-title">
+            <div className="workspace-page-heading status-page-heading">
+              <p className="section-kicker">COLLECTION OPERATIONS</p>
+              <h1 id="status-page-title">Status</h1>
+              <p>현재 계정이 구독 중인 공유 수집 대상의 상태와 최근 실패 원인, 재시도 가능 여부를 확인합니다.</p>
+            </div>
+            <section className="panel recent-failures-panel" aria-labelledby="recent-failures-title" aria-busy={isRecentFailuresLoading}>
+              <div className="panel-heading">
+                <div>
+                  <p className="section-kicker">RECENT FAILURES</p>
+                  <h2 id="recent-failures-title">최근 공유 수집 대상 실패</h2>
+                </div>
+                <button className="icon-button" type="button" onClick={() => void refreshRecentFailures()} disabled={isRecentFailuresLoading} aria-label="최근 수집 실패 새로고침">
+                  <ArrowPathIcon className={isRecentFailuresLoading ? "icon-spinning" : undefined} aria-hidden="true" />
+                </button>
+              </div>
+
+              {recentFailuresError && (
+                <div className="recent-failures-state recent-failures-error" role="status">
+                  <ExclamationTriangleIcon aria-hidden="true" />
+                  <div><strong>실패 현황을 불러오지 못했습니다.</strong><p>{recentFailuresError}</p></div>
+                  <button type="button" onClick={() => void refreshRecentFailures()}>다시 시도</button>
+                </div>
+              )}
+              {!recentFailuresError && isRecentFailuresLoading && recentFailures.length === 0 && (
+                <div className="recent-failures-state" role="status"><span className="loading-spinner" aria-hidden="true" /><p>최근 실패 기록을 불러오는 중입니다.</p></div>
+              )}
+              {!recentFailuresError && !isRecentFailuresLoading && recentFailures.length === 0 && (
+                <div className="recent-failures-state recent-failures-empty" role="status">
+                  <CheckCircleIcon aria-hidden="true" />
+                  <div><strong>구독 중인 공유 수집 대상의 최근 실패가 없습니다.</strong><p>새 실패가 기록되면 대상과 원인을 이곳에 표시합니다.</p></div>
+                </div>
+              )}
+              {recentFailures.length > 0 && (
+                <ol className="recent-failure-list" aria-live="polite">
+                  {recentFailures.map((failure) => {
+                    return (
+                      <li key={`${failure.sourceId}:${failure.job.id}`}>
+                        <div className="recent-failure-target">
+                          <span className="source-type-chip">{sourceTypeCopy(failure.sourceType)}</span>
+                          <strong>{failure.sourceLabel}</strong>
+                          <small title={failure.targetId ?? failure.sourceId}>{failure.targetId ?? failure.sourceId}</small>
+                        </div>
+                        <time dateTime={failure.failedAt}>{formatDate(failure.failedAt)}</time>
+                        <div className="recent-failure-reason"><strong>{failure.reason}</strong><small>Job {failure.job.id}</small></div>
+                        <div className="recent-failure-tags">
+                          <span className={failure.retryable === true ? "failure-tag failure-tag-retryable" : "failure-tag"}>
+                            {failure.retryable === true ? "재시도 가능" : failure.retryable === false ? "재시도 불가" : "재시도 정보 없음"}
+                          </span>
+                          <span className="failure-tag failure-code">{failure.errorCode ?? "코드 없음"}</span>
+                          {failure.failedChildCount > 0 && <span className="failure-tag failure-child-count">하위 작업 실패 {formatCount(failure.failedChildCount)}건</span>}
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ol>
+              )}
+            </section>
+          </section>
+        )}
 
         <section className="sources-page" aria-labelledby="sources-page-title">
           <div className="workspace-page-heading"><p className="section-kicker">{page === "keywords" ? "KEYWORD COLLECTION" : "COLLECTION TARGETS"}</p><h1 id="sources-page-title">{page === "keywords" ? "Keywords" : "Sources"}</h1><p>{page === "keywords" ? "등록한 키워드의 수집 범위와 최신 상태를 관리합니다." : "중복 없이 정규화된 수집 대상을 관리하고, 선택한 대상의 수집 범위를 확인합니다."}</p></div>
@@ -1898,6 +2168,70 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
           <p>운영 credential은 브라우저에 노출되지 않습니다.</p>
         </footer>
       </main>
+
+      {isSettingsOpen && (
+        <div className="drawer-layer">
+          <div className="drawer-backdrop" aria-hidden="true" onClick={closeSettingsDrawer} />
+          <aside ref={settingsDrawerRef} className="settings-drawer" role="dialog" aria-modal="true" aria-labelledby="settings-drawer-title" aria-describedby="settings-drawer-description" tabIndex={-1}>
+            <div className="drawer-heading">
+              <div>
+                <p className="section-kicker">PERSONAL DEFAULTS</p>
+                <h2 id="settings-drawer-title">기본 설정</h2>
+                <p id="settings-drawer-description">{authUser} 계정에서 새 수집 대상을 추가할 때 사용할 기본값입니다.</p>
+              </div>
+              <button className="icon-button" type="button" aria-label="기본 설정 창 닫기" data-drawer-initial-focus onClick={closeSettingsDrawer}><XMarkIcon aria-hidden="true" /></button>
+            </div>
+            <form className="settings-form" onSubmit={saveSettings}>
+              <section className="settings-section" aria-labelledby="settings-collection-title">
+                <div><p className="section-kicker">NEW COLLECTION</p><h3 id="settings-collection-title">새 수집 기본값</h3></div>
+                <div className="drawer-field-grid">
+                  <label className="drawer-field drawer-field-wide">
+                    <span>기본 수집 대상</span>
+                    <select value={settingsDraft.defaultSourceType} onChange={(event) => setSettingsDraft((current) => ({ ...current, defaultSourceType: event.target.value as CollectionPreferences["defaultSourceType"] }))}>
+                      <option value="channel">채널</option>
+                      <option value="keyword">키워드</option>
+                    </select>
+                    <small>수집 대상 추가 창을 열 때 먼저 선택할 유형입니다.</small>
+                  </label>
+                  <label className="toggle-field drawer-field-wide">
+                    <input type="checkbox" checked={settingsDraft.includeComments} onChange={(event) => setSettingsDraft((current) => ({ ...current, includeComments: event.target.checked }))} />
+                    <span className="toggle-visual" aria-hidden="true" />
+                    <span><strong>공개 댓글 포함</strong><small>새 채널·키워드 수집에서 공개 댓글을 기본으로 함께 수집합니다.</small></span>
+                  </label>
+                </div>
+              </section>
+              <section className="settings-section" aria-labelledby="settings-keyword-title">
+                <div><p className="section-kicker">KEYWORD SEARCH</p><h3 id="settings-keyword-title">키워드 검색 기본값</h3></div>
+                <div className="drawer-field-grid">
+                  <label className="drawer-field drawer-field-wide">
+                    <span>정렬</span>
+                    <select value={settingsDraft.order} onChange={(event) => setSettingsDraft((current) => ({ ...current, order: event.target.value as CollectionPreferences["order"] }))}>
+                      <option value="date">최신순</option>
+                      <option value="relevance">관련도순</option>
+                      <option value="viewCount">조회수순</option>
+                    </select>
+                  </label>
+                  <label className="drawer-field">
+                    <span>검색 언어</span>
+                    <input value={settingsDraft.relevanceLanguage} onChange={(event) => setSettingsDraft((current) => ({ ...current, relevanceLanguage: event.target.value }))} placeholder="ko" minLength={2} maxLength={10} pattern="[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,6})?" autoComplete="off" />
+                    <small>예: ko, en</small>
+                  </label>
+                  <label className="drawer-field">
+                    <span>지역 코드</span>
+                    <input value={settingsDraft.regionCode} onChange={(event) => setSettingsDraft((current) => ({ ...current, regionCode: event.target.value }))} placeholder="KR" minLength={2} maxLength={2} pattern="[A-Za-z]{2}" autoComplete="off" />
+                    <small>ISO 국가 코드, 예: KR, US</small>
+                  </label>
+                </div>
+              </section>
+              <p className="settings-storage-note"><InformationCircleIcon aria-hidden="true" />이 설정은 현재 브라우저에 계정별로 저장되며 API 키 같은 운영 비밀값은 포함하지 않습니다.</p>
+              <div className="drawer-footer-action settings-footer-action">
+                <button className="secondary-action settings-reset-action" type="button" onClick={resetSettings}>설정 초기화</button>
+                <button className="primary-action" type="submit">설정 저장</button>
+              </div>
+            </form>
+          </aside>
+        </div>
+      )}
 
       {isCollectionOpen && (
         <div className="drawer-layer">

@@ -320,6 +320,10 @@ class JobRepository(Protocol):
 
     def list_active_parent_jobs(self, *, owner_id: str) -> list[dict[str, Any]]: ...
 
+    def list_recent_failed_parent_jobs(
+        self, *, owner_id: str, limit: int = 10
+    ) -> list[dict[str, Any]]: ...
+
     def transition_job(self, job_id: str, state: JobState, **changes: Any) -> JobRecord: ...
 
 
@@ -1465,6 +1469,98 @@ class InMemoryRepository(CollectionRepository):
                     )
             active.sort(key=lambda item: item["job"].created_at)
             return active
+
+    def list_recent_failed_parent_jobs(
+        self, *, owner_id: str, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """Return the caller's failed coordinator jobs, newest failure first."""
+
+        with self._lock:
+            failures: list[dict[str, Any]] = []
+            for job in self._jobs.values():
+                if job.parent_job_id is not None or job.state is not JobState.FAILED:
+                    continue
+                failed_children = [
+                    child
+                    for child in self._jobs.values()
+                    if child.parent_job_id == job.id and child.state is JobState.FAILED
+                ]
+                failed_children.sort(
+                    key=lambda child: (
+                        bool(
+                            (child.pause_reason and child.pause_reason.strip())
+                            or child.partial_errors
+                        ),
+                        child.updated_at,
+                        child.id,
+                    ),
+                    reverse=True,
+                )
+                representative_child = failed_children[0] if failed_children else None
+                child_failure_fields = {
+                    "failed_child_count": len(failed_children),
+                    "representative_child_pause_reason": (
+                        representative_child.pause_reason if representative_child else None
+                    ),
+                    "representative_child_partial_errors": deepcopy(
+                        representative_child.partial_errors if representative_child else []
+                    ),
+                }
+                if job.target_id is not None:
+                    subscription_id = self._subscription_ids_by_user_target.get(
+                        (owner_id, job.target_id)
+                    )
+                    if not subscription_id:
+                        continue
+                    subscription = self._subscriptions[subscription_id]
+                    # A subscriber can join a shared job that was already queued.
+                    # Keep failures that occurred after the subscription while
+                    # still hiding terminal history from before it existed.
+                    if job.updated_at < subscription.created_at:
+                        continue
+                    target = self._targets.get(job.target_id)
+                    if not target:
+                        continue
+                    config = subscription.display_config or target.config
+                    failures.append(
+                        {
+                            "source_id": subscription.id,
+                            "target_id": target.id,
+                            "source_type": target.type,
+                            "source_config": deepcopy(config),
+                            "canonical_key": target.canonical_key,
+                            "failed_at": job.updated_at,
+                            "job": self._clone_job(job),
+                            **child_failure_fields,
+                        }
+                    )
+                    continue
+
+                source = self._sources.get(job.source_id)
+                if (
+                    not source
+                    or source.target_id is not None
+                    or self._source_owners.get(source.id) != owner_id
+                ):
+                    continue
+                failures.append(
+                    {
+                        "source_id": source.id,
+                        "target_id": None,
+                        "source_type": source.type,
+                        "source_config": deepcopy(source.config),
+                        "canonical_key": source.canonical_key,
+                        "failed_at": job.updated_at,
+                        "job": self._clone_job(job),
+                        **child_failure_fields,
+                    }
+                )
+
+            failures.sort(
+                key=lambda item: (item["failed_at"], item["job"].id),
+                reverse=True,
+            )
+            return failures[:limit]
 
     def transition_job(self, job_id: str, state: JobState, **changes: Any) -> JobRecord:
         allowed = {

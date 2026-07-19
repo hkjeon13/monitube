@@ -58,6 +58,51 @@ def test_terminal_job_cannot_be_started_again() -> None:
         repository.transition_job(job.id, JobState.RUNNING)
 
 
+def test_recent_failed_jobs_include_only_owned_parent_sources() -> None:
+    repository = InMemoryRepository()
+    owned = repository.create_source(
+        source_type=SourceType.KEYWORD,
+        config={"query": "owned failure"},
+        owner_id="user-a",
+    )
+    foreign = repository.create_source(
+        source_type=SourceType.KEYWORD,
+        config={"query": "foreign failure"},
+        owner_id="user-b",
+    )
+    owned_job = repository.create_job(
+        source_id=owned.id,
+        include_comments=False,
+        max_videos=None,
+        max_comments_per_video=None,
+        owner_id="user-a",
+    )
+    foreign_job = repository.create_job(
+        source_id=foreign.id,
+        include_comments=False,
+        max_videos=None,
+        max_comments_per_video=None,
+        owner_id="user-b",
+    )
+    repository.transition_job(owned_job.id, JobState.RUNNING)
+    failed = repository.transition_job(owned_job.id, JobState.FAILED, pause_reason="owned reason")
+    repository.transition_job(foreign_job.id, JobState.RUNNING)
+    repository.transition_job(foreign_job.id, JobState.FAILED, pause_reason="foreign reason")
+
+    failures = repository.list_recent_failed_parent_jobs(owner_id="user-a", limit=10)
+
+    assert len(failures) == 1
+    assert failures[0]["source_id"] == owned.id
+    assert failures[0]["target_id"] is None
+    assert failures[0]["source_type"] is SourceType.KEYWORD
+    assert failures[0]["source_config"] == {"query": "owned failure"}
+    assert failures[0]["failed_at"] == failed.updated_at
+    assert failures[0]["job"].id == owned_job.id
+    assert failures[0]["failed_child_count"] == 0
+    assert failures[0]["representative_child_pause_reason"] is None
+    assert failures[0]["representative_child_partial_errors"] == []
+
+
 def test_comment_page_persists_rows_and_checkpoint_together() -> None:
     repository = InMemoryRepository()
     source = repository.create_source(source_type=SourceType.VIDEO, config={"input": "pageVideo01"})
@@ -112,6 +157,25 @@ def test_readiness_requires_latest_search_statistics_migration() -> None:
 
     assert "016_search_planner_statistics.sql" in readiness_sql
     assert "015_database_performance_foundation.sql" not in readiness_sql
+
+
+def test_postgres_recent_failures_query_enforces_owner_parent_and_failed_scope() -> None:
+    query_source = getsource(PostgresRepository.list_recent_failed_parent_jobs)
+
+    assert "subscription.user_id = %s" in query_source
+    assert "source.owner_id = %s" in query_source
+    assert "job.updated_at >= subscription.created_at" in query_source
+    assert query_source.count("job.parent_job_id IS NULL") == 2
+    assert query_source.count("job.state = 'failed'") == 2
+    assert "visible_parent_failures AS MATERIALIZED" in query_source
+    assert "ranked_failed_children AS" in query_source
+    assert "JOIN visible_parent_failures parent ON parent.id = child.parent_job_id" in query_source
+    assert "count(*) OVER (PARTITION BY child.parent_job_id)" in query_source
+    assert "child.failure_rank = 1" in query_source
+    assert "source.target_id IS NULL" in query_source
+    assert "job.target_id IS NULL" in query_source
+    assert "ORDER BY failed_at DESC, id DESC" in query_source
+    assert "LIMIT %s" in query_source
 
 
 def test_indexed_search_materializes_candidates_before_acl_and_limit() -> None:

@@ -41,6 +41,8 @@ from .contracts import (
     JobStatus,
     KeywordCollectionSource,
     PartialError,
+    RecentJobFailure,
+    RecentJobFailuresResponse,
     SourceResultsResponse,
     SourceOverviewResponse,
     SourceOverviewSummary,
@@ -83,7 +85,11 @@ def _source_contract(record: SourceRecord) -> CollectionSource:
     return VideoCollectionSource(type=SourceType.VIDEO, config=config, **shared)
 
 
-def _job_contract(record: JobRecord) -> JobStatus:
+def _job_contract(
+    record: JobRecord,
+    *,
+    public_source_id: str | None = None,
+) -> JobStatus:
     details = record.checkpoint.get("phaseProgress") if isinstance(record.checkpoint, dict) else None
 
     def phase(name: str, unit: str) -> JobProgress | None:
@@ -101,6 +107,13 @@ def _job_contract(record: JobRecord) -> JobStatus:
             unit=unit,
         )
 
+    partial_errors = [PartialError.model_validate(item) for item in record.partial_errors]
+    if public_source_id is not None:
+        partial_errors = [
+            error.model_copy(update={"sourceId": public_source_id})
+            for error in partial_errors
+        ]
+
     return JobStatus(
         id=record.id,
         state=record.state,
@@ -112,7 +125,90 @@ def _job_contract(record: JobRecord) -> JobStatus:
         quotaBucket=record.quota_bucket,
         resumeAt=record.resume_at,
         resumeIsAutomatic=record.resume_is_automatic,
-        partialErrors=[PartialError.model_validate(item) for item in record.partial_errors],
+        partialErrors=partial_errors,
+    )
+
+
+def _source_label(
+    source_type: SourceType,
+    config: dict[str, object],
+    canonical_key: str | None,
+) -> str:
+    """Choose the stable user-entered identifier without exposing worker IDs."""
+
+    key = "query" if source_type is SourceType.KEYWORD else "input"
+    configured = config.get(key)
+    if isinstance(configured, str) and configured.strip():
+        return configured.strip()
+    if canonical_key and canonical_key.strip():
+        return canonical_key.strip()
+    return source_type.value
+
+
+def _safe_failure_text(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _structured_failure(
+    errors: object,
+) -> tuple[str | None, str | None, bool | None]:
+    """Extract one structured error without inferring retry safety from text."""
+
+    if not isinstance(errors, list):
+        return None, None, None
+    candidates = [item for item in errors if isinstance(item, dict)]
+    representative = next(
+        (
+            item
+            for item in candidates
+            if _safe_failure_text(item.get("message"))
+            or _safe_failure_text(item.get("code"))
+        ),
+        None,
+    )
+    if representative is None:
+        return None, None, None
+    message = _safe_failure_text(representative.get("message"))
+    code = _safe_failure_text(representative.get("code"))
+    retryable_value = representative.get("retryable")
+    retryable = retryable_value if isinstance(retryable_value, bool) else None
+    return message, code, retryable
+
+
+def _failure_details(item: dict[str, object]) -> tuple[str, str | None, bool | None]:
+    """Prefer a failed fanout child, then the parent, with an explicit fallback."""
+
+    child_pause = _safe_failure_text(item.get("representative_child_pause_reason"))
+    if child_pause:
+        # Fatal runner exceptions write pause_reason while partial_errors may
+        # still contain unrelated warnings from an earlier collection phase.
+        return child_pause, None, None
+    child_message, child_code, child_retryable = _structured_failure(
+        item.get("representative_child_partial_errors")
+    )
+    if child_message or child_code:
+        return (
+            child_message or child_code or "Collection child failed.",
+            child_code,
+            child_retryable,
+        )
+
+    job = item["job"]
+    if not isinstance(job, JobRecord):
+        return "Collection failed without a recorded reason.", None, None
+    parent_pause = _safe_failure_text(job.pause_reason)
+    if parent_pause:
+        return parent_pause, None, None
+    parent_message, parent_code, parent_retryable = _structured_failure(job.partial_errors)
+    return (
+        parent_message
+        or parent_code
+        or "Collection failed without a recorded reason.",
+        parent_code,
+        parent_retryable,
     )
 
 
@@ -362,6 +458,39 @@ class CollectionService:
                 for item in self.repository.list_active_parent_jobs(owner_id=owner_id)
             ]
         )
+
+    def list_recent_failed_parent_jobs(
+        self, *, owner_id: str, limit: int = 10
+    ) -> RecentJobFailuresResponse:
+        failures: list[RecentJobFailure] = []
+        for item in self.repository.list_recent_failed_parent_jobs(
+            owner_id=owner_id,
+            limit=limit,
+        ):
+            reason, error_code, retryable = _failure_details(item)
+            public_source_id = item["source_id"]
+            failures.append(
+                RecentJobFailure(
+                    sourceId=public_source_id,
+                    targetId=item.get("target_id"),
+                    sourceType=item["source_type"],
+                    sourceLabel=_source_label(
+                        item["source_type"],
+                        item.get("source_config") or {},
+                        item.get("canonical_key"),
+                    ),
+                    failedAt=item["failed_at"],
+                    reason=reason,
+                    errorCode=error_code,
+                    retryable=retryable,
+                    failedChildCount=int(item.get("failed_child_count") or 0),
+                    job=_job_contract(
+                        item["job"],
+                        public_source_id=public_source_id,
+                    ),
+                )
+            )
+        return RecentJobFailuresResponse(failures=failures)
 
     def get_source_results(self, source_id: str, *, owner_id: str | None = None) -> SourceResultsResponse:
         result = self.repository.get_source_results(source_id, owner_id=owner_id)
