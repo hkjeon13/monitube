@@ -14,6 +14,7 @@ from ..collection_policy import (
 from ..domain import (
     CollectionRequestRecord,
     CollectionSubmission,
+    CollectionSubscriptionRecord,
     CollectionTargetRecord,
     JobRecord,
     JobState,

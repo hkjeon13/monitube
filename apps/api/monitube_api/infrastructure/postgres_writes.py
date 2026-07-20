@@ -1,5 +1,6 @@
 """PostgreSQL collected-content writes and request accounting."""
 
+from dataclasses import replace
 import hashlib
 from typing import Any, Iterable
 

@@ -2,6 +2,7 @@
 
 from typing import Any
 
+from ..analysis import top_words_from_texts
 from ..domain import CommentRecord, utcnow
 from ..repositories import (
     CommentThreadSort,

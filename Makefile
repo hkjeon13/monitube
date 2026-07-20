@@ -60,7 +60,8 @@ minio-console: ## Print the local MinIO Console address.
 	@echo "http://localhost:$${MINIO_CONSOLE_PORT:-9001}"
 
 check: ## Run API tests and verify the production web build.
-	uv run --project apps/api pytest
+	uv run --project apps/api --extra dev ruff check apps/api/monitube_api apps/api/tests --select F821
+	uv run --project apps/api --extra dev pytest
 	cd apps/web && npm run typecheck
 	cd apps/web && npm run build
 
