@@ -528,7 +528,7 @@ class PostgresRepository(
                 "UPDATE collection_target_pins SET enabled = TRUE, next_run_at = now(), updated_at = now() WHERE target_id = %s",
                 (target_id,),
             )
-        elif target["type"] == SourceType.CHANNEL.value:
+        elif target["type"] in {SourceType.CHANNEL.value, SourceType.KEYWORD.value}:
             cursor.execute(
                 """
                 INSERT INTO collection_target_pins (target_id, enabled, interval_minutes, next_run_at)

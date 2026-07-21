@@ -220,7 +220,7 @@ class InMemoryRepository(
         if pin:
             pin["enabled"] = True
             pin["next_run_at"] = utcnow()
-        elif target.type is SourceType.CHANNEL:
+        elif target.type in {SourceType.CHANNEL, SourceType.KEYWORD}:
             self._pins[target_id] = {
                 "target_id": target_id,
                 "enabled": True,

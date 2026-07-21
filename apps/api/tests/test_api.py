@@ -468,6 +468,32 @@ def test_channel_collection_is_pinned_for_automatic_refresh_by_default() -> None
     assert repository.dispatch_due_pins() == 1
 
 
+def test_keyword_collection_is_pinned_for_automatic_refresh_by_default() -> None:
+    repository = InMemoryRepository()
+    client = TestClient(create_app(repository=repository))
+
+    collected = client.post(
+        "/v1/collection-requests",
+        json={
+            "type": "keyword",
+            "config": {
+                "query": "FastAPI 튜토리얼",
+                "order": "date",
+                "includeComments": False,
+            },
+        },
+    ).json()
+    pin = client.get(f"/v1/collection-targets/{collected['targetId']}/pin")
+
+    assert pin.status_code == 200
+    assert pin.json()["enabled"] is True
+    assert pin.json()["intervalMinutes"] == 360
+
+    repository.claim_next_job(worker_id="test-worker")
+    repository.transition_job(collected["job"]["id"], JobState.COMPLETED)
+    assert repository.dispatch_due_pins() == 1
+
+
 def test_running_target_queues_one_successor_then_serves_cached_results() -> None:
     repository = InMemoryRepository()
     client = TestClient(create_app(repository=repository))
