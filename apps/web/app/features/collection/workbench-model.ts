@@ -204,6 +204,10 @@ export function youtubeThumbnail(videoId: string) {
   return `https://i.ytimg.com/vi/${encodeURIComponent(videoId)}/hqdefault.jpg`;
 }
 
+export function youtubeWatchUrl(videoId: string) {
+  return `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`;
+}
+
 export function sourceRequest(form: FormState): CreateCollectionSourceRequest {
   if (form.sourceType === "channel") {
     const config: ChannelSourceConfig = {

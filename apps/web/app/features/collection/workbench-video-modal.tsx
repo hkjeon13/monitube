@@ -14,6 +14,7 @@ import {
   formatDate,
   formatDuration,
   youtubeThumbnail,
+  youtubeWatchUrl,
 } from "./workbench-model";
 
 type VideoModalProps = {
@@ -110,7 +111,14 @@ export function VideoModal({
           ) : selectedVideo ? (
             <>
               <header className="video-modal-hero">
-                <img className="video-modal-thumbnail" src={youtubeThumbnail(selectedVideo.youtubeVideoId)} alt={`${selectedVideo.title} 썸네일`} />
+                <a
+                  className="video-modal-thumbnail-link"
+                  href={youtubeWatchUrl(selectedVideo.youtubeVideoId)}
+                  aria-label={`${selectedVideo.title} YouTube에서 보기`}
+                  title="YouTube에서 영상 보기"
+                >
+                  <img className="video-modal-thumbnail" src={youtubeThumbnail(selectedVideo.youtubeVideoId)} alt={`${selectedVideo.title} 썸네일`} />
+                </a>
                 <div className="video-modal-summary">
                   <p className="section-kicker">VIDEO DETAIL</p>
                   <h2 id="video-modal-title">{selectedVideo.title}</h2>
