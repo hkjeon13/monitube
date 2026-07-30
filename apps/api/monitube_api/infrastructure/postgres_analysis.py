@@ -11,7 +11,18 @@ from ..domain import utcnow
 
 class PostgresAnalysisMixin:
     @staticmethod
-    def _analysis_scope_cte(bucket: str) -> str:
+    def _analysis_scope_cte(
+        bucket: str,
+        *,
+        include_comment_content: bool = False,
+    ) -> str:
+        content_columns = (
+            """,
+                     comment.author_display_name,
+                     comment.text_display"""
+            if include_comment_content
+            else ""
+        )
         return f"""
             WITH visible_membership AS MATERIALIZED (
               SELECT DISTINCT membership.video_id,
@@ -91,7 +102,15 @@ class PostgresAnalysisMixin:
                 )
             ),
             comment_period AS MATERIALIZED (
-              SELECT comment.*
+              SELECT comment.id,
+                     comment.youtube_comment_id,
+                     comment.video_id,
+                     comment.youtube_parent_comment_id,
+                     comment.author_channel_id,
+                     comment.like_count,
+                     comment.published_at,
+                     comment.source_fetched_at
+                     {content_columns}
               FROM comments comment
               JOIN visible_video visible ON visible.id = comment.video_id
               WHERE comment.deleted_at IS NULL
@@ -174,6 +193,7 @@ class PostgresAnalysisMixin:
         from_at: datetime | None = None,
         to_at: datetime | None = None,
         comment_type: str = "all",
+        section: str = "all",
         limit: int = 10,
     ) -> dict[str, Any]:
         target_ids = target_ids or []
@@ -184,6 +204,10 @@ class PostgresAnalysisMixin:
         else:
             bucket = "month"
         cte = self._analysis_scope_cte(bucket)
+        content_cte = self._analysis_scope_cte(
+            bucket,
+            include_comment_content=True,
+        )
         params = self._analysis_params(
             owner_id=owner_id,
             scope=scope,
@@ -194,57 +218,65 @@ class PostgresAnalysisMixin:
             comment_type=comment_type,
             limit=limit,
         )
+        if section == "content":
+            return self._analysis_content_overview(
+                cte=cte,
+                content_cte=content_cte,
+                params=params,
+            )
 
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
                 cte
                 + """
-                SELECT
-                  (SELECT count(*)::bigint FROM video_period) AS video_count,
-                  (SELECT COALESCE(sum(COALESCE(view_count, 0)), 0)::bigint
-                     FROM video_period) AS total_view_count,
-                  (SELECT COALESCE(
+                , video_summary AS (
+                  SELECT count(*)::bigint AS video_count,
+                         COALESCE(
+                           sum(COALESCE(view_count, 0)),
+                           0
+                         )::bigint AS total_view_count,
+                         COALESCE(
                       percentile_disc(0.5) WITHIN GROUP (
                         ORDER BY COALESCE(view_count, 0)
                       ),
                       0
-                    )::bigint
-                     FROM video_period) AS median_view_count,
-                  (SELECT COALESCE(sum(COALESCE(like_count, 0)), 0)::bigint
-                     FROM video_period) AS total_like_count,
-                  (SELECT COALESCE(
-                      sum(COALESCE(youtube_comment_count, 0)),
-                      0
-                    )::bigint
-                     FROM video_period) AS youtube_comment_count,
-                  (SELECT count(*)::bigint FROM comment_period)
-                    AS collected_comment_count,
-                  (SELECT count(DISTINCT video_id)::bigint FROM comment_period)
-                    AS commented_video_count,
-                  (SELECT count(DISTINCT author_channel_id)::bigint
-                     FROM comment_period
-                    WHERE author_channel_id IS NOT NULL)
-                    AS identified_author_count,
-                  (SELECT count(*) FILTER (
-                      WHERE youtube_parent_comment_id IS NULL
-                    )::bigint
-                     FROM comment_period) AS top_level_count,
-                  (SELECT count(*) FILTER (
-                      WHERE youtube_parent_comment_id IS NOT NULL
-                    )::bigint
-                     FROM comment_period) AS reply_count,
-                  (SELECT COALESCE(avg(like_count), 0)::double precision
-                     FROM comment_period) AS average_comment_like_count,
-                  (SELECT max(published_at) FROM video_period)
-                    AS latest_video_published_at,
-                  (SELECT max(published_at) FROM comment_period)
-                    AS latest_comment_published_at,
-                  (SELECT max(statistics_fetched_at) FROM video_period)
-                    AS statistics_fetched_at,
-                  (SELECT count(*) FILTER (
-                      WHERE statistics_fetched_at IS NOT NULL
-                    )::bigint
-                     FROM video_period) AS videos_with_statistics
+                         )::bigint AS median_view_count,
+                         COALESCE(
+                           sum(COALESCE(like_count, 0)),
+                           0
+                         )::bigint AS total_like_count,
+                         COALESCE(
+                           sum(COALESCE(youtube_comment_count, 0)),
+                           0
+                         )::bigint AS youtube_comment_count,
+                         max(published_at) AS latest_video_published_at,
+                         max(statistics_fetched_at) AS statistics_fetched_at,
+                         count(*) FILTER (
+                           WHERE statistics_fetched_at IS NOT NULL
+                         )::bigint AS videos_with_statistics
+                  FROM video_period
+                ),
+                comment_summary AS (
+                  SELECT count(*)::bigint AS collected_comment_count,
+                         count(DISTINCT video_id)::bigint
+                           AS commented_video_count,
+                         count(DISTINCT author_channel_id) FILTER (
+                           WHERE author_channel_id IS NOT NULL
+                         )::bigint AS identified_author_count,
+                         count(*) FILTER (
+                           WHERE youtube_parent_comment_id IS NULL
+                         )::bigint AS top_level_count,
+                         count(*) FILTER (
+                           WHERE youtube_parent_comment_id IS NOT NULL
+                         )::bigint AS reply_count,
+                         COALESCE(avg(like_count), 0)::double precision
+                           AS average_comment_like_count,
+                         max(published_at) AS latest_comment_published_at
+                  FROM comment_period
+                )
+                SELECT video.*, comment.*
+                FROM video_summary video
+                CROSS JOIN comment_summary comment
                 """,
                 params,
             )
@@ -291,9 +323,12 @@ class PostgresAnalysisMixin:
                 for row in cursor.fetchall()
             ]
 
-            cursor.execute(
-                cte
-                + """
+            if scope == "keyword":
+                channel_breakdown = []
+            else:
+                cursor.execute(
+                    cte
+                    + """
                 , video_by_channel AS (
                   SELECT youtube_channel_id AS id,
                          max(COALESCE(channel_title, youtube_channel_id))
@@ -346,16 +381,17 @@ class PostgresAnalysisMixin:
                          COALESCE(comment.collected_comment_count, 0) DESC
                 LIMIT %(limit)s
                 """,
-                params,
-            )
-            channel_breakdown = [
-                self._analysis_breakdown_row(row, kind="channel")
-                for row in cursor.fetchall()
-            ]
+                    params,
+                )
+                channel_breakdown = [
+                    self._analysis_breakdown_row(row, kind="channel")
+                    for row in cursor.fetchall()
+                ]
 
-            cursor.execute(
-                cte
-                + """
+            if scope == "keyword":
+                cursor.execute(
+                    cte
+                    + """
                 , keyword_video AS (
                   SELECT membership.target_id AS id,
                          max(COALESCE(
@@ -413,12 +449,14 @@ class PostgresAnalysisMixin:
                          COALESCE(comment.collected_comment_count, 0) DESC
                 LIMIT %(limit)s
                 """,
-                params,
-            )
-            keyword_breakdown = [
-                self._analysis_breakdown_row(row, kind="keyword")
-                for row in cursor.fetchall()
-            ]
+                    params,
+                )
+                keyword_breakdown = [
+                    self._analysis_breakdown_row(row, kind="keyword")
+                    for row in cursor.fetchall()
+                ]
+            else:
+                keyword_breakdown = []
 
             cursor.execute(
                 cte
@@ -459,120 +497,40 @@ class PostgresAnalysisMixin:
                     "durationSeconds": row.get("duration_seconds"),
                     "viewCount": int(row.get("view_count") or 0),
                     "likeCount": int(row.get("like_count") or 0),
-                    "youtubeCommentCount": int(
-                        row.get("youtube_comment_count") or 0
-                    ),
+                    "youtubeCommentCount": int(row.get("youtube_comment_count") or 0),
                     "collectedCommentCount": int(
                         row.get("collected_comment_count") or 0
                     ),
                     "topLevelCount": int(row.get("top_level_count") or 0),
                     "replyCount": int(row.get("reply_count") or 0),
-                    "statisticsFetchedAt": row.get(
-                        "statistics_fetched_at"
-                    ),
+                    "statisticsFetchedAt": row.get("statistics_fetched_at"),
                 }
                 for row in cursor.fetchall()
             ]
 
-            cursor.execute(
-                cte
-                + """
-                SELECT comment.youtube_comment_id AS id,
-                       video.youtube_video_id AS video_id,
-                       video.title AS video_title,
-                       channel.title AS channel_title,
-                       comment.text_display AS text,
-                       comment.author_display_name AS author_name,
-                       comment.published_at,
-                       comment.like_count,
-                       comment.youtube_parent_comment_id IS NOT NULL AS is_reply
-                FROM comment_period comment
-                JOIN videos video ON video.id = comment.video_id
-                LEFT JOIN channels channel ON channel.id = video.channel_id
-                ORDER BY comment.like_count DESC,
-                         COALESCE(
-                           comment.published_at,
-                           comment.source_fetched_at
-                         ) DESC,
-                         comment.youtube_comment_id DESC
-                LIMIT %(limit)s
-                """,
-                params,
-            )
-            top_comments = [
-                {
-                    "id": str(row["id"]),
-                    "videoId": str(row["video_id"]),
-                    "videoTitle": row.get("video_title"),
-                    "channelTitle": row.get("channel_title"),
-                    "text": row.get("text"),
-                    "authorName": row.get("author_name"),
-                    "publishedAt": row.get("published_at"),
-                    "likeCount": int(row.get("like_count") or 0),
-                    "isReply": bool(row.get("is_reply")),
-                }
-                for row in cursor.fetchall()
-            ]
+            if section == "core":
+                top_comments = []
+                sampled_texts = []
+            else:
+                top_comments, sampled_texts = self._analysis_content_rows(
+                    cursor=cursor,
+                    cte=cte,
+                    content_cte=content_cte,
+                    params=params,
+                )
 
-            sample_limit = 5000
-            sample_params = {**params, "sample_limit": sample_limit}
-            cursor.execute(
-                cte
-                + """
-                SELECT text_display
-                FROM comment_period
-                WHERE text_display IS NOT NULL
-                  AND btrim(text_display) <> ''
-                ORDER BY COALESCE(
-                           published_at,
-                           source_fetched_at
-                         ) DESC,
-                         youtube_comment_id DESC
-                LIMIT %(sample_limit)s
-                """,
-                sample_params,
+            coverage_row = self._analysis_coverage_row(
+                cursor=cursor,
+                params=params,
             )
-            sampled_texts = [
-                str(row["text_display"]) for row in cursor.fetchall()
-            ]
-
-            cursor.execute(
-                """
-                SELECT count(DISTINCT target.id)::bigint AS target_count,
-                       COALESCE(bool_or(
-                         COALESCE(target.coverage ->> 'status', 'complete')
-                           IN ('limited', 'unknown')
-                       ), false) AS partial_data
-                FROM collection_subscriptions subscription
-                JOIN collection_targets target
-                  ON target.id = subscription.target_id
-                WHERE subscription.user_id = %(owner_id)s::uuid
-                  AND (
-                    %(scope)s::text <> 'keyword'
-                    OR target.type = 'keyword'
-                  )
-                  AND (
-                    cardinality(%(target_ids)s::uuid[]) = 0
-                    OR target.id = ANY(%(target_ids)s::uuid[])
-                  )
-                """,
-                params,
-            )
-            coverage_row = dict(cursor.fetchone() or {})
 
         generated_at = utcnow()
         return {
             "summary": {
                 "videoCount": int(summary_row.get("video_count") or 0),
-                "totalViewCount": int(
-                    summary_row.get("total_view_count") or 0
-                ),
-                "medianViewCount": int(
-                    summary_row.get("median_view_count") or 0
-                ),
-                "totalLikeCount": int(
-                    summary_row.get("total_like_count") or 0
-                ),
+                "totalViewCount": int(summary_row.get("total_view_count") or 0),
+                "medianViewCount": int(summary_row.get("median_view_count") or 0),
+                "totalLikeCount": int(summary_row.get("total_like_count") or 0),
                 "youtubeCommentCount": int(
                     summary_row.get("youtube_comment_count") or 0
                 ),
@@ -585,22 +543,16 @@ class PostgresAnalysisMixin:
                 "identifiedAuthorCount": int(
                     summary_row.get("identified_author_count") or 0
                 ),
-                "topLevelCount": int(
-                    summary_row.get("top_level_count") or 0
-                ),
+                "topLevelCount": int(summary_row.get("top_level_count") or 0),
                 "replyCount": int(summary_row.get("reply_count") or 0),
                 "averageCommentLikeCount": float(
                     summary_row.get("average_comment_like_count") or 0
                 ),
-                "latestVideoPublishedAt": summary_row.get(
-                    "latest_video_published_at"
-                ),
+                "latestVideoPublishedAt": summary_row.get("latest_video_published_at"),
                 "latestCommentPublishedAt": summary_row.get(
                     "latest_comment_published_at"
                 ),
-                "statisticsFetchedAt": summary_row.get(
-                    "statistics_fetched_at"
-                ),
+                "statisticsFetchedAt": summary_row.get("statistics_fetched_at"),
             },
             "videoTrend": video_trend,
             "commentTrend": comment_trend,
@@ -613,25 +565,179 @@ class PostgresAnalysisMixin:
                 limit=15,
             ),
             "coverage": {
-                "visibleTargetCount": int(
-                    coverage_row.get("target_count") or 0
-                ),
-                "includedVideoCount": int(
-                    summary_row.get("video_count") or 0
-                ),
+                "visibleTargetCount": int(coverage_row.get("target_count") or 0),
+                "includedVideoCount": int(summary_row.get("video_count") or 0),
                 "videosWithStatistics": int(
                     summary_row.get("videos_with_statistics") or 0
                 ),
                 "sampledComments": len(sampled_texts),
-                "totalComments": int(
-                    summary_row.get("collected_comment_count") or 0
-                ),
-                "partialData": bool(
-                    coverage_row.get("partial_data", False)
-                ),
+                "totalComments": int(summary_row.get("collected_comment_count") or 0),
+                "partialData": bool(coverage_row.get("partial_data", False)),
                 "generatedAt": generated_at,
             },
         }
+
+    def _analysis_content_overview(
+        self,
+        *,
+        cte: str,
+        content_cte: str,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        with self._connection() as connection, connection.cursor() as cursor:
+            top_comments, sampled_texts = self._analysis_content_rows(
+                cursor=cursor,
+                cte=cte,
+                content_cte=content_cte,
+                params=params,
+            )
+            coverage_row = self._analysis_coverage_row(
+                cursor=cursor,
+                params=params,
+            )
+        return {
+            "summary": {
+                "videoCount": 0,
+                "totalViewCount": 0,
+                "medianViewCount": 0,
+                "totalLikeCount": 0,
+                "youtubeCommentCount": 0,
+                "collectedCommentCount": 0,
+                "commentedVideoCount": 0,
+                "identifiedAuthorCount": 0,
+                "topLevelCount": 0,
+                "replyCount": 0,
+                "averageCommentLikeCount": 0,
+                "latestVideoPublishedAt": None,
+                "latestCommentPublishedAt": None,
+                "statisticsFetchedAt": None,
+            },
+            "videoTrend": [],
+            "commentTrend": [],
+            "channelBreakdown": [],
+            "keywordBreakdown": [],
+            "topVideos": [],
+            "topComments": top_comments,
+            "topWords": top_words_from_texts(sampled_texts, limit=15),
+            "coverage": {
+                "visibleTargetCount": int(coverage_row.get("target_count") or 0),
+                "includedVideoCount": 0,
+                "videosWithStatistics": 0,
+                "sampledComments": len(sampled_texts),
+                "totalComments": 0,
+                "partialData": bool(coverage_row.get("partial_data", False)),
+                "generatedAt": utcnow(),
+            },
+        }
+
+    @staticmethod
+    def _analysis_content_rows(
+        *,
+        cursor: Any,
+        cte: str,
+        content_cte: str,
+        params: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        cursor.execute(
+            content_cte
+            + """
+            SELECT comment.youtube_comment_id AS id,
+                   video.youtube_video_id AS video_id,
+                   video.title AS video_title,
+                   channel.title AS channel_title,
+                   comment.text_display AS text,
+                   comment.author_display_name AS author_name,
+                   comment.published_at,
+                   comment.like_count,
+                   comment.youtube_parent_comment_id IS NOT NULL AS is_reply
+            FROM comment_period comment
+            JOIN videos video ON video.id = comment.video_id
+            LEFT JOIN channels channel ON channel.id = video.channel_id
+            ORDER BY comment.like_count DESC,
+                     COALESCE(
+                       comment.published_at,
+                       comment.source_fetched_at
+                     ) DESC,
+                     comment.youtube_comment_id DESC
+            LIMIT %(limit)s
+            """,
+            params,
+        )
+        top_comments = [
+            {
+                "id": str(row["id"]),
+                "videoId": str(row["video_id"]),
+                "videoTitle": row.get("video_title"),
+                "channelTitle": row.get("channel_title"),
+                "text": row.get("text"),
+                "authorName": row.get("author_name"),
+                "publishedAt": row.get("published_at"),
+                "likeCount": int(row.get("like_count") or 0),
+                "isReply": bool(row.get("is_reply")),
+            }
+            for row in cursor.fetchall()
+        ]
+
+        sample_limit = 5000
+        sample_params = {
+            **params,
+            "sample_limit": sample_limit,
+            "sample_candidate_limit": sample_limit * 4,
+        }
+        cursor.execute(
+            cte
+            + """
+            , sample_candidates AS (
+              SELECT id
+              FROM comment_period
+              ORDER BY COALESCE(
+                         published_at,
+                         source_fetched_at
+                       ) DESC,
+                       youtube_comment_id DESC
+              LIMIT %(sample_candidate_limit)s
+            )
+            SELECT stored.text_display
+            FROM sample_candidates candidate
+            JOIN comments stored ON stored.id = candidate.id
+            WHERE stored.text_display IS NOT NULL
+              AND btrim(stored.text_display) <> ''
+            LIMIT %(sample_limit)s
+            """,
+            sample_params,
+        )
+        sampled_texts = [str(row["text_display"]) for row in cursor.fetchall()]
+        return top_comments, sampled_texts
+
+    @staticmethod
+    def _analysis_coverage_row(
+        *,
+        cursor: Any,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        cursor.execute(
+            """
+            SELECT count(DISTINCT target.id)::bigint AS target_count,
+                   COALESCE(bool_or(
+                     COALESCE(target.coverage ->> 'status', 'complete')
+                       IN ('limited', 'unknown')
+                   ), false) AS partial_data
+            FROM collection_subscriptions subscription
+            JOIN collection_targets target
+              ON target.id = subscription.target_id
+            WHERE subscription.user_id = %(owner_id)s::uuid
+              AND (
+                %(scope)s::text <> 'keyword'
+                OR target.type = 'keyword'
+              )
+              AND (
+                cardinality(%(target_ids)s::uuid[]) = 0
+                OR target.id = ANY(%(target_ids)s::uuid[])
+              )
+            """,
+            params,
+        )
+        return dict(cursor.fetchone() or {})
 
     @staticmethod
     def _analysis_breakdown_row(
@@ -646,12 +752,8 @@ class PostgresAnalysisMixin:
             "videoCount": int(row.get("video_count") or 0),
             "viewCount": int(row.get("view_count") or 0),
             "likeCount": int(row.get("like_count") or 0),
-            "youtubeCommentCount": int(
-                row.get("youtube_comment_count") or 0
-            ),
-            "collectedCommentCount": int(
-                row.get("collected_comment_count") or 0
-            ),
+            "youtubeCommentCount": int(row.get("youtube_comment_count") or 0),
+            "collectedCommentCount": int(row.get("collected_comment_count") or 0),
             "topLevelCount": int(row.get("top_level_count") or 0),
             "replyCount": int(row.get("reply_count") or 0),
             "latestPublishedAt": row.get("latest_published_at"),

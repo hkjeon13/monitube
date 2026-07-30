@@ -30,6 +30,7 @@ def analysis_overview(
         default="all",
         alias="commentType",
     ),
+    section: Literal["all", "core", "content"] = Query(default="all"),
     limit: int = Query(default=10, ge=1, le=25),
 ) -> AnalysisOverviewResponse:
     from_at = (
@@ -50,5 +51,6 @@ def analysis_overview(
         from_at=from_at,
         to_at=to_at,
         comment_type=comment_type,
+        section=section,
         limit=limit,
     )

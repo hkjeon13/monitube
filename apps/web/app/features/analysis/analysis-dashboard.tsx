@@ -142,20 +142,44 @@ export function AnalysisDashboard({
     let cancelled = false;
     setLoading(true);
     setError(null);
-    void getAnalysisOverview({
+    const query = {
       scope,
       ...(scope === "channel" && channelId ? { channelId } : {}),
       ...(scope === "keyword" && targetId ? { targetId } : {}),
       ...periodRange(period),
       commentType,
       limit: 10,
-    }).then((response) => {
-      if (!cancelled) setData(response);
-    }).catch((caught) => {
-      if (!cancelled) setError(caught instanceof Error ? caught.message : "통계를 불러오지 못했습니다.");
-    }).finally(() => {
-      if (!cancelled) setLoading(false);
-    });
+    };
+    const load = async () => {
+      try {
+        if (period === "all") {
+          const core = await getAnalysisOverview({ ...query, section: "core" });
+          if (cancelled) return;
+          setData(core);
+          const content = await getAnalysisOverview({ ...query, section: "content" });
+          if (cancelled) return;
+          setData({
+            ...core,
+            topComments: content.topComments,
+            topWords: content.topWords,
+            coverage: {
+              ...core.coverage,
+              sampledComments: content.coverage.sampledComments,
+            },
+          });
+        } else {
+          const response = await getAnalysisOverview(query);
+          if (!cancelled) setData(response);
+        }
+      } catch (caught) {
+        if (!cancelled) {
+          setError(caught instanceof Error ? caught.message : "통계를 불러오지 못했습니다.");
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    void load();
     return () => { cancelled = true; };
   }, [channelId, commentType, period, refreshKey, scope, targetId]);
 

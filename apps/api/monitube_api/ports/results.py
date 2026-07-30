@@ -77,6 +77,7 @@ class ExploreReadRepository(Protocol):
         from_at: Any | None = None,
         to_at: Any | None = None,
         comment_type: str = "all",
+        section: str = "all",
         limit: int = 10,
     ) -> dict[str, Any]: ...
 

@@ -17,6 +17,7 @@ class AnalysisService(ApplicationService):
         from_at: datetime | None = None,
         to_at: datetime | None = None,
         comment_type: str = "all",
+        section: str = "all",
         limit: int = 10,
     ) -> AnalysisOverviewResponse:
         return AnalysisOverviewResponse.model_validate(
@@ -28,6 +29,7 @@ class AnalysisService(ApplicationService):
                 from_at=from_at,
                 to_at=to_at,
                 comment_type=comment_type,
+                section=section,
                 limit=limit,
             )
         )

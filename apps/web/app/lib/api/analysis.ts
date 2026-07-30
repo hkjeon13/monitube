@@ -102,6 +102,7 @@ export async function getAnalysisOverview(query: AnalysisQuery = {}): Promise<An
   if (query.from) params.set("from", query.from);
   if (query.to) params.set("to", query.to);
   if (query.commentType) params.set("commentType", query.commentType);
+  if (query.section) params.set("section", query.section);
   params.set("limit", String(query.limit ?? 10));
 
   const response = await request<unknown>(`/v1/analysis/overview?${params.toString()}`, { method: "GET" });

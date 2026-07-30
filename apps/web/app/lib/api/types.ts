@@ -230,6 +230,7 @@ export type CollectedSearchScope = "all" | "videos" | "comments";
 
 export type AnalysisScope = "all" | "channel" | "keyword";
 export type AnalysisCommentType = "all" | "top_level" | "reply";
+export type AnalysisSection = "all" | "core" | "content";
 
 export interface AnalysisTrendPoint {
   period: string;
@@ -319,5 +320,6 @@ export interface AnalysisQuery {
   from?: string;
   to?: string;
   commentType?: AnalysisCommentType;
+  section?: AnalysisSection;
   limit?: number;
 }

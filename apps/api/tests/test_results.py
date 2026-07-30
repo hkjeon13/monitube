@@ -162,6 +162,26 @@ def test_analysis_overview_combines_video_and_comment_metrics() -> None:
     assert body["coverage"]["sampledComments"] == 2
     assert body["topWords"][0]["word"] in {"댓글", "반응", "분석"}
 
+    core = client.get(
+        "/v1/analysis/overview",
+        params={"section": "core", "channelId": "UCanalysis"},
+    )
+    content = client.get(
+        "/v1/analysis/overview",
+        params={"section": "content", "channelId": "UCanalysis"},
+    )
+
+    assert core.status_code == 200
+    assert core.json()["summary"]["videoCount"] == 1
+    assert core.json()["topComments"] == []
+    assert core.json()["topWords"] == []
+    assert core.json()["coverage"]["sampledComments"] == 0
+    assert content.status_code == 200
+    assert content.json()["summary"]["videoCount"] == 0
+    assert content.json()["topVideos"] == []
+    assert content.json()["topComments"][0]["id"] == "analysis-comment-2"
+    assert content.json()["coverage"]["sampledComments"] == 2
+
 
 def test_additive_source_routes_can_be_rolled_back_with_flags() -> None:
     repository = InMemoryRepository()

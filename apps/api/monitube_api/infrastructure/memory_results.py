@@ -83,6 +83,7 @@ class MemoryReadMixin:
         from_at: datetime | None = None,
         to_at: datetime | None = None,
         comment_type: str = "all",
+        section: str = "all",
         limit: int = 10,
     ) -> dict[str, Any]:
         with self._lock:
@@ -365,7 +366,7 @@ class MemoryReadMixin:
                 for target_id in scoped_target_ids
                 if target_id in self._targets
             )
-            return {
+            result = {
                 "summary": {
                     "videoCount": len(period_videos),
                     "totalViewCount": sum(views),
@@ -461,6 +462,24 @@ class MemoryReadMixin:
                     "generatedAt": utcnow(),
                 },
             }
+            if section == "core":
+                result["topComments"] = []
+                result["topWords"] = []
+                result["coverage"]["sampledComments"] = 0
+            elif section == "content":
+                result["summary"] = {
+                    key: None if key.endswith("At") else 0
+                    for key in result["summary"]
+                }
+                result["videoTrend"] = []
+                result["commentTrend"] = []
+                result["channelBreakdown"] = []
+                result["keywordBreakdown"] = []
+                result["topVideos"] = []
+                result["coverage"]["includedVideoCount"] = 0
+                result["coverage"]["videosWithStatistics"] = 0
+                result["coverage"]["totalComments"] = 0
+            return result
 
     @staticmethod
     def _analysis_breakdown(
