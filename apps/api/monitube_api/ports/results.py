@@ -67,6 +67,19 @@ class ResultReadRepository(Protocol):
 
 
 class ExploreReadRepository(Protocol):
+    def get_analysis_overview(
+        self,
+        *,
+        owner_id: str,
+        scope: str = "all",
+        target_ids: list[str] | None = None,
+        channel_ids: list[str] | None = None,
+        from_at: Any | None = None,
+        to_at: Any | None = None,
+        comment_type: str = "all",
+        limit: int = 10,
+    ) -> dict[str, Any]: ...
+
     def list_explore(
         self,
         *,

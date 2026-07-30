@@ -1,5 +1,6 @@
 """Compatibility facade over resource-focused application services."""
 
+from .application.analysis_service import AnalysisService
 from .application.explore_service import ExploreService, InvalidSearchQueryError
 from .application.job_service import JobService
 from .application.result_service import ResultService
@@ -13,6 +14,7 @@ class CollectionService(
     JobService,
     ResultService,
     ExploreService,
+    AnalysisService,
 ):
     """Application facade retained for existing entry points.
 

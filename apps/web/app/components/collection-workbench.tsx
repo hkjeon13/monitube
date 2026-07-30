@@ -62,6 +62,7 @@ import { SourcesPage, StatusPage } from "../features/collection/workbench-pages"
 import { useActiveJobPolling } from "../features/collection/use-active-job-polling";
 import { useDialogFocusTrap } from "../features/collection/use-dialog-focus-trap";
 import { VideoModal } from "../features/collection/workbench-video-modal";
+import { AnalysisDashboard } from "../features/analysis/analysis-dashboard";
 import {
   activeJobKey,
   bucketLabels,
@@ -888,7 +889,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     { id: "sources" as const, label: "Sources", href: "/sources", Icon: FolderIcon },
     { id: "jobs" as const, label: "Status", href: "/jobs", Icon: QueueListIcon },
   ];
-  const breadcrumbPage = page === "overview" ? "Channels" : page === "explore" ? "Explore" : page === "sources" ? "Sources" : page === "keywords" ? "Keywords" : page === "jobs" ? "Status" : "Insights";
+  const breadcrumbPage = page === "overview" ? "Channels" : page === "explore" ? "Explore" : page === "sources" ? "Sources" : page === "keywords" ? "Keywords" : page === "jobs" ? "Status" : "Analysis";
   const breadcrumbDetail = page === "overview" && selectedExploreChannel
     ? selectedExploreChannel.title ?? selectedExploreChannel.handle ?? selectedExploreChannel.youtubeChannelId
     : null;
@@ -931,11 +932,17 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
               <span aria-current="page" title={breadcrumbDetail}>{breadcrumbDetail}</span>
             </>}
           </nav>
-          <button className="settings-button" type="button" onClick={openSettingsDrawer} aria-label="기본 설정 열기" aria-haspopup="dialog" aria-expanded={isSettingsOpen}>
-            <Cog6ToothIcon aria-hidden="true" />
-          </button>
+          <div className="utility-actions">
+            <Link className={page === "analysis" ? "analysis-entry analysis-entry-active" : "analysis-entry"} aria-current={page === "analysis" ? "page" : undefined} href="/analysis">
+              <DocumentChartBarIcon aria-hidden="true" />
+              <span>Analysis</span>
+            </Link>
+            <button className="settings-button" type="button" onClick={openSettingsDrawer} aria-label="기본 설정 열기" aria-haspopup="dialog" aria-expanded={isSettingsOpen}>
+              <Cog6ToothIcon aria-hidden="true" />
+            </button>
+          </div>
         </div>
-        {page !== "explore" && page !== "sources" && page !== "keywords" && <header className="dashboard-topbar" id="source-selector" tabIndex={-1}>
+        {page !== "explore" && page !== "sources" && page !== "keywords" && page !== "analysis" && <header className="dashboard-topbar" id="source-selector" tabIndex={-1}>
           <label className="source-select">
             <span className="visually-hidden">수집 대상 선택</span>
             <FolderIcon aria-hidden="true" />
@@ -980,6 +987,15 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
             </button>
           </div>
         </header>}
+
+        {page === "analysis" && (
+          <AnalysisDashboard
+            sources={sources}
+            channels={explore.channels}
+            onOpenVideo={openVideoDrawer}
+            onOpenComment={openCommentDetail}
+          />
+        )}
 
         {page === "jobs" && (
           <StatusPage

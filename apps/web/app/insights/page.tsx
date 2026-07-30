@@ -1,5 +1,5 @@
-import { CollectionWorkbench } from "../components/collection-workbench";
+import { redirect } from "next/navigation";
 
 export default function InsightsPage() {
-  return <CollectionWorkbench page="insights" />;
+  redirect("/analysis");
 }

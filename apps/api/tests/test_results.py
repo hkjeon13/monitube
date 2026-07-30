@@ -76,6 +76,93 @@ def test_source_results_and_video_comments_are_queryable() -> None:
     assert comments.json()["comments"][0]["text"] == "Great FastAPI video"
 
 
+def test_analysis_overview_combines_video_and_comment_metrics() -> None:
+    repository = InMemoryRepository()
+    client, _, worker_source_id = _subscribed_video_source(
+        repository,
+        "analysis001",
+    )
+    repository.upsert_channel(
+        {
+            "id": "analysis-channel-row",
+            "youtube_channel_id": "UCanalysis",
+            "title": "Analysis channel",
+            "statistics": {},
+            "source_fetched_at": datetime(2025, 1, 3, tzinfo=UTC),
+        }
+    )
+    video = repository.upsert_video(
+        VideoRecord(
+            id="analysis-video-row",
+            youtube_video_id="analysis001",
+            youtube_channel_id="UCanalysis",
+            title="Analysis video",
+            description="Example",
+            published_at=datetime(2025, 1, 2, tzinfo=UTC),
+            duration_seconds=120,
+            privacy_status="public",
+            made_for_kids=False,
+            statistics={
+                "viewCount": 1000,
+                "likeCount": 80,
+                "commentCount": 4,
+            },
+            source_fetched_at=datetime(2025, 1, 3, tzinfo=UTC),
+        )
+    )
+    repository.link_source_video(worker_source_id, video.youtube_video_id)
+    for index, parent_id in enumerate((None, "analysis-comment-1"), start=1):
+        repository.upsert_comment(
+            CommentRecord(
+                id=f"analysis-comment-row-{index}",
+                youtube_comment_id=f"analysis-comment-{index}",
+                youtube_video_id=video.youtube_video_id,
+                youtube_parent_comment_id=parent_id,
+                youtube_thread_id="analysis-thread",
+                text_display="분석 댓글 반응",
+                like_count=index,
+                published_at=datetime(2025, 1, 4 + index, tzinfo=UTC),
+                updated_at=None,
+                source_fetched_at=datetime(2025, 1, 6, tzinfo=UTC),
+                author_channel_id=f"author-{index}",
+                author_display_name=f"Author {index}",
+            )
+        )
+
+    response = client.get(
+        "/v1/analysis/overview",
+        params={
+            "from": "2025-01-01",
+            "to": "2025-01-31",
+            "channelId": "UCanalysis",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["summary"] == {
+        "videoCount": 1,
+        "totalViewCount": 1000,
+        "medianViewCount": 1000,
+        "totalLikeCount": 80,
+        "youtubeCommentCount": 4,
+        "collectedCommentCount": 2,
+        "commentedVideoCount": 1,
+        "identifiedAuthorCount": 2,
+        "topLevelCount": 1,
+        "replyCount": 1,
+        "averageCommentLikeCount": 1.5,
+        "latestVideoPublishedAt": "2025-01-02T00:00:00Z",
+        "latestCommentPublishedAt": "2025-01-06T00:00:00Z",
+        "statisticsFetchedAt": "2025-01-03T00:00:00Z",
+    }
+    assert body["channelBreakdown"][0]["label"] == "Analysis channel"
+    assert body["topVideos"][0]["collectedCommentCount"] == 2
+    assert body["topComments"][0]["id"] == "analysis-comment-2"
+    assert body["coverage"]["sampledComments"] == 2
+    assert body["topWords"][0]["word"] in {"댓글", "반응", "분석"}
+
+
 def test_additive_source_routes_can_be_rolled_back_with_flags() -> None:
     repository = InMemoryRepository()
     source = repository.create_source(

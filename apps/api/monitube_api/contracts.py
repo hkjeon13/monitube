@@ -434,6 +434,94 @@ class SourceVideosPageResponse(ApiModel):
     total: int = Field(default=0, ge=0)
 
 
+class AnalysisTrendPoint(ApiModel):
+    period: datetime
+    count: int = Field(default=0, ge=0)
+    topLevelCount: int = Field(default=0, ge=0)
+    replyCount: int = Field(default=0, ge=0)
+
+
+class AnalysisBreakdownRow(ApiModel):
+    id: str
+    label: str
+    kind: Literal["channel", "keyword"]
+    videoCount: int = Field(default=0, ge=0)
+    viewCount: int = Field(default=0, ge=0)
+    likeCount: int = Field(default=0, ge=0)
+    youtubeCommentCount: int = Field(default=0, ge=0)
+    collectedCommentCount: int = Field(default=0, ge=0)
+    topLevelCount: int = Field(default=0, ge=0)
+    replyCount: int = Field(default=0, ge=0)
+    latestPublishedAt: datetime | None = None
+
+
+class AnalysisVideo(ApiModel):
+    id: str
+    channelId: str | None = None
+    channelTitle: str | None = None
+    title: str | None = None
+    publishedAt: datetime | None = None
+    durationSeconds: int | None = Field(default=None, ge=0)
+    viewCount: int = Field(default=0, ge=0)
+    likeCount: int = Field(default=0, ge=0)
+    youtubeCommentCount: int = Field(default=0, ge=0)
+    collectedCommentCount: int = Field(default=0, ge=0)
+    topLevelCount: int = Field(default=0, ge=0)
+    replyCount: int = Field(default=0, ge=0)
+    statisticsFetchedAt: datetime | None = None
+
+
+class AnalysisComment(ApiModel):
+    id: str
+    videoId: str
+    videoTitle: str | None = None
+    channelTitle: str | None = None
+    text: str | None = None
+    authorName: str | None = None
+    publishedAt: datetime | None = None
+    likeCount: int = Field(default=0, ge=0)
+    isReply: bool = False
+
+
+class WorkspaceAnalysisSummary(ApiModel):
+    videoCount: int = Field(default=0, ge=0)
+    totalViewCount: int = Field(default=0, ge=0)
+    medianViewCount: int = Field(default=0, ge=0)
+    totalLikeCount: int = Field(default=0, ge=0)
+    youtubeCommentCount: int = Field(default=0, ge=0)
+    collectedCommentCount: int = Field(default=0, ge=0)
+    commentedVideoCount: int = Field(default=0, ge=0)
+    identifiedAuthorCount: int = Field(default=0, ge=0)
+    topLevelCount: int = Field(default=0, ge=0)
+    replyCount: int = Field(default=0, ge=0)
+    averageCommentLikeCount: float = Field(default=0, ge=0)
+    latestVideoPublishedAt: datetime | None = None
+    latestCommentPublishedAt: datetime | None = None
+    statisticsFetchedAt: datetime | None = None
+
+
+class AnalysisCoverage(ApiModel):
+    visibleTargetCount: int = Field(default=0, ge=0)
+    includedVideoCount: int = Field(default=0, ge=0)
+    videosWithStatistics: int = Field(default=0, ge=0)
+    sampledComments: int = Field(default=0, ge=0)
+    totalComments: int = Field(default=0, ge=0)
+    partialData: bool = False
+    generatedAt: datetime
+
+
+class AnalysisOverviewResponse(ApiModel):
+    summary: WorkspaceAnalysisSummary
+    videoTrend: list[AnalysisTrendPoint] = Field(default_factory=list)
+    commentTrend: list[AnalysisTrendPoint] = Field(default_factory=list)
+    channelBreakdown: list[AnalysisBreakdownRow] = Field(default_factory=list)
+    keywordBreakdown: list[AnalysisBreakdownRow] = Field(default_factory=list)
+    topVideos: list[AnalysisVideo] = Field(default_factory=list)
+    topComments: list[AnalysisComment] = Field(default_factory=list)
+    topWords: list[TopWord] = Field(default_factory=list)
+    coverage: AnalysisCoverage
+
+
 class ActiveParentJob(ApiModel):
     """An active parent job mapped to the caller's public source ID."""
 

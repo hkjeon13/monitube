@@ -51,6 +51,7 @@ from ..domain import (
     utcnow,
 )
 from .postgres_comments import PostgresCommentReadMixin
+from .postgres_analysis import PostgresAnalysisMixin
 from .postgres_explore import PostgresExploreMixin
 from .postgres_jobs import PostgresJobMixin
 from .postgres_results import PostgresResultMixin
@@ -80,6 +81,7 @@ from .postgres_support import _optional_nonnegative_int, _strip_nul
 
 class PostgresRepository(
     PostgresCommentReadMixin,
+    PostgresAnalysisMixin,
     PostgresExploreMixin,
     PostgresJobMixin,
     PostgresCollectionWriteMixin,

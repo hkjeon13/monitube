@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .api.dependencies import get_current_user
 from .api.exception_handlers import register_exception_handlers
+from .api.routers.analysis import router as analysis_router
 from .api.routers.auth import create_auth_router
 from .api.routers.comments import router as comments_router
 from .api.routers.explore import router as explore_router
@@ -107,6 +108,7 @@ def create_app(
     app.include_router(explore_router)
     app.include_router(jobs_router)
     app.include_router(comments_router)
+    app.include_router(analysis_router)
     return app
 
 

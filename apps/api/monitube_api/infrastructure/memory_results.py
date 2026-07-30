@@ -1,16 +1,17 @@
 """In-memory result, explore, search, and comment read models."""
 
+from collections import defaultdict
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
+from statistics import median
 from typing import Any, Iterable
 
-from ..analysis import build_summary
+from ..analysis import build_summary, top_words_from_texts
 from ..domain import CommentRecord, JobRecord, JobState, SourceRecord, SourceType, VideoRecord, utcnow
 from ..fuzzy_search import normalize_search_text, rank_text_fields
 from ..repositories import (
     CommentThreadSort,
     NotFoundError,
-    RepositoryError,
     _comment_sort_key,
     _comment_thread_sort_key,
     _effective_video_timestamp,
@@ -71,6 +72,440 @@ class MemoryReadMixin:
                         dispatched += 1
                 pin["next_run_at"] = now + timedelta(minutes=int(pin["interval_minutes"]))
             return dispatched
+
+    def get_analysis_overview(
+        self,
+        *,
+        owner_id: str,
+        scope: str = "all",
+        target_ids: list[str] | None = None,
+        channel_ids: list[str] | None = None,
+        from_at: datetime | None = None,
+        to_at: datetime | None = None,
+        comment_type: str = "all",
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        with self._lock:
+            visible_target_ids = self.subscription_target_ids(
+                owner_id=owner_id,
+                enabled_only=False,
+            )
+            selected_target_ids = set(target_ids or [])
+            selected_channel_ids = set(channel_ids or [])
+            if scope == "keyword":
+                scoped_target_ids = {
+                    target_id
+                    for target_id in visible_target_ids
+                    if target_id in self._targets
+                    and self._targets[target_id].type is SourceType.KEYWORD
+                    and (
+                        not selected_target_ids
+                        or target_id in selected_target_ids
+                    )
+                }
+                visible_video_ids = self._target_video_ids_locked(
+                    scoped_target_ids
+                )
+            else:
+                scoped_target_ids = set(visible_target_ids)
+                visible_video_ids = self._target_video_ids_locked(
+                    visible_target_ids
+                )
+
+            visible_videos = [
+                video
+                for video in self._videos.values()
+                if video.youtube_video_id in visible_video_ids
+                and (
+                    scope != "channel"
+                    or not selected_channel_ids
+                    or video.youtube_channel_id in selected_channel_ids
+                )
+            ]
+            visible_video_ids = {
+                video.youtube_video_id for video in visible_videos
+            }
+
+            def in_period(value: datetime | None) -> bool:
+                if from_at is None and to_at is None:
+                    return True
+                if value is None:
+                    return False
+                return (
+                    (from_at is None or value >= from_at)
+                    and (to_at is None or value < to_at)
+                )
+
+            period_videos = [
+                video for video in visible_videos if in_period(video.published_at)
+            ]
+            period_comments = [
+                comment
+                for comment in self._comments.values()
+                if comment.youtube_video_id in visible_video_ids
+                and in_period(comment.published_at)
+                and (
+                    comment_type == "all"
+                    or (
+                        comment_type == "top_level"
+                        and comment.youtube_parent_comment_id is None
+                    )
+                    or (
+                        comment_type == "reply"
+                        and comment.youtube_parent_comment_id is not None
+                    )
+                )
+            ]
+
+            comments_by_video: dict[str, list[CommentRecord]] = defaultdict(list)
+            all_visible_comments: dict[str, list[CommentRecord]] = defaultdict(list)
+            for comment in period_comments:
+                comments_by_video[comment.youtube_video_id].append(comment)
+            for comment in self._comments.values():
+                if comment.youtube_video_id in visible_video_ids:
+                    all_visible_comments[comment.youtube_video_id].append(comment)
+
+            views = [
+                int(video.statistics.get("viewCount", 0))
+                for video in period_videos
+            ]
+            top_level_count = sum(
+                comment.youtube_parent_comment_id is None
+                for comment in period_comments
+            )
+            reply_count = len(period_comments) - top_level_count
+            published_video_dates = [
+                video.published_at
+                for video in period_videos
+                if video.published_at is not None
+            ]
+            published_comment_dates = [
+                comment.published_at
+                for comment in period_comments
+                if comment.published_at is not None
+            ]
+
+            video_trend_counts: dict[datetime, int] = defaultdict(int)
+            for video in period_videos:
+                if video.published_at:
+                    period = video.published_at.astimezone(UTC).replace(
+                        hour=0,
+                        minute=0,
+                        second=0,
+                        microsecond=0,
+                    )
+                    video_trend_counts[period] += 1
+
+            comment_trend_counts: dict[datetime, dict[str, int]] = defaultdict(
+                lambda: {"count": 0, "top": 0, "reply": 0}
+            )
+            for comment in period_comments:
+                if not comment.published_at:
+                    continue
+                period = comment.published_at.astimezone(UTC).replace(
+                    hour=0,
+                    minute=0,
+                    second=0,
+                    microsecond=0,
+                )
+                comment_trend_counts[period]["count"] += 1
+                key = (
+                    "reply"
+                    if comment.youtube_parent_comment_id is not None
+                    else "top"
+                )
+                comment_trend_counts[period][key] += 1
+
+            channel_videos: dict[str, list[VideoRecord]] = defaultdict(list)
+            for video in period_videos:
+                channel_videos[video.youtube_channel_id or "unknown"].append(
+                    video
+                )
+            channel_breakdown = []
+            for channel_id, videos in channel_videos.items():
+                video_ids = {video.youtube_video_id for video in videos}
+                comments = [
+                    comment
+                    for comment in period_comments
+                    if comment.youtube_video_id in video_ids
+                ]
+                channel = self._channels.get(channel_id, {})
+                channel_breakdown.append(
+                    self._analysis_breakdown(
+                        identifier=channel_id,
+                        label=str(channel.get("title") or channel_id),
+                        kind="channel",
+                        videos=videos,
+                        comments=comments,
+                    )
+                )
+
+            keyword_breakdown = []
+            keyword_target_ids = [
+                target_id
+                for target_id in visible_target_ids
+                if target_id in self._targets
+                and self._targets[target_id].type is SourceType.KEYWORD
+                and (
+                    not selected_target_ids
+                    or target_id in selected_target_ids
+                )
+            ]
+            for target_id in keyword_target_ids:
+                target = self._targets[target_id]
+                membership = self._target_videos.get(target_id, set())
+                videos = [
+                    video
+                    for video in period_videos
+                    if video.youtube_video_id in membership
+                ]
+                if not videos and scope == "keyword":
+                    continue
+                membership_ids = {
+                    video.youtube_video_id for video in videos
+                }
+                comments = [
+                    comment
+                    for comment in period_comments
+                    if comment.youtube_video_id in membership_ids
+                ]
+                keyword_breakdown.append(
+                    self._analysis_breakdown(
+                        identifier=target_id,
+                        label=str(
+                            target.config.get("query")
+                            or target.canonical_key
+                        ),
+                        kind="keyword",
+                        videos=videos,
+                        comments=comments,
+                    )
+                )
+
+            top_videos = []
+            for video in sorted(
+                period_videos,
+                key=lambda item: (
+                    int(item.statistics.get("viewCount", 0)),
+                    item.published_at or datetime.min.replace(tzinfo=UTC),
+                ),
+                reverse=True,
+            )[:limit]:
+                attached = all_visible_comments[video.youtube_video_id]
+                channel = self._channels.get(video.youtube_channel_id or "", {})
+                top_videos.append(
+                    {
+                        "id": video.youtube_video_id,
+                        "channelId": video.youtube_channel_id,
+                        "channelTitle": channel.get("title"),
+                        "title": video.title,
+                        "publishedAt": video.published_at,
+                        "durationSeconds": video.duration_seconds,
+                        "viewCount": int(video.statistics.get("viewCount", 0)),
+                        "likeCount": int(video.statistics.get("likeCount", 0)),
+                        "youtubeCommentCount": int(
+                            video.statistics.get("commentCount", 0)
+                        ),
+                        "collectedCommentCount": len(attached),
+                        "topLevelCount": sum(
+                            comment.youtube_parent_comment_id is None
+                            for comment in attached
+                        ),
+                        "replyCount": sum(
+                            comment.youtube_parent_comment_id is not None
+                            for comment in attached
+                        ),
+                        "statisticsFetchedAt": video.source_fetched_at,
+                    }
+                )
+
+            videos_by_id = {
+                video.youtube_video_id: video for video in visible_videos
+            }
+            top_comments = []
+            for comment in sorted(
+                period_comments,
+                key=lambda item: (
+                    item.like_count,
+                    item.published_at or item.source_fetched_at,
+                ),
+                reverse=True,
+            )[:limit]:
+                video = videos_by_id.get(comment.youtube_video_id)
+                channel = self._channels.get(
+                    video.youtube_channel_id if video else "",
+                    {},
+                )
+                top_comments.append(
+                    {
+                        "id": comment.youtube_comment_id,
+                        "videoId": comment.youtube_video_id,
+                        "videoTitle": video.title if video else None,
+                        "channelTitle": channel.get("title"),
+                        "text": comment.text_display,
+                        "authorName": comment.author_display_name,
+                        "publishedAt": comment.published_at,
+                        "likeCount": comment.like_count,
+                        "isReply": (
+                            comment.youtube_parent_comment_id is not None
+                        ),
+                    }
+                )
+
+            sample = sorted(
+                period_comments,
+                key=lambda item: item.published_at or item.source_fetched_at,
+                reverse=True,
+            )[:5000]
+            partial_data = any(
+                str(
+                    self._targets[target_id].coverage.get("status", "complete")
+                )
+                in {"limited", "unknown"}
+                for target_id in scoped_target_ids
+                if target_id in self._targets
+            )
+            return {
+                "summary": {
+                    "videoCount": len(period_videos),
+                    "totalViewCount": sum(views),
+                    "medianViewCount": int(median(views)) if views else 0,
+                    "totalLikeCount": sum(
+                        int(video.statistics.get("likeCount", 0))
+                        for video in period_videos
+                    ),
+                    "youtubeCommentCount": sum(
+                        int(video.statistics.get("commentCount", 0))
+                        for video in period_videos
+                    ),
+                    "collectedCommentCount": len(period_comments),
+                    "commentedVideoCount": len(comments_by_video),
+                    "identifiedAuthorCount": len(
+                        {
+                            comment.author_channel_id
+                            for comment in period_comments
+                            if comment.author_channel_id
+                        }
+                    ),
+                    "topLevelCount": top_level_count,
+                    "replyCount": reply_count,
+                    "averageCommentLikeCount": (
+                        sum(comment.like_count for comment in period_comments)
+                        / len(period_comments)
+                        if period_comments
+                        else 0
+                    ),
+                    "latestVideoPublishedAt": (
+                        max(published_video_dates)
+                        if published_video_dates
+                        else None
+                    ),
+                    "latestCommentPublishedAt": (
+                        max(published_comment_dates)
+                        if published_comment_dates
+                        else None
+                    ),
+                    "statisticsFetchedAt": max(
+                        (
+                            video.source_fetched_at
+                            for video in period_videos
+                        ),
+                        default=None,
+                    ),
+                },
+                "videoTrend": [
+                    {
+                        "period": period,
+                        "count": count,
+                        "topLevelCount": 0,
+                        "replyCount": 0,
+                    }
+                    for period, count in sorted(video_trend_counts.items())
+                ],
+                "commentTrend": [
+                    {
+                        "period": period,
+                        "count": counts["count"],
+                        "topLevelCount": counts["top"],
+                        "replyCount": counts["reply"],
+                    }
+                    for period, counts in sorted(
+                        comment_trend_counts.items()
+                    )
+                ],
+                "channelBreakdown": sorted(
+                    channel_breakdown,
+                    key=lambda item: item["viewCount"],
+                    reverse=True,
+                )[:limit],
+                "keywordBreakdown": sorted(
+                    keyword_breakdown,
+                    key=lambda item: item["viewCount"],
+                    reverse=True,
+                )[:limit],
+                "topVideos": top_videos,
+                "topComments": top_comments,
+                "topWords": top_words_from_texts(
+                    (comment.text_display for comment in sample),
+                    limit=15,
+                ),
+                "coverage": {
+                    "visibleTargetCount": len(scoped_target_ids),
+                    "includedVideoCount": len(period_videos),
+                    "videosWithStatistics": sum(
+                        bool(video.statistics) for video in period_videos
+                    ),
+                    "sampledComments": len(sample),
+                    "totalComments": len(period_comments),
+                    "partialData": partial_data,
+                    "generatedAt": utcnow(),
+                },
+            }
+
+    @staticmethod
+    def _analysis_breakdown(
+        *,
+        identifier: str,
+        label: str,
+        kind: str,
+        videos: list[VideoRecord],
+        comments: list[CommentRecord],
+    ) -> dict[str, Any]:
+        return {
+            "id": identifier,
+            "label": label,
+            "kind": kind,
+            "videoCount": len(videos),
+            "viewCount": sum(
+                int(video.statistics.get("viewCount", 0))
+                for video in videos
+            ),
+            "likeCount": sum(
+                int(video.statistics.get("likeCount", 0))
+                for video in videos
+            ),
+            "youtubeCommentCount": sum(
+                int(video.statistics.get("commentCount", 0))
+                for video in videos
+            ),
+            "collectedCommentCount": len(comments),
+            "topLevelCount": sum(
+                comment.youtube_parent_comment_id is None
+                for comment in comments
+            ),
+            "replyCount": sum(
+                comment.youtube_parent_comment_id is not None
+                for comment in comments
+            ),
+            "latestPublishedAt": max(
+                (
+                    video.published_at
+                    for video in videos
+                    if video.published_at is not None
+                ),
+                default=None,
+            ),
+        }
 
     def list_explore(
         self, *, limit: int = 60, offset: int = 0, channel_id: str | None = None, owner_id: str | None = None

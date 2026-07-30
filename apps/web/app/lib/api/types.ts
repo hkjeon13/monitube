@@ -227,3 +227,97 @@ export interface CollectedSearchData {
 }
 
 export type CollectedSearchScope = "all" | "videos" | "comments";
+
+export type AnalysisScope = "all" | "channel" | "keyword";
+export type AnalysisCommentType = "all" | "top_level" | "reply";
+
+export interface AnalysisTrendPoint {
+  period: string;
+  count: number;
+  topLevelCount: number;
+  replyCount: number;
+}
+
+export interface AnalysisBreakdownRow {
+  id: string;
+  kind: "channel" | "keyword";
+  label: string;
+  videoCount: number;
+  viewCount: number;
+  likeCount: number;
+  youtubeCommentCount: number;
+  collectedCommentCount: number;
+  topLevelCount: number;
+  replyCount: number;
+  latestPublishedAt?: string;
+}
+
+export interface AnalysisVideo extends CollectedVideo {
+  channelTitle?: string;
+  youtubeCommentCount: number;
+  collectedCommentCount: number;
+  topLevelCount: number;
+  replyCount: number;
+  statisticsFetchedAt?: string;
+}
+
+export interface AnalysisComment {
+  id: string;
+  videoId: string;
+  videoTitle?: string;
+  channelTitle?: string;
+  text?: string;
+  authorName?: string;
+  publishedAt?: string;
+  likeCount: number;
+  isReply: boolean;
+}
+
+export interface WorkspaceAnalysisSummary {
+  videoCount: number;
+  totalViewCount: number;
+  medianViewCount: number;
+  totalLikeCount: number;
+  youtubeCommentCount: number;
+  collectedCommentCount: number;
+  commentedVideoCount: number;
+  identifiedAuthorCount: number;
+  topLevelCount: number;
+  replyCount: number;
+  averageCommentLikeCount: number;
+  latestVideoPublishedAt?: string;
+  latestCommentPublishedAt?: string;
+  statisticsFetchedAt?: string;
+}
+
+export interface AnalysisCoverage {
+  visibleTargetCount: number;
+  includedVideoCount: number;
+  videosWithStatistics: number;
+  sampledComments: number;
+  totalComments: number;
+  partialData: boolean;
+  generatedAt: string;
+}
+
+export interface AnalysisOverview {
+  summary: WorkspaceAnalysisSummary;
+  videoTrend: AnalysisTrendPoint[];
+  commentTrend: AnalysisTrendPoint[];
+  channelBreakdown: AnalysisBreakdownRow[];
+  keywordBreakdown: AnalysisBreakdownRow[];
+  topVideos: AnalysisVideo[];
+  topComments: AnalysisComment[];
+  topWords: TopWord[];
+  coverage: AnalysisCoverage;
+}
+
+export interface AnalysisQuery {
+  scope?: AnalysisScope;
+  targetId?: string;
+  channelId?: string;
+  from?: string;
+  to?: string;
+  commentType?: AnalysisCommentType;
+  limit?: number;
+}

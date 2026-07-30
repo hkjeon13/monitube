@@ -29,6 +29,16 @@ export type {
   CollectedSearchComment,
   CollectedSearchData,
   CollectedSearchScope,
+  AnalysisScope,
+  AnalysisCommentType,
+  AnalysisTrendPoint,
+  AnalysisBreakdownRow,
+  AnalysisVideo,
+  AnalysisComment,
+  WorkspaceAnalysisSummary,
+  AnalysisCoverage,
+  AnalysisOverview,
+  AnalysisQuery,
 } from "./api/types";
 
 export { ApiError, apiBaseUrl } from "./api/transport";
@@ -37,3 +47,4 @@ export * from "./api/sources";
 export * from "./api/results";
 export * from "./api/comments";
 export * from "./api/explore";
+export * from "./api/analysis";

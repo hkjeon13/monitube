@@ -24,7 +24,7 @@ export const commentSortLabels: Record<CommentThreadSort, string> = {
   oldest: "오래된 순",
   recommended: "추천순",
 };
-export type WorkspacePage = "overview" | "explore" | "sources" | "keywords" | "jobs" | "insights";
+export type WorkspacePage = "overview" | "explore" | "sources" | "keywords" | "jobs" | "analysis";
 export type FormState = {
   sourceType: CollectionSourceType;
   channelInput: string;
