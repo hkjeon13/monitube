@@ -340,6 +340,38 @@ def test_keyword_history_continues_below_provider_pagination_boundary() -> None:
     assert client.search_requests[1]["publishedBefore"] == "2025-01-03T00:00:01Z"
 
 
+def test_active_legacy_keyword_fanout_is_upgraded_to_historical_backfill() -> None:
+    repository = InMemoryRepository()
+    source = repository.create_source(
+        source_type=SourceType.KEYWORD,
+        config={"query": "FastAPI", "order": "date", "includeComments": False},
+    )
+    parent = repository.create_job(
+        source_id=source.id,
+        include_comments=False,
+        max_videos=None,
+        max_comments_per_video=None,
+    )
+    parent = replace(
+        parent,
+        target_id="shared-target",
+        checkpoint={"fanoutDiscovered": True, "fanoutVideoCount": 1},
+    )
+    repository._jobs[parent.id] = parent
+    repository.enqueue_video_jobs(
+        parent_job=parent, youtube_video_ids=["newest-video"]
+    )
+
+    waiting = JobRunner(
+        repository,
+        YouTubeCollector(repository, HistoricalKeywordClient()),
+    ).run(parent.id)
+
+    assert waiting.state is JobState.WAITING_RETRY
+    assert waiting.checkpoint["keywordHistoricalBackfillComplete"] is True
+    assert repository.child_job_summary(parent_job_id=parent.id) == (4, 0, 0)
+
+
 class QuotaPausedHistoricalKeywordClient:
     def __init__(self) -> None:
         self.calls = 0

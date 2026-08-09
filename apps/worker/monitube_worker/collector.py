@@ -163,9 +163,22 @@ class YouTubeCollector(DiscoveryCollectionMixin, CommentCollectionMixin):
             if job.checkpoint.get("jobKind") == "video":
                 self._collect_video_job(job, source)
                 return
-            if job.checkpoint.get("fanoutDiscovered"):
+            needs_keyword_history = bool(
+                source.type is SourceType.KEYWORD
+                and not source.coverage.get("historicalBackfillComplete")
+                and not job.checkpoint.get("keywordHistoricalBackfillComplete")
+            )
+            if job.checkpoint.get("fanoutDiscovered") and not needs_keyword_history:
                 self._finalize_fanout_job(job, source)
                 return
+            if job.checkpoint.get("fanoutDiscovered") and needs_keyword_history:
+                # Upgrade a keyword parent that was already in its legacy fanout
+                # phase when this historical-backfill behavior was deployed. Keep
+                # its existing children and continue discovery on the same parent,
+                # whose per-video idempotency keys suppress duplicate child work.
+                self._active_checkpoint.pop("fanoutDiscovered", None)
+                self._active_checkpoint.pop("fanoutVideoCount", None)
+                self.repository.checkpoint_job(job.id, self._active_checkpoint)
             if source.type is SourceType.VIDEO:
                 # A direct video request is already the smallest schedulable unit.
                 self._collect_video_job(job, source, video_id=str(source.config["input"]))
