@@ -4,7 +4,9 @@ import {
   EllipsisHorizontalIcon,
   ExclamationTriangleIcon,
   PlusIcon,
+  TrashIcon,
 } from "@heroicons/react/24/outline";
+import type { JobStatus } from "@monitube/contracts";
 
 import type { ExploreData, RecentJobFailure, SourceSummary } from "../../lib/api";
 import { SourceCollectionState } from "./workbench-components";
@@ -17,14 +19,26 @@ import {
   type WorkspacePage,
 } from "./workbench-model";
 
+function collectionRate(progress: JobStatus["progress"] | undefined, state: JobStatus["state"] | undefined) {
+  if (!progress) return undefined;
+  if (progress.total === undefined) {
+    return state === "completed" || state === "completed_with_warnings" ? 100 : undefined;
+  }
+  if (progress.total <= 0) {
+    return state === "completed" || state === "completed_with_warnings" ? 100 : 0;
+  }
+  return Math.min(100, Math.max(0, Math.round((progress.completed / progress.total) * 100)));
+}
+
 type StatusPageProps = {
   failures: RecentJobFailure[];
   error: string | null;
   loading: boolean;
+  onClear: () => void;
   onRefresh: () => void;
 };
 
-export function StatusPage({ failures, error, loading, onRefresh }: StatusPageProps) {
+export function StatusPage({ failures, error, loading, onClear, onRefresh }: StatusPageProps) {
   return (
     <section className="status-page" aria-labelledby="status-page-title">
       <div className="workspace-page-heading status-page-heading">
@@ -38,9 +52,14 @@ export function StatusPage({ failures, error, loading, onRefresh }: StatusPagePr
             <p className="section-kicker">RECENT FAILURES</p>
             <h2 id="recent-failures-title">최근 공유 수집 대상 실패</h2>
           </div>
-          <button className="icon-button" type="button" onClick={onRefresh} disabled={loading} aria-label="최근 수집 실패 새로고침">
-            <ArrowPathIcon className={loading ? "icon-spinning" : undefined} aria-hidden="true" />
-          </button>
+          <div className="panel-heading-actions">
+            <button className="icon-button recent-failures-clear" type="button" onClick={onClear} disabled={loading || failures.length === 0} aria-label="과거 수집 실패 기록 숨기기">
+              <TrashIcon aria-hidden="true" />
+            </button>
+            <button className="icon-button" type="button" onClick={onRefresh} disabled={loading} aria-label="최근 수집 실패 새로고침">
+              <ArrowPathIcon className={loading ? "icon-spinning" : undefined} aria-hidden="true" />
+            </button>
+          </div>
         </div>
 
         {error && (
@@ -143,6 +162,10 @@ export function SourcesPage({
             const targetValue = sourceTargetValue(source);
             const channelName = channel?.title ?? channel?.handle ?? (source.type === "channel" ? "채널 정보 확인 중" : targetValue);
             const channelId = channel?.youtubeChannelId ?? targetValue;
+            const keywordVideoRate = source.type === "keyword" ? collectionRate(source.latestJob?.videoProgress, source.latestJob?.state) : undefined;
+            const keywordCommentRate = source.type === "keyword" ? collectionRate(source.latestJob?.commentProgress, source.latestJob?.state) : undefined;
+            const videoCollectionRate = source.type === "keyword" ? keywordVideoRate : channel?.videoCollectionRate;
+            const commentCollectionRate = source.type === "keyword" ? keywordCommentRate : channel?.commentCollectionRate;
             return (
               <article key={source.id} className={`source-page-card${source.id === activeSourceId ? " source-page-card-active" : ""}${menuOpen ? " source-page-card-menu-open" : ""}`}>
                 <button type="button" className="source-page-select" onClick={() => { onMenuChange(null); onOpen(source.id); }} aria-label={`${sourceLabel(source)} 작업 공간 열기`}>
@@ -150,8 +173,8 @@ export function SourcesPage({
                   <strong title={channelId}>{channelName}</strong>
                 </button>
                 <SourceCollectionState source={source} />
-                <span className="source-collection-rate source-video-collection-rate">{channel?.videoCollectionRate === undefined ? "—" : `${channel.videoCollectionRate}%`}</span>
-                <span className="source-collection-rate source-comment-collection-rate">{channel?.commentCollectionRate === undefined ? "—" : `${channel.commentCollectionRate}%`}</span>
+                <span className="source-collection-rate source-video-collection-rate">{videoCollectionRate === undefined ? "—" : `${videoCollectionRate}%`}</span>
+                <span className="source-collection-rate source-comment-collection-rate">{commentCollectionRate === undefined ? "—" : `${commentCollectionRate}%`}</span>
                 <div className="source-card-actions">
                   <button className="source-more-button" type="button" disabled={deletingSourceId === source.id} onClick={() => onMenuChange(menuOpen ? null : source.id)} aria-label={`${sourceLabel(source)} 관리 메뉴`} aria-expanded={menuOpen} aria-haspopup="menu"><EllipsisHorizontalIcon aria-hidden="true" /></button>
                   {menuOpen && <div className="source-action-menu" role="menu" aria-label={`${sourceLabel(source)} 관리`}>

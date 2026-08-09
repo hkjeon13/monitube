@@ -6,7 +6,12 @@ from datetime import UTC, datetime, timedelta
 from statistics import median
 from typing import Any, Iterable
 
-from ..analysis import build_summary, top_words_from_texts
+from ..analysis import (
+    build_summary,
+    question_signals_from_texts,
+    top_words_from_texts,
+)
+from ..analysis_insights import build_video_insights
 from ..domain import CommentRecord, JobRecord, JobState, SourceRecord, SourceType, VideoRecord, utcnow
 from ..fuzzy_search import normalize_search_text, rank_text_fields
 from ..repositories import (
@@ -72,6 +77,92 @@ class MemoryReadMixin:
                         dispatched += 1
                 pin["next_run_at"] = now + timedelta(minutes=int(pin["interval_minutes"]))
             return dispatched
+
+    def get_analysis_insights(
+        self,
+        *,
+        owner_id: str,
+        scope: str = "all",
+        target_ids: list[str] | None = None,
+        channel_ids: list[str] | None = None,
+        from_at: datetime | None = None,
+        to_at: datetime | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        with self._lock:
+            visible_target_ids = self.subscription_target_ids(
+                owner_id=owner_id,
+                enabled_only=False,
+            )
+            selected_target_ids = set(target_ids or [])
+            selected_channel_ids = set(channel_ids or [])
+            if scope == "keyword":
+                visible_target_ids = {
+                    target_id
+                    for target_id in visible_target_ids
+                    if target_id in self._targets
+                    and self._targets[target_id].type is SourceType.KEYWORD
+                    and (
+                        not selected_target_ids
+                        or target_id in selected_target_ids
+                    )
+                }
+            visible_video_ids = self._target_video_ids_locked(
+                visible_target_ids
+            )
+            comments_by_video: dict[str, int] = defaultdict(int)
+            for comment in self._comments.values():
+                comments_by_video[comment.youtube_video_id] += 1
+
+            rows = []
+            for video in self._videos.values():
+                if video.youtube_video_id not in visible_video_ids:
+                    continue
+                if (
+                    scope == "channel"
+                    and selected_channel_ids
+                    and video.youtube_channel_id not in selected_channel_ids
+                ):
+                    continue
+                if from_at and (
+                    video.published_at is None
+                    or video.published_at < from_at
+                ):
+                    continue
+                if to_at and (
+                    video.published_at is None
+                    or video.published_at >= to_at
+                ):
+                    continue
+                channel = self._channels.get(
+                    video.youtube_channel_id or "",
+                    {},
+                )
+                rows.append(
+                    {
+                        "id": video.youtube_video_id,
+                        "channel_id": video.youtube_channel_id,
+                        "channel_title": channel.get("title"),
+                        "title": video.title,
+                        "published_at": video.published_at,
+                        "statistics_fetched_at": video.source_fetched_at,
+                        "view_count": video.statistics.get("viewCount", 0),
+                        "like_count": video.statistics.get("likeCount", 0),
+                        "youtube_comment_count": video.statistics.get(
+                            "commentCount",
+                            0,
+                        ),
+                        "collected_comment_count": comments_by_video.get(
+                            video.youtube_video_id,
+                            0,
+                        ),
+                        "baseline_fetched_at": None,
+                        "baseline_view_count": None,
+                        "baseline_like_count": None,
+                        "baseline_comment_count": None,
+                    }
+                )
+        return build_video_insights(rows, limit=limit)
 
     def get_analysis_overview(
         self,
@@ -450,6 +541,32 @@ class MemoryReadMixin:
                     (comment.text_display for comment in sample),
                     limit=15,
                 ),
+                "commentSignals": {
+                    "replyRate": (
+                        round(reply_count / len(period_comments) * 100, 2)
+                        if period_comments
+                        else 0
+                    ),
+                    "authorDiversityRate": (
+                        round(
+                            len(
+                                {
+                                    comment.author_channel_id
+                                    for comment in period_comments
+                                    if comment.author_channel_id
+                                }
+                            )
+                            / len(period_comments)
+                            * 100,
+                            2,
+                        )
+                        if period_comments
+                        else 0
+                    ),
+                    **question_signals_from_texts(
+                        comment.text_display for comment in sample
+                    ),
+                },
                 "coverage": {
                     "visibleTargetCount": len(scoped_target_ids),
                     "includedVideoCount": len(period_videos),
@@ -465,6 +582,9 @@ class MemoryReadMixin:
             if section == "core":
                 result["topComments"] = []
                 result["topWords"] = []
+                result["commentSignals"]["questionRate"] = 0
+                result["commentSignals"]["questionCount"] = 0
+                result["commentSignals"]["questionSampleSize"] = 0
                 result["coverage"]["sampledComments"] = 0
             elif section == "content":
                 result["summary"] = {
@@ -476,6 +596,8 @@ class MemoryReadMixin:
                 result["channelBreakdown"] = []
                 result["keywordBreakdown"] = []
                 result["topVideos"] = []
+                result["commentSignals"]["replyRate"] = 0
+                result["commentSignals"]["authorDiversityRate"] = 0
                 result["coverage"]["includedVideoCount"] = 0
                 result["coverage"]["videosWithStatistics"] = 0
                 result["coverage"]["totalComments"] = 0

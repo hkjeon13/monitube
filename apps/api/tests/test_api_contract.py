@@ -16,6 +16,7 @@ EXPECTED_OPERATIONS = {
     ("POST", "/v1/channel-resolutions"),
     ("GET", "/v1/channels/{youtube_channel_id}/subscriber-history"),
     ("GET", "/v1/analysis/overview"),
+    ("GET", "/v1/analysis/insights"),
     ("POST", "/v1/collection-requests"),
     ("GET", "/v1/collection-targets/{target_id}/pin"),
     ("PUT", "/v1/collection-targets/{target_id}/pin"),

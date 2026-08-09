@@ -116,7 +116,7 @@ export function CollectionDrawer({ drawerRef, form, isStarting, onClose, onSubmi
           {form.sourceType === "channel" ? (
             <label className="drawer-field drawer-field-wide">
               <span>채널 URL, @handle 또는 채널 ID</span>
-              <input value={form.channelInput} onChange={(event) => onUpdate("channelInput", event.target.value)} placeholder="예: @GoogleDevelopers 또는 @우정잉" autoComplete="off" />
+              <input value={form.channelInput} onChange={(event) => onUpdate("channelInput", event.target.value)} autoComplete="off" />
               <small>한글·유니코드 핸들도 지원합니다. 채널 전체 업로드는 업로드 재생목록을 기준으로 수집합니다.</small>
             </label>
           ) : (

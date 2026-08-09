@@ -301,6 +301,14 @@ export interface AnalysisCoverage {
   generatedAt: string;
 }
 
+export interface AnalysisCommentSignals {
+  replyRate: number;
+  authorDiversityRate: number;
+  questionRate: number;
+  questionCount: number;
+  questionSampleSize: number;
+}
+
 export interface AnalysisOverview {
   summary: WorkspaceAnalysisSummary;
   videoTrend: AnalysisTrendPoint[];
@@ -310,6 +318,7 @@ export interface AnalysisOverview {
   topVideos: AnalysisVideo[];
   topComments: AnalysisComment[];
   topWords: TopWord[];
+  commentSignals: AnalysisCommentSignals;
   coverage: AnalysisCoverage;
 }
 
@@ -322,4 +331,72 @@ export interface AnalysisQuery {
   commentType?: AnalysisCommentType;
   section?: AnalysisSection;
   limit?: number;
+}
+
+export interface AnalysisPerformanceSummary {
+  videoCount: number;
+  comparableVideoCount: number;
+  snapshotEligible7d: number;
+  medianViewsPerDay: number;
+  medianLikeRate: number;
+  medianCommentRatePerThousand: number;
+  totalViewGrowth7d: number;
+  collectionCoverageRate?: number;
+}
+
+export interface AnalysisInsight {
+  id: string;
+  kind: "growth" | "breakout" | "opportunity" | "conversation" | "quality";
+  tone: "positive" | "attention" | "neutral";
+  title: string;
+  description: string;
+  videoId?: string;
+  value?: number;
+  unit?: "views" | "multiple" | "percent" | "comments_per_thousand";
+}
+
+export interface AnalysisPerformanceVideo {
+  id: string;
+  channelId?: string;
+  channelTitle?: string;
+  title?: string;
+  publishedAt?: string;
+  statisticsFetchedAt?: string;
+  viewCount: number;
+  likeCount: number;
+  youtubeCommentCount: number;
+  collectedCommentCount: number;
+  ageDays: number;
+  viewsPerDay: number;
+  likeRate: number;
+  commentRatePerThousand: number;
+  engagementRate: number;
+  collectionCoverageRate?: number;
+  viewGrowth7d?: number;
+  likeGrowth7d?: number;
+  commentGrowth7d?: number;
+  growthWindowDays?: number;
+  channelMedianViewsPerDay?: number;
+  channelMedianEngagementRate?: number;
+  channelMedianMultiple?: number;
+}
+
+export interface AnalysisPublishingCell {
+  weekday: number;
+  hourBucket: number;
+  videoCount: number;
+  medianViewsPerDay: number;
+}
+
+export interface AnalysisInsights {
+  performanceSummary: AnalysisPerformanceSummary;
+  insights: AnalysisInsight[];
+  performanceVideos: AnalysisPerformanceVideo[];
+  publishingHeatmap: AnalysisPublishingCell[];
+  coverage: {
+    generatedAt: string;
+    videoCount: number;
+    comparableVideoCount: number;
+    snapshotEligible7d: number;
+  };
 }

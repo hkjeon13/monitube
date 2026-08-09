@@ -2,11 +2,34 @@
 
 from datetime import datetime
 
-from ..contracts import AnalysisOverviewResponse
+from ..contracts import AnalysisInsightsResponse, AnalysisOverviewResponse
 from .base import ApplicationService
 
 
 class AnalysisService(ApplicationService):
+    def get_analysis_insights(
+        self,
+        *,
+        owner_id: str,
+        scope: str = "all",
+        target_ids: list[str] | None = None,
+        channel_ids: list[str] | None = None,
+        from_at: datetime | None = None,
+        to_at: datetime | None = None,
+        limit: int = 20,
+    ) -> AnalysisInsightsResponse:
+        return AnalysisInsightsResponse.model_validate(
+            self.repository.get_analysis_insights(
+                owner_id=owner_id,
+                scope=scope,
+                target_ids=target_ids or [],
+                channel_ids=channel_ids or [],
+                from_at=from_at,
+                to_at=to_at,
+                limit=limit,
+            )
+        )
+
     def get_analysis_overview(
         self,
         *,

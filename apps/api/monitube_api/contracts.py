@@ -510,6 +510,14 @@ class AnalysisCoverage(ApiModel):
     generatedAt: datetime
 
 
+class AnalysisCommentSignals(ApiModel):
+    replyRate: float = Field(default=0, ge=0)
+    authorDiversityRate: float = Field(default=0, ge=0)
+    questionRate: float = Field(default=0, ge=0)
+    questionCount: int = Field(default=0, ge=0)
+    questionSampleSize: int = Field(default=0, ge=0)
+
+
 class AnalysisOverviewResponse(ApiModel):
     summary: WorkspaceAnalysisSummary
     videoTrend: list[AnalysisTrendPoint] = Field(default_factory=list)
@@ -519,7 +527,95 @@ class AnalysisOverviewResponse(ApiModel):
     topVideos: list[AnalysisVideo] = Field(default_factory=list)
     topComments: list[AnalysisComment] = Field(default_factory=list)
     topWords: list[TopWord] = Field(default_factory=list)
+    commentSignals: AnalysisCommentSignals = Field(
+        default_factory=AnalysisCommentSignals
+    )
     coverage: AnalysisCoverage
+
+
+class AnalysisPerformanceSummary(ApiModel):
+    videoCount: int = Field(default=0, ge=0)
+    comparableVideoCount: int = Field(default=0, ge=0)
+    snapshotEligible7d: int = Field(default=0, ge=0)
+    medianViewsPerDay: float = Field(default=0, ge=0)
+    medianLikeRate: float = Field(default=0, ge=0)
+    medianCommentRatePerThousand: float = Field(default=0, ge=0)
+    totalViewGrowth7d: int = Field(default=0, ge=0)
+    collectionCoverageRate: float | None = Field(default=None, ge=0)
+
+
+class AnalysisInsight(ApiModel):
+    id: str
+    kind: Literal[
+        "growth",
+        "breakout",
+        "opportunity",
+        "conversation",
+        "quality",
+    ]
+    tone: Literal["positive", "attention", "neutral"]
+    title: str
+    description: str
+    videoId: str | None = None
+    value: float | None = None
+    unit: Literal[
+        "views",
+        "multiple",
+        "percent",
+        "comments_per_thousand",
+    ] | None = None
+
+
+class AnalysisPerformanceVideo(ApiModel):
+    id: str
+    channelId: str | None = None
+    channelTitle: str | None = None
+    title: str | None = None
+    publishedAt: datetime | None = None
+    statisticsFetchedAt: datetime | None = None
+    viewCount: int = Field(default=0, ge=0)
+    likeCount: int = Field(default=0, ge=0)
+    youtubeCommentCount: int = Field(default=0, ge=0)
+    collectedCommentCount: int = Field(default=0, ge=0)
+    ageDays: float = Field(default=0, ge=0)
+    viewsPerDay: float = Field(default=0, ge=0)
+    likeRate: float = Field(default=0, ge=0)
+    commentRatePerThousand: float = Field(default=0, ge=0)
+    engagementRate: float = Field(default=0, ge=0)
+    collectionCoverageRate: float | None = Field(default=None, ge=0)
+    viewGrowth7d: int | None = Field(default=None, ge=0)
+    likeGrowth7d: int | None = Field(default=None, ge=0)
+    commentGrowth7d: int | None = Field(default=None, ge=0)
+    growthWindowDays: float | None = Field(default=None, ge=0)
+    channelMedianViewsPerDay: float | None = Field(default=None, ge=0)
+    channelMedianEngagementRate: float | None = Field(default=None, ge=0)
+    channelMedianMultiple: float | None = Field(default=None, ge=0)
+
+
+class AnalysisPublishingCell(ApiModel):
+    weekday: int = Field(ge=1, le=7)
+    hourBucket: int = Field(ge=0, le=18)
+    videoCount: int = Field(default=0, ge=0)
+    medianViewsPerDay: float = Field(default=0, ge=0)
+
+
+class AnalysisInsightsCoverage(ApiModel):
+    generatedAt: datetime
+    videoCount: int = Field(default=0, ge=0)
+    comparableVideoCount: int = Field(default=0, ge=0)
+    snapshotEligible7d: int = Field(default=0, ge=0)
+
+
+class AnalysisInsightsResponse(ApiModel):
+    performanceSummary: AnalysisPerformanceSummary
+    insights: list[AnalysisInsight] = Field(default_factory=list)
+    performanceVideos: list[AnalysisPerformanceVideo] = Field(
+        default_factory=list
+    )
+    publishingHeatmap: list[AnalysisPublishingCell] = Field(
+        default_factory=list
+    )
+    coverage: AnalysisInsightsCoverage
 
 
 class ActiveParentJob(ApiModel):

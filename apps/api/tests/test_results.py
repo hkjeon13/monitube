@@ -161,6 +161,13 @@ def test_analysis_overview_combines_video_and_comment_metrics() -> None:
     assert body["topComments"][0]["id"] == "analysis-comment-2"
     assert body["coverage"]["sampledComments"] == 2
     assert body["topWords"][0]["word"] in {"댓글", "반응", "분석"}
+    assert body["commentSignals"] == {
+        "replyRate": 50.0,
+        "authorDiversityRate": 100.0,
+        "questionRate": 0.0,
+        "questionCount": 0,
+        "questionSampleSize": 2,
+    }
 
     core = client.get(
         "/v1/analysis/overview",
@@ -181,6 +188,22 @@ def test_analysis_overview_combines_video_and_comment_metrics() -> None:
     assert content.json()["topVideos"] == []
     assert content.json()["topComments"][0]["id"] == "analysis-comment-2"
     assert content.json()["coverage"]["sampledComments"] == 2
+
+    insights = client.get(
+        "/v1/analysis/insights",
+        params={"channelId": "UCanalysis"},
+    )
+
+    assert insights.status_code == 200
+    insight_body = insights.json()
+    assert insight_body["performanceSummary"]["videoCount"] == 1
+    assert insight_body["performanceSummary"]["medianViewsPerDay"] == 1000
+    assert insight_body["performanceSummary"]["medianLikeRate"] == 8
+    assert insight_body["performanceSummary"]["snapshotEligible7d"] == 0
+    assert insight_body["performanceVideos"][0]["id"] == "analysis001"
+    assert insight_body["performanceVideos"][0]["commentRatePerThousand"] == 4
+    assert insight_body["publishingHeatmap"][0]["weekday"] == 4
+    assert insight_body["publishingHeatmap"][0]["hourBucket"] == 6
 
 
 def test_additive_source_routes_can_be_rolled_back_with_flags() -> None:

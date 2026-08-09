@@ -5,7 +5,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from ..analysis import top_words_from_texts
+from ..analysis import question_signals_from_texts, top_words_from_texts
+from ..analysis_insights import build_video_insights
 from ..domain import utcnow
 
 
@@ -182,6 +183,128 @@ class PostgresAnalysisMixin:
             "comment_type": comment_type,
             "limit": limit,
         }
+
+    def get_analysis_insights(
+        self,
+        *,
+        owner_id: str,
+        scope: str = "all",
+        target_ids: list[str] | None = None,
+        channel_ids: list[str] | None = None,
+        from_at: datetime | None = None,
+        to_at: datetime | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        params = self._analysis_params(
+            owner_id=owner_id,
+            scope=scope,
+            target_ids=target_ids or [],
+            channel_ids=channel_ids or [],
+            from_at=from_at,
+            to_at=to_at,
+            comment_type="all",
+            limit=limit,
+        )
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                WITH visible_membership AS MATERIALIZED (
+                  SELECT DISTINCT membership.video_id
+                  FROM collection_subscriptions subscription
+                  JOIN collection_targets target
+                    ON target.id = subscription.target_id
+                  JOIN collection_target_videos membership
+                    ON membership.target_id = target.id
+                  WHERE subscription.user_id = %(owner_id)s::uuid
+                    AND (
+                      %(scope)s::text <> 'keyword'
+                      OR target.type = 'keyword'
+                    )
+                    AND (
+                      cardinality(%(target_ids)s::uuid[]) = 0
+                      OR target.id = ANY(%(target_ids)s::uuid[])
+                    )
+                ),
+                visible_video AS MATERIALIZED (
+                  SELECT DISTINCT video.id
+                  FROM visible_membership membership
+                  JOIN videos video ON video.id = membership.video_id
+                  LEFT JOIN channels channel ON channel.id = video.channel_id
+                  WHERE video.deleted_at IS NULL
+                    AND (
+                      %(scope)s::text <> 'channel'
+                      OR cardinality(%(channel_ids)s::text[]) = 0
+                      OR channel.youtube_channel_id
+                        = ANY(%(channel_ids)s::text[])
+                    )
+                    AND (
+                      %(from_at)s::timestamptz IS NULL
+                      OR video.published_at >= %(from_at)s::timestamptz
+                    )
+                    AND (
+                      %(to_at)s::timestamptz IS NULL
+                      OR video.published_at < %(to_at)s::timestamptz
+                    )
+                )
+                SELECT video.youtube_video_id AS id,
+                       channel.youtube_channel_id AS channel_id,
+                       channel.title AS channel_title,
+                       video.title,
+                       video.published_at,
+                       latest.fetched_at AS statistics_fetched_at,
+                       COALESCE(latest.view_count, 0)::bigint AS view_count,
+                       COALESCE(latest.like_count, 0)::bigint AS like_count,
+                       COALESCE(latest.comment_count, 0)::bigint
+                         AS youtube_comment_count,
+                       COALESCE(rollup.stored_count, 0)::bigint
+                         AS collected_comment_count,
+                       baseline.fetched_at AS baseline_fetched_at,
+                       baseline.view_count AS baseline_view_count,
+                       baseline.like_count AS baseline_like_count,
+                       baseline.comment_count AS baseline_comment_count
+                FROM visible_video visible
+                JOIN videos video ON video.id = visible.id
+                LEFT JOIN channels channel ON channel.id = video.channel_id
+                LEFT JOIN video_comment_rollups rollup
+                  ON rollup.video_id = video.id
+                LEFT JOIN LATERAL (
+                  SELECT snapshot.fetched_at,
+                         snapshot.view_count,
+                         snapshot.like_count,
+                         snapshot.comment_count
+                  FROM video_stat_snapshots snapshot
+                  WHERE snapshot.video_id = video.id
+                    AND snapshot.deleted_at IS NULL
+                    AND (
+                      snapshot.expires_at IS NULL
+                      OR snapshot.expires_at > now()
+                    )
+                  ORDER BY snapshot.fetched_at DESC
+                  LIMIT 1
+                ) latest ON TRUE
+                LEFT JOIN LATERAL (
+                  SELECT snapshot.fetched_at,
+                         snapshot.view_count,
+                         snapshot.like_count,
+                         snapshot.comment_count
+                  FROM video_stat_snapshots snapshot
+                  WHERE snapshot.video_id = video.id
+                    AND snapshot.deleted_at IS NULL
+                    AND (
+                      snapshot.expires_at IS NULL
+                      OR snapshot.expires_at > now()
+                    )
+                    AND latest.fetched_at IS NOT NULL
+                    AND snapshot.fetched_at
+                      <= latest.fetched_at - interval '7 days'
+                  ORDER BY snapshot.fetched_at DESC
+                  LIMIT 1
+                ) baseline ON TRUE
+                """,
+                params,
+            )
+            rows = [dict(row) for row in cursor.fetchall()]
+        return build_video_insights(rows, limit=limit)
 
     def get_analysis_overview(
         self,
@@ -564,6 +687,35 @@ class PostgresAnalysisMixin:
                 sampled_texts,
                 limit=15,
             ),
+            "commentSignals": {
+                "replyRate": (
+                    round(
+                        int(summary_row.get("reply_count") or 0)
+                        / int(
+                            summary_row.get("collected_comment_count") or 1
+                        )
+                        * 100,
+                        2,
+                    )
+                    if summary_row.get("collected_comment_count")
+                    else 0
+                ),
+                "authorDiversityRate": (
+                    round(
+                        int(
+                            summary_row.get("identified_author_count") or 0
+                        )
+                        / int(
+                            summary_row.get("collected_comment_count") or 1
+                        )
+                        * 100,
+                        2,
+                    )
+                    if summary_row.get("collected_comment_count")
+                    else 0
+                ),
+                **question_signals_from_texts(sampled_texts),
+            },
             "coverage": {
                 "visibleTargetCount": int(coverage_row.get("target_count") or 0),
                 "includedVideoCount": int(summary_row.get("video_count") or 0),
@@ -619,6 +771,11 @@ class PostgresAnalysisMixin:
             "topVideos": [],
             "topComments": top_comments,
             "topWords": top_words_from_texts(sampled_texts, limit=15),
+            "commentSignals": {
+                "replyRate": 0,
+                "authorDiversityRate": 0,
+                **question_signals_from_texts(sampled_texts),
+            },
             "coverage": {
                 "visibleTargetCount": int(coverage_row.get("target_count") or 0),
                 "includedVideoCount": 0,

@@ -101,6 +101,14 @@ import {
   type WorkspacePage,
 } from "../features/collection/workbench-model";
 
+function recentFailuresDismissedStorageKey(username: string) {
+  return `monitube.recent-failures-dismissed-before:${username}`;
+}
+
+function failureOccurredAfter(failure: RecentJobFailure, dismissedBefore: string) {
+  return new Date(failure.failedAt).getTime() > new Date(dismissedBefore).getTime();
+}
+
 export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePage }) {
   const router = useRouter();
   const [requestedSourceId, setRequestedSourceId] = useState<string | null>(null);
@@ -182,6 +190,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   const authUserRef = useRef<string | null | undefined>(undefined);
   const recentFailuresAbortControllerRef = useRef<AbortController | null>(null);
   const recentFailuresGenerationRef = useRef(0);
+  const recentFailuresDismissedBeforeRef = useRef<string | null>(null);
 
   const changeAuthUser = useCallback((nextUser: string | null) => {
     authUserRef.current = nextUser;
@@ -191,6 +200,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     setRecentFailures([]);
     setRecentFailuresError(null);
     setIsRecentFailuresLoading(false);
+    recentFailuresDismissedBeforeRef.current = null;
     setIsSettingsOpen(false);
     setAuthUser(nextUser);
   }, []);
@@ -214,6 +224,21 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     setPreferences(next);
     setSettingsDraft(next);
     setForm(formFromPreferences(next));
+  }, [authUser]);
+
+  useEffect(() => {
+    let dismissedBefore: string | null = null;
+    if (authUser) {
+      try {
+        dismissedBefore = window.localStorage.getItem(recentFailuresDismissedStorageKey(authUser));
+      } catch {
+        dismissedBefore = null;
+      }
+    }
+    recentFailuresDismissedBeforeRef.current = dismissedBefore;
+    setRecentFailures((current) => dismissedBefore
+      ? current.filter((failure) => failureOccurredAfter(failure, dismissedBefore))
+      : current);
   }, [authUser]);
 
   const requestBody = useMemo(() => sourceRequest(form), [form]);
@@ -293,7 +318,10 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
       if (!controller.signal.aborted
         && generation === recentFailuresGenerationRef.current
         && authUserRef.current === requestedUser) {
-        setRecentFailures(failures);
+        const dismissedBefore = recentFailuresDismissedBeforeRef.current;
+        setRecentFailures(dismissedBefore
+          ? failures.filter((failure) => failureOccurredAfter(failure, dismissedBefore))
+          : failures);
       }
     } catch (caught) {
       if (!isAbortError(caught)
@@ -313,6 +341,20 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
       }
     }
   }, [authUser, page]);
+
+  const clearRecentFailures = useCallback(() => {
+    if (!authUser || recentFailures.length === 0) return;
+    if (!window.confirm("현재 표시된 과거 수집 실패 기록을 숨길까요? 이후 발생한 실패는 다시 표시됩니다.")) return;
+    const dismissedBefore = new Date().toISOString();
+    recentFailuresDismissedBeforeRef.current = dismissedBefore;
+    setRecentFailures([]);
+    try {
+      window.localStorage.setItem(recentFailuresDismissedStorageKey(authUser), dismissedBefore);
+    } catch {
+      // Keep the current session cleared even when browser storage is unavailable.
+    }
+    setNotice("과거 수집 실패 기록을 숨겼습니다.");
+  }, [authUser, recentFailures.length]);
 
   const openSourceWorkspace = useCallback((sourceId: string) => {
     router.push(`/channels?source=${encodeURIComponent(sourceId)}`);
@@ -888,6 +930,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     { id: "overview" as const, label: "Channels", href: "/channels", Icon: HomeIcon },
     { id: "sources" as const, label: "Sources", href: "/sources", Icon: FolderIcon },
     { id: "jobs" as const, label: "Status", href: "/jobs", Icon: QueueListIcon },
+    { id: "analysis" as const, label: "Analysis", href: "/analysis", Icon: DocumentChartBarIcon },
   ];
   const breadcrumbPage = page === "overview" ? "Channels" : page === "explore" ? "Explore" : page === "sources" ? "Sources" : page === "keywords" ? "Keywords" : page === "jobs" ? "Status" : "Analysis";
   const breadcrumbDetail = page === "overview" && selectedExploreChannel
@@ -933,10 +976,6 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
             </>}
           </nav>
           <div className="utility-actions">
-            <Link className={page === "analysis" ? "analysis-entry analysis-entry-active" : "analysis-entry"} aria-current={page === "analysis" ? "page" : undefined} href="/analysis">
-              <DocumentChartBarIcon aria-hidden="true" />
-              <span>Analysis</span>
-            </Link>
             <button className="settings-button" type="button" onClick={openSettingsDrawer} aria-label="기본 설정 열기" aria-haspopup="dialog" aria-expanded={isSettingsOpen}>
               <Cog6ToothIcon aria-hidden="true" />
             </button>
@@ -1002,6 +1041,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
             failures={recentFailures}
             error={recentFailuresError}
             loading={isRecentFailuresLoading}
+            onClear={clearRecentFailures}
             onRefresh={() => { void refreshRecentFailures(); }}
           />
         )}

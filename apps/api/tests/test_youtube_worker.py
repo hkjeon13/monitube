@@ -63,7 +63,7 @@ class DirectVideoClient:
                         "snippet": {
                             "topLevelComment": {
                                 "id": "comment-1",
-                                "snippet": {"textDisplay": "Great demo video", "likeCount": 2, "publishedAt": "2025-01-03T00:00:00Z"},
+                                "snippet": {"textDisplay": "분석 결과를 보여준다", "likeCount": 2, "publishedAt": "2025-01-03T00:00:00Z"},
                             }
                         },
                     }
@@ -593,7 +593,9 @@ def test_direct_video_collection_persists_video_comments_and_summary() -> None:
     assert completed.checkpoint["youtubeVideoId"] == "dQw4w9WgXcQ"
     assert result["videos"][0].title == "Demo"
     assert result["comments"][0].youtube_comment_id == "comment-1"
-    assert result["analysis"]["topWords"][0]["word"] == "demo"
+    assert {"분석", "결과", "보이다"}.issubset(
+        {item["word"] for item in result["analysis"]["topWords"]}
+    )
 
 
 def test_comment_collection_follows_every_reply_page() -> None:

@@ -1,7 +1,11 @@
 import type {
   AnalysisBreakdownRow,
   AnalysisComment,
+  AnalysisInsight,
+  AnalysisInsights,
   AnalysisOverview,
+  AnalysisPerformanceVideo,
+  AnalysisPublishingCell,
   AnalysisQuery,
   AnalysisTrendPoint,
   AnalysisVideo,
@@ -147,6 +151,28 @@ export async function getAnalysisOverview(query: AnalysisQuery = {}): Promise<An
       return comment ? [comment] : [];
     }),
     topWords: normalizeTopWords(record.topWords),
+    commentSignals: {
+      replyRate: requiredNumber(
+        asRecord(record.commentSignals) ?? {},
+        "replyRate",
+      ),
+      authorDiversityRate: requiredNumber(
+        asRecord(record.commentSignals) ?? {},
+        "authorDiversityRate",
+      ),
+      questionRate: requiredNumber(
+        asRecord(record.commentSignals) ?? {},
+        "questionRate",
+      ),
+      questionCount: requiredNumber(
+        asRecord(record.commentSignals) ?? {},
+        "questionCount",
+      ),
+      questionSampleSize: requiredNumber(
+        asRecord(record.commentSignals) ?? {},
+        "questionSampleSize",
+      ),
+    },
     coverage: {
       visibleTargetCount: requiredNumber(rawCoverage, "visibleTargetCount"),
       includedVideoCount: requiredNumber(rawCoverage, "includedVideoCount"),
@@ -155,6 +181,119 @@ export async function getAnalysisOverview(query: AnalysisQuery = {}): Promise<An
       totalComments: requiredNumber(rawCoverage, "totalComments"),
       partialData: asBoolean(rawCoverage.partialData) ?? false,
       generatedAt,
+    },
+  };
+}
+
+export async function getAnalysisInsights(query: AnalysisQuery = {}): Promise<AnalysisInsights> {
+  const params = new URLSearchParams();
+  if (query.scope) params.set("scope", query.scope);
+  if (query.targetId) params.append("targetId", query.targetId);
+  if (query.channelId) params.append("channelId", query.channelId);
+  if (query.from) params.set("from", query.from);
+  if (query.to) params.set("to", query.to);
+  params.set("limit", String(query.limit ?? 20));
+
+  const response = await request<unknown>(`/v1/analysis/insights?${params.toString()}`, { method: "GET" });
+  const record = asRecord(response);
+  const rawSummary = asRecord(record?.performanceSummary);
+  const rawCoverage = asRecord(record?.coverage);
+  const generatedAt = asText(rawCoverage?.generatedAt);
+  if (!record || !rawSummary || !rawCoverage || !generatedAt) {
+    throw new ApiError("성과 인사이트를 해석하지 못했습니다.", 502);
+  }
+
+  const insights: AnalysisInsight[] = asArray(record.insights).flatMap((item) => {
+    const value = asRecord(item);
+    const id = asText(value?.id);
+    const kind = asText(value?.kind);
+    const tone = asText(value?.tone);
+    const title = asText(value?.title);
+    const description = asText(value?.description);
+    if (
+      !value
+      || !id
+      || !title
+      || !description
+      || !["growth", "breakout", "opportunity", "conversation", "quality"].includes(kind ?? "")
+      || !["positive", "attention", "neutral"].includes(tone ?? "")
+    ) return [];
+    return [{
+      id,
+      kind: kind as AnalysisInsight["kind"],
+      tone: tone as AnalysisInsight["tone"],
+      title,
+      description,
+      ...(asText(value.videoId) ? { videoId: asText(value.videoId) } : {}),
+      ...(asNumber(value.value) !== undefined ? { value: asNumber(value.value) } : {}),
+      ...(asText(value.unit) ? { unit: asText(value.unit) as AnalysisInsight["unit"] } : {}),
+    }];
+  });
+
+  const performanceVideos: AnalysisPerformanceVideo[] = asArray(record.performanceVideos).flatMap((item) => {
+    const value = asRecord(item);
+    const id = asText(value?.id);
+    if (!value || !id) return [];
+    const optionalNumber = (key: string) => asNumber(value[key]);
+    return [{
+      id,
+      viewCount: requiredNumber(value, "viewCount"),
+      likeCount: requiredNumber(value, "likeCount"),
+      youtubeCommentCount: requiredNumber(value, "youtubeCommentCount"),
+      collectedCommentCount: requiredNumber(value, "collectedCommentCount"),
+      ageDays: requiredNumber(value, "ageDays"),
+      viewsPerDay: requiredNumber(value, "viewsPerDay"),
+      likeRate: requiredNumber(value, "likeRate"),
+      commentRatePerThousand: requiredNumber(value, "commentRatePerThousand"),
+      engagementRate: requiredNumber(value, "engagementRate"),
+      ...(asText(value.channelId) ? { channelId: asText(value.channelId) } : {}),
+      ...(asText(value.channelTitle) ? { channelTitle: asText(value.channelTitle) } : {}),
+      ...(asText(value.title) ? { title: asText(value.title) } : {}),
+      ...(asText(value.publishedAt) ? { publishedAt: asText(value.publishedAt) } : {}),
+      ...(asText(value.statisticsFetchedAt) ? { statisticsFetchedAt: asText(value.statisticsFetchedAt) } : {}),
+      ...(optionalNumber("collectionCoverageRate") !== undefined ? { collectionCoverageRate: optionalNumber("collectionCoverageRate") } : {}),
+      ...(optionalNumber("viewGrowth7d") !== undefined ? { viewGrowth7d: optionalNumber("viewGrowth7d") } : {}),
+      ...(optionalNumber("likeGrowth7d") !== undefined ? { likeGrowth7d: optionalNumber("likeGrowth7d") } : {}),
+      ...(optionalNumber("commentGrowth7d") !== undefined ? { commentGrowth7d: optionalNumber("commentGrowth7d") } : {}),
+      ...(optionalNumber("growthWindowDays") !== undefined ? { growthWindowDays: optionalNumber("growthWindowDays") } : {}),
+      ...(optionalNumber("channelMedianViewsPerDay") !== undefined ? { channelMedianViewsPerDay: optionalNumber("channelMedianViewsPerDay") } : {}),
+      ...(optionalNumber("channelMedianEngagementRate") !== undefined ? { channelMedianEngagementRate: optionalNumber("channelMedianEngagementRate") } : {}),
+      ...(optionalNumber("channelMedianMultiple") !== undefined ? { channelMedianMultiple: optionalNumber("channelMedianMultiple") } : {}),
+    }];
+  });
+
+  const publishingHeatmap: AnalysisPublishingCell[] = asArray(record.publishingHeatmap).flatMap((item) => {
+    const value = asRecord(item);
+    if (!value) return [];
+    return [{
+      weekday: requiredNumber(value, "weekday"),
+      hourBucket: requiredNumber(value, "hourBucket"),
+      videoCount: requiredNumber(value, "videoCount"),
+      medianViewsPerDay: requiredNumber(value, "medianViewsPerDay"),
+    }];
+  });
+
+  return {
+    performanceSummary: {
+      videoCount: requiredNumber(rawSummary, "videoCount"),
+      comparableVideoCount: requiredNumber(rawSummary, "comparableVideoCount"),
+      snapshotEligible7d: requiredNumber(rawSummary, "snapshotEligible7d"),
+      medianViewsPerDay: requiredNumber(rawSummary, "medianViewsPerDay"),
+      medianLikeRate: requiredNumber(rawSummary, "medianLikeRate"),
+      medianCommentRatePerThousand: requiredNumber(rawSummary, "medianCommentRatePerThousand"),
+      totalViewGrowth7d: requiredNumber(rawSummary, "totalViewGrowth7d"),
+      ...(asNumber(rawSummary.collectionCoverageRate) !== undefined
+        ? { collectionCoverageRate: asNumber(rawSummary.collectionCoverageRate) }
+        : {}),
+    },
+    insights,
+    performanceVideos,
+    publishingHeatmap,
+    coverage: {
+      generatedAt,
+      videoCount: requiredNumber(rawCoverage, "videoCount"),
+      comparableVideoCount: requiredNumber(rawCoverage, "comparableVideoCount"),
+      snapshotEligible7d: requiredNumber(rawCoverage, "snapshotEligible7d"),
     },
   };
 }
