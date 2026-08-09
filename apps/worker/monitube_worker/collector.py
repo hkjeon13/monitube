@@ -176,7 +176,13 @@ class YouTubeCollector(DiscoveryCollectionMixin, CommentCollectionMixin):
                     job, source.config, incremental_refresh=incremental_refresh
                 )
             elif source.type is SourceType.KEYWORD:
-                video_ids = self._keyword_video_ids(job, source.config)
+                video_ids = self._keyword_video_ids(
+                    job,
+                    source.config,
+                    historical_backfill=not bool(
+                        source.coverage.get("historicalBackfillComplete")
+                    ),
+                )
                 known_videos = {}
                 incremental_refresh = False
                 backfill_required = False
@@ -189,13 +195,16 @@ class YouTubeCollector(DiscoveryCollectionMixin, CommentCollectionMixin):
             # out independently retryable video jobs. This stops a large channel
             # from monopolising the worker ahead of other channels or keywords.
             self.repository.enqueue_video_jobs(parent_job=job, youtube_video_ids=video_ids)
+            fanout_total, fanout_terminal, _failed = self.repository.child_job_summary(
+                parent_job_id=job.id
+            )
             checkpoint = dict(self._active_checkpoint)
             checkpoint["fanoutDiscovered"] = True
-            checkpoint["fanoutVideoCount"] = len(video_ids)
+            checkpoint["fanoutVideoCount"] = fanout_total
             self._active_checkpoint = checkpoint
             self.repository.checkpoint_job(job.id, checkpoint)
             self._set_phase_progress(
-                job, phase="videos", completed=0, total=len(video_ids),
+                job, phase="videos", completed=fanout_terminal, total=fanout_total,
                 current_stage="waiting_for_video_jobs",
             )
             raise RetryableCollectionError("Waiting for video collection jobs", retry_after_seconds=5)

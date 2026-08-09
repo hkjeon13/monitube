@@ -1,11 +1,20 @@
 """Channel, keyword, and video discovery/detail collection phases."""
 
+from datetime import UTC, datetime, timedelta
 from typing import Any, Iterable, Mapping
 
 from monitube_api.channel_resolution import resolve_channel_input
 from monitube_api.domain import JobRecord, VideoRecord, new_id, utcnow
 
 from .parsing import as_int, parse_duration_seconds, parse_rfc3339
+
+
+_YOUTUBE_PUBLICATION_EPOCH = datetime(2005, 4, 23, tzinfo=UTC)
+_KEYWORD_BACKFILL_VERSION = 1
+
+
+def _rfc3339(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 class DiscoveryCollectionMixin:
@@ -116,7 +125,7 @@ class DiscoveryCollectionMixin:
             ids.reverse()
         return ids, known_videos, backfill_required
 
-    def _keyword_video_ids(self, job: JobRecord, source_config: Mapping[str, Any]) -> list[str]:
+    def _keyword_video_ids_incremental(self, job: JobRecord, source_config: Mapping[str, Any]) -> list[str]:
         ids: list[str] = []
         # A fully known page is an incremental boundary only for latest-first
         # results: every following page is older and has already been collected.
@@ -169,6 +178,182 @@ class DiscoveryCollectionMixin:
             if not page_token:
                 break
         return ids
+
+    def _keyword_backfill_state(
+        self, job: JobRecord, source_config: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        existing = job.checkpoint.get("keywordBackfill")
+        if isinstance(existing, dict) and existing.get("version") == _KEYWORD_BACKFILL_VERSION:
+            return dict(existing)
+
+        lower_bound = parse_rfc3339(source_config.get("publishedAfter")) or _YOUTUBE_PUBLICATION_EPOCH
+        upper_bound = parse_rfc3339(source_config.get("publishedBefore")) or utcnow()
+        return {
+            "version": _KEYWORD_BACKFILL_VERSION,
+            "after": _rfc3339(lower_bound),
+            # Freeze the upper edge for this multi-day job. New uploads are picked
+            # up by the normal incremental refresh after the historical run ends.
+            "before": _rfc3339(upper_bound),
+            "pageToken": None,
+            "page": 0,
+            "expectedTotal": 0,
+            "batchIds": [],
+            "oldestPublishedAt": None,
+            "lastBoundary": None,
+            "discoveredIds": [],
+            "complete": upper_bound <= lower_bound,
+        }
+
+    def _checkpoint_keyword_backfill(
+        self, job: JobRecord, source_config: Mapping[str, Any], state: Mapping[str, Any]
+    ) -> None:
+        self._active_checkpoint["keywordBackfill"] = dict(state)
+        self._checkpoint(
+            job,
+            stage="keyword_history",
+            scope_key=str(source_config["query"]),
+            page_token=str(state.get("pageToken") or "") or None,
+            batch_cursor=as_int(state.get("page")),
+        )
+
+    def _keyword_video_ids_historical(
+        self, job: JobRecord, source_config: Mapping[str, Any]
+    ) -> list[str]:
+        """Walk a newest-first keyword result set backwards until its lower bound.
+
+        YouTube can stop returning ``nextPageToken`` while ``totalResults`` still
+        reports many more matches. At that boundary, start a new search whose
+        exclusive upper bound is the oldest timestamp just observed. Page results
+        are fanned out before the cursor is committed, so a quota pause can resume
+        days later without replaying every newer search page.
+        """
+
+        state = self._keyword_backfill_state(job, source_config)
+        lower_bound = parse_rfc3339(state.get("after")) or _YOUTUBE_PUBLICATION_EPOCH
+        if bool(state.get("complete")):
+            self._active_checkpoint["keywordHistoricalBackfillComplete"] = True
+            return [str(value) for value in state.get("discoveredIds", [])]
+        # Persist the frozen upper bound before the first upstream call. A quota
+        # failure on that call must not move the boundary to a later retry time.
+        self._checkpoint_keyword_backfill(job, source_config, state)
+
+        while True:
+            upper_bound = parse_rfc3339(state.get("before")) or utcnow()
+            if upper_bound <= lower_bound:
+                state["complete"] = True
+                self._active_checkpoint["keywordHistoricalBackfillComplete"] = True
+                self._checkpoint_keyword_backfill(job, source_config, state)
+                return [str(value) for value in state.get("discoveredIds", [])]
+
+            payload = self._call(
+                job,
+                "search",
+                part="snippet",
+                type="video",
+                q=source_config["query"],
+                # Historical completeness requires deterministic newest-first
+                # traversal even when the source's presentation order is relevance.
+                order="date",
+                publishedAfter=_rfc3339(lower_bound),
+                publishedBefore=_rfc3339(upper_bound),
+                regionCode=source_config.get("regionCode"),
+                relevanceLanguage=source_config.get("relevanceLanguage"),
+                maxResults=50,
+                pageToken=state.get("pageToken"),
+            )
+
+            response_total = as_int((payload.get("pageInfo") or {}).get("totalResults"))
+            state["expectedTotal"] = max(as_int(state.get("expectedTotal")), response_total)
+            if response_total:
+                self._active_checkpoint["keywordExpectedTotal"] = max(
+                    as_int(self._active_checkpoint.get("keywordExpectedTotal")),
+                    response_total,
+                )
+
+            page_ids: list[str] = []
+            oldest = parse_rfc3339(state.get("oldestPublishedAt"))
+            for item in payload.get("items", []):
+                video_id = (item.get("id") or {}).get("videoId")
+                if video_id and video_id not in page_ids:
+                    page_ids.append(video_id)
+                published_at = parse_rfc3339((item.get("snippet") or {}).get("publishedAt"))
+                if published_at and (oldest is None or published_at < oldest):
+                    oldest = published_at
+
+            batch_ids = list(dict.fromkeys([
+                *(str(value) for value in state.get("batchIds", [])),
+                *page_ids,
+            ]))
+            state["batchIds"] = batch_ids
+            state["oldestPublishedAt"] = _rfc3339(oldest) if oldest else None
+            state["page"] = as_int(state.get("page")) + 1
+            state["pageToken"] = payload.get("nextPageToken")
+
+            known_on_page = self.repository.source_video_ids(job.source_id, page_ids)
+            new_page_ids = [video_id for video_id in page_ids if video_id not in known_on_page]
+            if job.target_id is not None:
+                self.repository.enqueue_video_jobs(parent_job=job, youtube_video_ids=new_page_ids)
+            else:
+                state["discoveredIds"] = list(dict.fromkeys([
+                    *(str(value) for value in state.get("discoveredIds", [])),
+                    *new_page_ids,
+                ]))
+
+            self._checkpoint_keyword_backfill(job, source_config, state)
+            if job.target_id is not None:
+                total, terminal, _failed = self.repository.child_job_summary(parent_job_id=job.id)
+                self._set_phase_progress(
+                    job,
+                    phase="videos",
+                    completed=terminal,
+                    total=total,
+                    current_stage="backfilling_keyword_history",
+                )
+
+            if state.get("pageToken"):
+                continue
+
+            # ``totalResults`` is approximate, but a value vastly larger than the
+            # returned unique IDs is the only durable signal that pagination ended
+            # before the historical range did. Continue below the oldest result.
+            truncated = as_int(state.get("expectedTotal")) > len(batch_ids)
+            if truncated and oldest and oldest > lower_bound:
+                boundary = _rfc3339(oldest)
+                # Include the boundary second once so videos sharing that timestamp
+                # are not lost. If the provider returns the exact same boundary
+                # again, switch to the exclusive timestamp to guarantee progress.
+                next_upper = oldest + timedelta(seconds=1)
+                if state.get("lastBoundary") == boundary or next_upper >= upper_bound:
+                    next_upper = oldest
+                if next_upper > lower_bound:
+                    state.update({
+                        "before": _rfc3339(next_upper),
+                        "pageToken": None,
+                        "page": 0,
+                        "expectedTotal": 0,
+                        "batchIds": [],
+                        "oldestPublishedAt": None,
+                        "lastBoundary": boundary,
+                    })
+                    self._checkpoint_keyword_backfill(job, source_config, state)
+                    continue
+
+            state["complete"] = True
+            self._active_checkpoint["keywordHistoricalBackfillComplete"] = True
+            self._checkpoint_keyword_backfill(job, source_config, state)
+            return [str(value) for value in state.get("discoveredIds", [])]
+
+    def _keyword_video_ids(
+        self,
+        job: JobRecord,
+        source_config: Mapping[str, Any],
+        *,
+        historical_backfill: bool,
+    ) -> list[str]:
+        if historical_backfill:
+            return self._keyword_video_ids_historical(job, source_config)
+        self._active_checkpoint["keywordHistoricalBackfillComplete"] = True
+        return self._keyword_video_ids_incremental(job, source_config)
 
     def _video_records(self, job: JobRecord, video_ids: Iterable[str]) -> list[VideoRecord]:
         records: list[VideoRecord] = []

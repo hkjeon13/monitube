@@ -30,6 +30,7 @@ def desired_coverage(
         desired["maxVideos"] = int(config.get("maxVideos") or 50)
     elif source_type is SourceType.KEYWORD:
         desired["maxPagesPerRun"] = int(config.get("maxPagesPerRun") or 1)
+        desired["historicalBackfillComplete"] = True
     return desired
 
 
@@ -86,6 +87,10 @@ def coverage_satisfies(
         return False
     if desired.get("collectAllVideos") and not coverage.get("collectAllVideos"):
         return False
+    if desired.get("historicalBackfillComplete") and not coverage.get(
+        "historicalBackfillComplete"
+    ):
+        return False
     for key in ("maxVideos", "maxPagesPerRun"):
         if key in desired and int(coverage.get(key) or 0) < int(desired[key]):
             return False
@@ -121,5 +126,8 @@ def job_coverage(
     elif source_type is SourceType.KEYWORD:
         coverage["maxPagesPerRun"] = int(
             source_config.get("maxPagesPerRun") or 1
+        )
+        coverage["historicalBackfillComplete"] = bool(
+            job.checkpoint.get("keywordHistoricalBackfillComplete")
         )
     return coverage

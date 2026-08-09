@@ -13,6 +13,8 @@ DURABLE_CHECKPOINT_KEYS = (
     "phaseProgress",
     "quotaRetryAttempt",
     "keywordExpectedTotal",
+    "keywordBackfill",
+    "keywordHistoricalBackfillComplete",
 )
 
 

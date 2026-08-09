@@ -227,6 +227,9 @@ def test_quota_error_logs_checkpoint_and_due_job_resumes_from_same_cursor() -> N
         source_type=SourceType.KEYWORD,
         config={"query": "FastAPI", "maxPagesPerRun": 2, "includeComments": False, "maxCommentPagesPerVideo": 1},
     )
+    repository._sources[source.id] = replace(
+        source, coverage={"historicalBackfillComplete": True}
+    )
     job = repository.create_job(source_id=source.id, include_comments=False, max_videos=None, max_comments_per_video=None)
     repository.transition_job(
         job.id,
@@ -266,6 +269,128 @@ def test_quota_error_logs_checkpoint_and_due_job_resumes_from_same_cursor() -> N
         "maxResults": 50,
         "pageToken": None,
     })
+
+
+class HistoricalKeywordClient:
+    def __init__(self) -> None:
+        self.search_requests: list[dict[str, object]] = []
+
+    @staticmethod
+    def bucket_for(endpoint: str) -> QuotaBucket:
+        return QuotaBucket.SEARCH_QUERIES if endpoint == "search" else QuotaBucket.CORE
+
+    def request(self, endpoint: str, params: dict[str, object]):
+        if endpoint != "search":
+            raise AssertionError(f"Unexpected endpoint: {endpoint}")
+        self.search_requests.append(params)
+        if len(self.search_requests) == 1:
+            return {
+                "pageInfo": {"totalResults": 4},
+                "items": [
+                    {
+                        "id": {"videoId": "newest-video"},
+                        "snippet": {"publishedAt": "2025-01-04T00:00:00Z"},
+                    },
+                    {
+                        "id": {"videoId": "boundary-video"},
+                        "snippet": {"publishedAt": "2025-01-03T00:00:00Z"},
+                    },
+                ],
+            }
+        return {
+            "pageInfo": {"totalResults": 2},
+            "items": [
+                {
+                    "id": {"videoId": "older-video"},
+                    "snippet": {"publishedAt": "2024-06-01T00:00:00Z"},
+                },
+                {
+                    "id": {"videoId": "oldest-video"},
+                    "snippet": {"publishedAt": "2020-01-01T00:00:00Z"},
+                },
+            ],
+        }
+
+
+def test_keyword_history_continues_below_provider_pagination_boundary() -> None:
+    repository = InMemoryRepository()
+    source = repository.create_source(
+        source_type=SourceType.KEYWORD,
+        config={"query": "FastAPI", "order": "relevance", "includeComments": False},
+    )
+    parent = repository.create_job(
+        source_id=source.id,
+        include_comments=False,
+        max_videos=None,
+        max_comments_per_video=None,
+    )
+    repository._jobs[parent.id] = replace(parent, target_id="shared-target")
+    client = HistoricalKeywordClient()
+
+    waiting = JobRunner(repository, YouTubeCollector(repository, client)).run(parent.id)
+
+    assert waiting.state is JobState.WAITING_RETRY
+    assert waiting.checkpoint["keywordHistoricalBackfillComplete"] is True
+    assert waiting.checkpoint["keywordBackfill"]["complete"] is True
+    total, terminal, failed = repository.child_job_summary(parent_job_id=parent.id)
+    assert (total, terminal, failed) == (4, 0, 0)
+    assert len(client.search_requests) == 2
+    assert client.search_requests[0]["order"] == "date"
+    assert client.search_requests[0]["publishedAfter"] == "2005-04-23T00:00:00Z"
+    assert client.search_requests[1]["publishedBefore"] == "2025-01-03T00:00:01Z"
+
+
+class QuotaPausedHistoricalKeywordClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    @staticmethod
+    def bucket_for(endpoint: str) -> QuotaBucket:
+        return QuotaBucket.SEARCH_QUERIES if endpoint == "search" else QuotaBucket.CORE
+
+    def request(self, endpoint: str, _params: dict[str, object]):
+        assert endpoint == "search"
+        self.calls += 1
+        if self.calls == 1:
+            return {
+                "pageInfo": {"totalResults": 2},
+                "items": [{
+                    "id": {"videoId": "first-page-video"},
+                    "snippet": {"publishedAt": "2025-01-04T00:00:00Z"},
+                }],
+                "nextPageToken": "historical-page-2",
+            }
+        raise YouTubeApiError(
+            endpoint="search",
+            bucket=QuotaBucket.SEARCH_QUERIES,
+            status_code=403,
+            payload={"error": {"errors": [{"reason": "quotaExceeded"}]}},
+        )
+
+
+def test_keyword_history_persists_ids_and_page_cursor_before_quota_pause() -> None:
+    repository = InMemoryRepository()
+    source = repository.create_source(
+        source_type=SourceType.KEYWORD,
+        config={"query": "FastAPI", "order": "date", "includeComments": False},
+    )
+    parent = repository.create_job(
+        source_id=source.id,
+        include_comments=False,
+        max_videos=None,
+        max_comments_per_video=None,
+    )
+    repository._jobs[parent.id] = replace(parent, target_id="shared-target")
+
+    waiting = JobRunner(
+        repository,
+        YouTubeCollector(repository, QuotaPausedHistoricalKeywordClient()),
+    ).run(parent.id)
+
+    assert waiting.state is JobState.WAITING_QUOTA
+    assert waiting.checkpoint["pageToken"] == "historical-page-2"
+    assert waiting.checkpoint["keywordBackfill"]["batchIds"] == ["first-page-video"]
+    assert repository.child_job_summary(parent_job_id=parent.id) == (1, 0, 0)
 
 
 def test_quota_retry_delay_is_bounded_between_one_and_three_hours() -> None:

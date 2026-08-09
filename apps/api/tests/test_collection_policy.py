@@ -61,3 +61,28 @@ def test_completed_coverage_must_include_requested_comment_depth() -> None:
         },
         desired,
     )
+
+
+def test_keyword_coverage_requires_completed_historical_backfill() -> None:
+    desired = desired_coverage(
+        SourceType.KEYWORD,
+        {"query": "FastAPI", "maxPagesPerRun": 1, "includeComments": False},
+    )
+
+    assert not coverage_satisfies(
+        {
+            "complete": True,
+            "includeComments": False,
+            "maxPagesPerRun": 1,
+        },
+        desired,
+    )
+    assert coverage_satisfies(
+        {
+            "complete": True,
+            "includeComments": False,
+            "maxPagesPerRun": 1,
+            "historicalBackfillComplete": True,
+        },
+        desired,
+    )
