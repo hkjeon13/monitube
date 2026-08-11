@@ -193,6 +193,7 @@ class ExploreService(ApplicationService):
                     video=video_contract(item["video"]),
                     score=item["score"],
                     matchedFields=item["matched_fields"],
+                    transcriptSnippet=item.get("snippet"),
                 )
                 for item in result["videos"]
             ],

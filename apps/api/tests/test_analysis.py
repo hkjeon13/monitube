@@ -1,5 +1,3 @@
-from types import SimpleNamespace
-
 from monitube_api import analysis
 from monitube_api.analysis import top_words_from_texts
 
@@ -36,26 +34,13 @@ def test_top_words_excludes_adverbs_and_other_grammatical_tokens() -> None:
     ) == []
 
 
-def test_top_words_skips_only_tokens_with_invalid_unicode(monkeypatch) -> None:
-    class InvalidUnicodeToken:
-        @property
-        def form(self) -> str:
-            raise UnicodeDecodeError("utf-16-le", b"\x00", 0, 1, "unexpected end")
+def test_top_words_uses_the_required_noun_analyzer(monkeypatch) -> None:
+    class RequiredAnalyzer:
+        @staticmethod
+        def extract(_text: str) -> list[str]:
+            return ["정상명사"]
 
-        @property
-        def tag(self) -> str:
-            return "NNG"
-
-    analyzer = SimpleNamespace(
-        tokenize=lambda texts: [
-            [
-                SimpleNamespace(form="정상명사", tag="NNG"),
-                InvalidUnicodeToken(),
-                SimpleNamespace(form="보다", tag="VV"),
-            ]
-        ]
-    )
-    monkeypatch.setattr(analysis, "_korean_analyzer", lambda: analyzer)
+    monkeypatch.setattr(analysis, "get_noun_analyzer", RequiredAnalyzer)
 
     assert top_words_from_texts(["공개 댓글"]) == [
         {"word": "정상명사", "count": 1}

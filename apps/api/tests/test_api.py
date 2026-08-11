@@ -31,8 +31,13 @@ def test_health_and_channel_resolution_endpoints() -> None:
     assert client.get("/ready").json() == {
         "status": "ready",
         "checks": {
-            "repository": "in-memory",
-            "derivedCache": {"enabled": False, "status": "disabled"},
+                "repository": "in-memory",
+                "nounAnalyzer": {
+                    "status": "ok",
+                    "version": "mecab-nltk-v1",
+                    "fixtureHash": "43c7a14af446af6f",
+                },
+                "derivedCache": {"enabled": False, "status": "disabled"},
         },
     }
     response = client.post("/v1/channel-resolutions", json={"input": "youtube.com/@GoogleDevelopers"})

@@ -4,13 +4,11 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import datetime
-from functools import lru_cache
 import re
 from typing import Iterable
 
-from kiwipiepy import Kiwi
-
 from .domain import CommentRecord, VideoRecord, utcnow
+from .nlp import get_noun_analyzer
 
 
 _QUESTION = re.compile(
@@ -37,54 +35,35 @@ _STOP_WORDS = frozenset(
         "합니다",
     }
 )
-_CONTENT_NOUN_TAGS = frozenset({"NNG", "NNP"})
 
 
-@lru_cache(maxsize=1)
-def _korean_analyzer() -> Kiwi:
-    """Load the Korean morphological analyzer once per API process."""
-
-    return Kiwi()
-
-
-def _content_word(token_form: str, token_tag: str) -> str | None:
-    """Return a normalized display form for common and proper nouns only."""
-
-    if token_tag in _CONTENT_NOUN_TAGS:
-        return token_form.lower()
-    return None
-
-
-def top_words_from_texts(texts: Iterable[str | None], *, limit: int = 10) -> list[dict[str, int | str]]:
-    """Count Korean common and proper nouns from public text."""
+def top_words_from_texts(
+    texts: Iterable[str | None], *, limit: int = 10
+) -> list[dict[str, int | str]]:
+    """Compatibility frequency view backed by mandatory MeCab+NLTK nouns."""
 
     counts: Counter[str] = Counter()
-    normalized_texts = [
-        normalized
-        for text in texts
-        if (normalized := (text or "").strip())
-    ]
-    for tokens in _korean_analyzer().tokenize(normalized_texts):
-        for token in tokens:
-            try:
-                token_form = token.form
-                token_tag = token.tag
-            except UnicodeError:
-                # Some public comments contain Unicode sequences that Kiwi can
-                # tokenize but cannot materialize back into one token string.
-                # Skip only that malformed token so one comment cannot fail an
-                # entire source analysis run.
-                continue
-            word = _content_word(token_form, token_tag)
-            if word and word not in _STOP_WORDS:
+    analyzer = get_noun_analyzer()
+    for source_text in texts:
+        for word in analyzer.extract(source_text):
+            if word not in _STOP_WORDS:
                 counts[word] += 1
-    return [{"word": word, "count": count} for word, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]]
+    return [
+        {"word": word, "count": count}
+        for word, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[
+            :limit
+        ]
+    ]
 
 
-def top_words(comments: Iterable[CommentRecord], *, limit: int = 10) -> list[dict[str, int | str]]:
+def top_words(
+    comments: Iterable[CommentRecord], *, limit: int = 10
+) -> list[dict[str, int | str]]:
     """Return Korean common and proper noun frequencies from public comments."""
 
-    return top_words_from_texts((comment.text_display for comment in comments), limit=limit)
+    return top_words_from_texts(
+        (comment.text_display for comment in comments), limit=limit
+    )
 
 
 def question_signals_from_texts(
@@ -104,25 +83,34 @@ def question_signals_from_texts(
         "questionCount": question_count,
         "questionSampleSize": sample_size,
         "questionRate": (
-            round(question_count / sample_size * 100, 2)
-            if sample_size
-            else 0
+            round(question_count / sample_size * 100, 2) if sample_size else 0
         ),
     }
 
 
 def build_summary(
-    videos: Iterable[VideoRecord], comments: Iterable[CommentRecord], *, generated_at: datetime | None = None
+    videos: Iterable[VideoRecord],
+    comments: Iterable[CommentRecord],
+    *,
+    generated_at: datetime | None = None,
 ) -> dict[str, object]:
     video_items = list(videos)
     comment_items = list(comments)
-    published_videos = [video.published_at for video in video_items if video.published_at is not None]
-    published_comments = [comment.published_at for comment in comment_items if comment.published_at is not None]
+    published_videos = [
+        video.published_at for video in video_items if video.published_at is not None
+    ]
+    published_comments = [
+        comment.published_at
+        for comment in comment_items
+        if comment.published_at is not None
+    ]
     return {
         "videoCount": len(video_items),
         "commentCount": len(comment_items),
         "latestVideoPublishedAt": max(published_videos) if published_videos else None,
-        "latestCommentPublishedAt": max(published_comments) if published_comments else None,
+        "latestCommentPublishedAt": max(published_comments)
+        if published_comments
+        else None,
         "topWords": top_words(comment_items),
         "generatedAt": generated_at or utcnow(),
     }

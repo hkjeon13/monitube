@@ -282,7 +282,7 @@ export function sourceLabel(source: SourceSummary) {
 }
 
 export function searchFieldLabel(field: string) {
-  return ({ title: "제목", description: "설명", channel: "채널", handle: "채널 ID", comment: "댓글", videoTitle: "영상 제목" } as Record<string, string>)[field] ?? field;
+  return ({ title: "제목", description: "설명", channel: "채널", handle: "채널 ID", comment: "댓글", videoTitle: "영상 제목", transcript: "대본" } as Record<string, string>)[field] ?? field;
 }
 
 export function sourceCoverage(source?: SourceSummary) {

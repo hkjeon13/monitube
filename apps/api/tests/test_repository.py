@@ -155,7 +155,7 @@ def test_summary_reads_and_cutover_gate_reject_legacy_analysis_runs() -> None:
 def test_readiness_requires_latest_search_statistics_migration() -> None:
     readiness_sql = getsource(PostgresRepository.check_readiness)
 
-    assert "019_noun_only_analysis_pipeline.sql" in readiness_sql
+    assert "020_transcript_search_mecab_tfidf.sql" in readiness_sql
     assert "015_database_performance_foundation.sql" not in readiness_sql
 
 
@@ -220,6 +220,7 @@ def test_indexed_search_materializes_candidates_before_acl_and_limit() -> None:
         "postgresql://unused",
         connect=lambda: connection,
         enable_search_trigram=True,
+        enable_transcript_search=False,
     )
     owner_id = "00000000-0000-0000-0000-000000000001"
 

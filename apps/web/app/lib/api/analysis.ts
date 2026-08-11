@@ -10,6 +10,7 @@ import type {
   AnalysisTrendPoint,
   AnalysisVideo,
   WorkspaceAnalysisSummary,
+  TfidfKeyword,
 } from "./types";
 import {
   asArray,
@@ -98,6 +99,21 @@ function normalizeAnalysisComment(value: unknown): AnalysisComment | null {
   };
 }
 
+function normalizeTfidfKeywords(value: unknown): TfidfKeyword[] {
+  return asArray(value).flatMap((item) => {
+    const record = asRecord(item);
+    const term = asText(record?.term);
+    if (!record || !term) return [];
+    return [{
+      term,
+      score: requiredNumber(record, "score"),
+      termCount: requiredNumber(record, "termCount"),
+      documentCount: requiredNumber(record, "documentCount"),
+      documentRate: requiredNumber(record, "documentRate"),
+    }];
+  });
+}
+
 export async function getAnalysisOverview(query: AnalysisQuery = {}): Promise<AnalysisOverview> {
   const params = new URLSearchParams();
   if (query.scope) params.set("scope", query.scope);
@@ -113,6 +129,7 @@ export async function getAnalysisOverview(query: AnalysisQuery = {}): Promise<An
   const record = asRecord(response);
   const rawSummary = asRecord(record?.summary);
   const rawCoverage = asRecord(record?.coverage);
+  const rawKeywordCoverage = asRecord(record?.keywordCoverage);
   if (!record || !rawSummary || !rawCoverage) {
     throw new ApiError("분석 결과를 해석하지 못했습니다.", 502);
   }
@@ -151,6 +168,13 @@ export async function getAnalysisOverview(query: AnalysisQuery = {}): Promise<An
       return comment ? [comment] : [];
     }),
     topWords: normalizeTopWords(record.topWords),
+    videoKeywords: normalizeTfidfKeywords(record.videoKeywords),
+    commentKeywords: normalizeTfidfKeywords(record.commentKeywords),
+    keywordCoverage: {
+      indexedVideoDocuments: requiredNumber(rawKeywordCoverage ?? {}, "indexedVideoDocuments"),
+      indexedCommentDocuments: requiredNumber(rawKeywordCoverage ?? {}, "indexedCommentDocuments"),
+      analyzerVersion: asText(rawKeywordCoverage?.analyzerVersion) ?? "mecab-nltk-v1",
+    },
     commentSignals: {
       replyRate: requiredNumber(
         asRecord(record.commentSignals) ?? {},

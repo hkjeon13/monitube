@@ -837,7 +837,7 @@ class PostgresResultMixin:
             sampled_texts = [str(row["text_display"]) for row in cursor.fetchall()]
             coverage = dict(run.get("coverage") or {})
 
-        # Kiwi tokenization of a large comment sample can take longer than the
+        # Morphological analysis of a large comment sample can take longer than the
         # server's idle-in-transaction timeout. Keep the durable lease, but release
         # the read transaction before doing CPU-only analysis.
         summary = {

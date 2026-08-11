@@ -164,6 +164,31 @@ class ReplyQuotaClient:
         raise AssertionError(f"Unexpected endpoint: {endpoint}")
 
 
+class ForbiddenCommentsClient(DirectVideoClient):
+    def request(self, endpoint: str, params: dict[str, object]):
+        if endpoint == "commentThreads":
+            raise YouTubeApiError(
+                endpoint=endpoint,
+                bucket=QuotaBucket.CORE,
+                status_code=403,
+                payload={"error": {"errors": [{"reason": "forbidden"}]}},
+            )
+        return super().request(endpoint, params)
+
+
+class ForbiddenRepliesClient(PaginatedRepliesClient):
+    def request(self, endpoint: str, params: dict[str, object]):
+        if endpoint == "comments":
+            self.reply_requests.append(params)
+            raise YouTubeApiError(
+                endpoint=endpoint,
+                bucket=QuotaBucket.CORE,
+                status_code=403,
+                payload={"error": {"errors": [{"reason": "forbidden"}]}},
+            )
+        return super().request(endpoint, params)
+
+
 def test_checkpoint_replacement_preserves_child_and_fanout_identity() -> None:
     collector = YouTubeCollector(InMemoryRepository(), DirectVideoClient())
     collector._active_checkpoint = {
@@ -219,6 +244,68 @@ def test_reply_quota_does_not_advance_uncommitted_parent_cursor() -> None:
     assert repository.existing_comment_ids(
         ["comment-quota", "reply-before-quota"]
     ) == {"comment-quota", "reply-before-quota"}
+
+
+def test_forbidden_comment_threads_are_skipped_with_a_warning() -> None:
+    repository = InMemoryRepository()
+    source = repository.create_source(
+        source_type=SourceType.VIDEO,
+        config={"input": "dQw4w9WgXcQ", "includeComments": True},
+    )
+    job = repository.create_job(
+        source_id=source.id,
+        include_comments=True,
+        max_videos=1,
+        max_comments_per_video=1,
+    )
+
+    completed = JobRunner(
+        repository,
+        YouTubeCollector(repository, ForbiddenCommentsClient()),
+    ).run(job.id)
+
+    assert completed.state is JobState.COMPLETED_WITH_WARNINGS
+    assert completed.current_stage == "completed"
+    assert completed.pause_reason is None
+    assert completed.partial_errors == [{
+        "scope": "video",
+        "sourceId": source.id,
+        "code": "comments_unavailable",
+        "retryable": False,
+        "message": "YouTube commentThreads request failed with HTTP 403 (forbidden)",
+    }]
+    assert completed.checkpoint["phaseProgress"]["comments"] == {
+        "completed": 1,
+        "total": 1,
+    }
+
+
+def test_forbidden_replies_are_skipped_and_advance_the_parent_cursor() -> None:
+    repository = InMemoryRepository()
+    source = repository.create_source(
+        source_type=SourceType.VIDEO,
+        config={"input": "dQw4w9WgXcQ", "includeComments": True},
+    )
+    job = repository.create_job(
+        source_id=source.id,
+        include_comments=True,
+        max_videos=1,
+        max_comments_per_video=1,
+    )
+    client = ForbiddenRepliesClient()
+
+    completed = JobRunner(
+        repository,
+        YouTubeCollector(repository, client),
+    ).run(job.id)
+
+    assert completed.state is JobState.COMPLETED_WITH_WARNINGS
+    assert completed.partial_errors[0]["scope"] == "comment"
+    assert completed.partial_errors[0]["code"] == "comments_unavailable"
+    assert completed.checkpoint["stage"] == "completed"
+    assert completed.checkpoint["batchCursor"] == 1
+    assert len(client.reply_requests) == 1
+    assert repository.existing_comment_ids(["comment-1"]) == {"comment-1"}
 
 
 def test_quota_error_logs_checkpoint_and_due_job_resumes_from_same_cursor() -> None:

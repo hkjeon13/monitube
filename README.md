@@ -89,6 +89,10 @@ Copy `.env.example` to `.env` and edit only local values. `.env` is ignored by G
 | `SEARCH_API_KEY` | optional local server secret | API/worker only | SearchAPI.io channel/keyword discovery and transcript collection |
 | `DISCOVERY_PROVIDER` | `searchapi` | API/worker | `searchapi` uses SearchAPI.io for channel and keyword discovery; `youtube` is the rollback path |
 | `TRANSCRIPT_COLLECTION_ENABLED` | `true` | worker | collect transcripts for newly discovered channel/keyword videos, preferring Korean then English |
+| `ENABLE_NLP_INDEXING` | `true` | worker | index transcript/comment nouns with bundled MeCab + NLTK; startup fails if required assets are unavailable |
+| `NLP_INDEX_BATCH_SIZE` | `10` | worker | maximum leased NLP documents processed before polling collection work again |
+| `NLP_INDEX_LEASE_SECONDS` | `300` | worker | NLP document processing lease duration |
+| `ENABLE_TRANSCRIPT_SEARCH` | `true` | api | include indexed transcript segments and timestamped snippets in video search |
 | `MONITUBE_WORKER_REPLICAS` | `2` | deployment script only | number of concurrent collection workers |
 | `MONITUBE_ANALYSIS_WORKER_REPLICAS` | `1` | deployment script only | number of independent summary workers |
 | `*_DB_POOL_*` | per-process values | same | bounded PostgreSQL connection-pool budgets |

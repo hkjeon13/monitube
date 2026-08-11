@@ -11,6 +11,7 @@ from ...contracts import (
     RuntimeKeyRegistrationResponse,
 )
 from ...repositories import CollectionRepository, RepositoryUnavailableError
+from ...nlp import analyzer_health
 from ...settings import Settings
 
 
@@ -42,6 +43,13 @@ def create_system_router(
             raise RepositoryUnavailableError(
                 "Required database migration is not applied"
             )
+        if settings.enable_transcript_search:
+            try:
+                checks["nounAnalyzer"] = analyzer_health()
+            except Exception as exc:
+                raise RepositoryUnavailableError(
+                    "Required MeCab/NLTK analyzer is unavailable"
+                ) from exc
         return {
             "status": "ready",
             "checks": {**checks, "derivedCache": derived_cache.health()},

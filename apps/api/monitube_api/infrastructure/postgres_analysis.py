@@ -5,12 +5,147 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from ..analysis import question_signals_from_texts, top_words_from_texts
+from ..analysis import question_signals_from_texts
 from ..analysis_insights import build_video_insights
 from ..domain import utcnow
+from ..nlp import ANALYZER_VERSION
+from ..nlp.tfidf import keyword_scores
 
 
 class PostgresAnalysisMixin:
+    @staticmethod
+    def _analysis_tfidf_keywords(
+        *,
+        cursor: Any,
+        params: dict[str, Any],
+        corpus_kind: str,
+        limit: int = 15,
+    ) -> tuple[list[dict[str, int | float | str]], int]:
+        scope_kind = "owner"
+        scope_id = params["owner_id"]
+        target_ids = params["target_ids"]
+        if len(target_ids) == 1:
+            scope_kind = "target"
+            scope_id = target_ids[0]
+        elif params["scope"] == "channel" and len(params["channel_ids"]) == 1:
+            cursor.execute(
+                """
+                SELECT target.id
+                FROM collection_targets target
+                JOIN channels channel ON channel.id = target.resolved_channel_id
+                JOIN collection_subscriptions subscription
+                  ON subscription.target_id = target.id
+                 AND subscription.user_id = %s::uuid
+                 AND subscription.enabled = TRUE
+                WHERE channel.youtube_channel_id = %s
+                ORDER BY target.updated_at DESC, target.id
+                LIMIT 1
+                """,
+                (params["owner_id"], params["channel_ids"][0]),
+            )
+            target = cursor.fetchone()
+            if target:
+                scope_kind = "target"
+                scope_id = target["id"]
+
+        stats_params = {
+            "nlp_scope_kind": scope_kind,
+            "nlp_scope_id": scope_id,
+            "nlp_corpus_kind": corpus_kind,
+            "nlp_analyzer_version": ANALYZER_VERSION,
+            "from_at": params["from_at"],
+            "to_at": params["to_at"],
+            "nlp_keyword_candidate_limit": max(50, limit * 4),
+        }
+        bounded_period = params["from_at"] is not None or params["to_at"] is not None
+        if bounded_period:
+            cursor.execute(
+                """
+                SELECT COALESCE(sum(document_count), 0)::bigint AS document_count
+                FROM nlp_daily_corpus_stats
+                WHERE scope_kind = %(nlp_scope_kind)s
+                  AND scope_id = %(nlp_scope_id)s::uuid
+                  AND corpus_kind = %(nlp_corpus_kind)s
+                  AND analyzer_version = %(nlp_analyzer_version)s
+                  AND (%(from_at)s::timestamptz IS NULL
+                       OR document_date >= %(from_at)s::date)
+                  AND (%(to_at)s::timestamptz IS NULL
+                       OR document_date < %(to_at)s::date)
+                """,
+                stats_params,
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT document_count
+                FROM nlp_corpus_stats
+                WHERE scope_kind = %(nlp_scope_kind)s
+                  AND scope_id = %(nlp_scope_id)s::uuid
+                  AND corpus_kind = %(nlp_corpus_kind)s
+                  AND analyzer_version = %(nlp_analyzer_version)s
+                """,
+                stats_params,
+            )
+        corpus = cursor.fetchone()
+        document_count = int(corpus["document_count"] if corpus else 0)
+        score_params = {**stats_params, "nlp_document_count": document_count}
+        if bounded_period:
+            cursor.execute(
+                """
+                WITH term_period AS (
+                  SELECT term,
+                         sum(document_frequency)::bigint AS document_frequency,
+                         sum(total_term_frequency)::bigint AS total_term_frequency
+                  FROM nlp_daily_term_stats
+                  WHERE scope_kind = %(nlp_scope_kind)s
+                    AND scope_id = %(nlp_scope_id)s::uuid
+                    AND corpus_kind = %(nlp_corpus_kind)s
+                    AND analyzer_version = %(nlp_analyzer_version)s
+                    AND (%(from_at)s::timestamptz IS NULL
+                         OR document_date >= %(from_at)s::date)
+                    AND (%(to_at)s::timestamptz IS NULL
+                         OR document_date < %(to_at)s::date)
+                  GROUP BY term
+                )
+                SELECT term, document_frequency, total_term_frequency
+                FROM term_period
+                ORDER BY (
+                  (1 + ln(total_term_frequency::double precision))
+                  * (ln(
+                      (%(nlp_document_count)s::double precision + 1)
+                      / (document_frequency::double precision + 1)
+                    ) + 1)
+                ) DESC, term
+                LIMIT %(nlp_keyword_candidate_limit)s
+                """,
+                score_params,
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT term, document_frequency, total_term_frequency
+                FROM nlp_term_stats
+                WHERE scope_kind = %(nlp_scope_kind)s
+                  AND scope_id = %(nlp_scope_id)s::uuid
+                  AND corpus_kind = %(nlp_corpus_kind)s
+                  AND analyzer_version = %(nlp_analyzer_version)s
+                ORDER BY (
+                  (1 + ln(total_term_frequency::double precision))
+                  * (ln(
+                      (%(nlp_document_count)s::double precision + 1)
+                      / (document_frequency::double precision + 1)
+                    ) + 1)
+                ) DESC, term
+                LIMIT %(nlp_keyword_candidate_limit)s
+                """,
+                score_params,
+            )
+        rows = [dict(row) for row in cursor.fetchall()]
+        return (
+            keyword_scores(rows, document_count=document_count, limit=limit),
+            document_count,
+        )
+
     @staticmethod
     def _analysis_scope_cte(
         bucket: str,
@@ -646,6 +781,23 @@ class PostgresAnalysisMixin:
                 cursor=cursor,
                 params=params,
             )
+            video_keywords, indexed_video_documents = self._analysis_tfidf_keywords(
+                cursor=cursor,
+                params=params,
+                corpus_kind="video",
+            )
+            comment_corpus_kind = (
+                "comment_top_level"
+                if comment_type == "top_level"
+                else "comment_reply"
+                if comment_type == "reply"
+                else "comment"
+            )
+            comment_keywords, indexed_comment_documents = self._analysis_tfidf_keywords(
+                cursor=cursor,
+                params=params,
+                corpus_kind=comment_corpus_kind,
+            )
 
         generated_at = utcnow()
         return {
@@ -683,17 +835,22 @@ class PostgresAnalysisMixin:
             "keywordBreakdown": keyword_breakdown,
             "topVideos": top_videos,
             "topComments": top_comments,
-            "topWords": top_words_from_texts(
-                sampled_texts,
-                limit=15,
-            ),
+            "topWords": [
+                {"word": item["term"], "count": item["termCount"]}
+                for item in comment_keywords
+            ],
+            "videoKeywords": video_keywords,
+            "commentKeywords": comment_keywords,
+            "keywordCoverage": {
+                "indexedVideoDocuments": indexed_video_documents,
+                "indexedCommentDocuments": indexed_comment_documents,
+                "analyzerVersion": ANALYZER_VERSION,
+            },
             "commentSignals": {
                 "replyRate": (
                     round(
                         int(summary_row.get("reply_count") or 0)
-                        / int(
-                            summary_row.get("collected_comment_count") or 1
-                        )
+                        / int(summary_row.get("collected_comment_count") or 1)
                         * 100,
                         2,
                     )
@@ -702,12 +859,8 @@ class PostgresAnalysisMixin:
                 ),
                 "authorDiversityRate": (
                     round(
-                        int(
-                            summary_row.get("identified_author_count") or 0
-                        )
-                        / int(
-                            summary_row.get("collected_comment_count") or 1
-                        )
+                        int(summary_row.get("identified_author_count") or 0)
+                        / int(summary_row.get("collected_comment_count") or 1)
                         * 100,
                         2,
                     )
@@ -747,6 +900,22 @@ class PostgresAnalysisMixin:
                 cursor=cursor,
                 params=params,
             )
+            video_keywords, indexed_video_documents = self._analysis_tfidf_keywords(
+                cursor=cursor,
+                params=params,
+                corpus_kind="video",
+            )
+            comment_keywords, indexed_comment_documents = self._analysis_tfidf_keywords(
+                cursor=cursor,
+                params=params,
+                corpus_kind=(
+                    "comment_top_level"
+                    if params["comment_type"] == "top_level"
+                    else "comment_reply"
+                    if params["comment_type"] == "reply"
+                    else "comment"
+                ),
+            )
         return {
             "summary": {
                 "videoCount": 0,
@@ -770,7 +939,17 @@ class PostgresAnalysisMixin:
             "keywordBreakdown": [],
             "topVideos": [],
             "topComments": top_comments,
-            "topWords": top_words_from_texts(sampled_texts, limit=15),
+            "topWords": [
+                {"word": item["term"], "count": item["termCount"]}
+                for item in comment_keywords
+            ],
+            "videoKeywords": video_keywords,
+            "commentKeywords": comment_keywords,
+            "keywordCoverage": {
+                "indexedVideoDocuments": indexed_video_documents,
+                "indexedCommentDocuments": indexed_comment_documents,
+                "analyzerVersion": ANALYZER_VERSION,
+            },
             "commentSignals": {
                 "replyRate": 0,
                 "authorDiversityRate": 0,

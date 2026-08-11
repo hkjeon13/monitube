@@ -262,10 +262,18 @@ class ChannelSubscriberSnapshot(ApiModel):
     hiddenSubscriberCount: bool | None = None
 
 
+class TranscriptSearchSnippet(ApiModel):
+    text: str
+    startMs: int = Field(ge=0)
+    durationMs: int = Field(ge=0)
+    matchedTerms: list[str] = Field(default_factory=list)
+
+
 class SearchVideoResult(ApiModel):
     video: "CollectedVideo"
     score: float = Field(ge=0, le=1)
     matchedFields: list[str] = Field(default_factory=list)
+    transcriptSnippet: TranscriptSearchSnippet | None = None
 
 
 class SearchCommentResult(ApiModel):
@@ -406,6 +414,20 @@ class CollectedComment(ApiModel):
 class TopWord(ApiModel):
     word: str
     count: int = Field(ge=1)
+
+
+class TfidfKeyword(ApiModel):
+    term: str
+    score: float = Field(ge=0)
+    termCount: int = Field(ge=1)
+    documentCount: int = Field(ge=1)
+    documentRate: float = Field(ge=0, le=100)
+
+
+class AnalysisKeywordCoverage(ApiModel):
+    indexedVideoDocuments: int = Field(default=0, ge=0)
+    indexedCommentDocuments: int = Field(default=0, ge=0)
+    analyzerVersion: str = "mecab-nltk-v1"
 
 
 class CommentSummary(ApiModel):
@@ -558,6 +580,11 @@ class AnalysisOverviewResponse(ApiModel):
     topVideos: list[AnalysisVideo] = Field(default_factory=list)
     topComments: list[AnalysisComment] = Field(default_factory=list)
     topWords: list[TopWord] = Field(default_factory=list)
+    videoKeywords: list[TfidfKeyword] = Field(default_factory=list)
+    commentKeywords: list[TfidfKeyword] = Field(default_factory=list)
+    keywordCoverage: AnalysisKeywordCoverage = Field(
+        default_factory=AnalysisKeywordCoverage
+    )
     commentSignals: AnalysisCommentSignals = Field(
         default_factory=AnalysisCommentSignals
     )

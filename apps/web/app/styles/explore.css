@@ -32,6 +32,7 @@
 .search-video-result img { width: 4.25rem; height: 2.75rem; border-radius: 0.5rem; object-fit: cover; background: #e9ece5; }
 .search-video-result span { display: grid; min-width: 0; gap: 0.3125rem; }
 .search-video-result strong, .search-comment-result strong { overflow: hidden; color: #344139; font-size: 0.75rem; font-weight: 800; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+.search-video-result q { display: -webkit-box; margin: 0; overflow: hidden; color: #666d65; font-size: 0.65rem; font-style: normal; line-height: 1.35; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .search-video-result small, .search-comment-result small { overflow: hidden; color: #8c8d84; font-size: 0.5625rem; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .search-video-result > svg { width: 0.875rem; height: 0.875rem; color: #a9aaa3; }
 .search-comment-result { display: grid; gap: 0.375rem; padding: 0.75rem 0; }

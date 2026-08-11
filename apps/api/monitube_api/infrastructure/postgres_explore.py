@@ -4,6 +4,7 @@ from typing import Any
 
 from ..domain import utcnow
 from ..fuzzy_search import normalize_search_text, rank_text_fields
+from ..nlp import get_noun_analyzer
 from ..repositories import (
     NotFoundError,
     decode_explore_video_cursor,
@@ -13,9 +14,14 @@ from ..repositories import (
 
 
 class PostgresExploreMixin:
-    def set_target_pin(self, *, target_id: str, enabled: bool, interval_minutes: int) -> dict[str, Any]:
+    def set_target_pin(
+        self, *, target_id: str, enabled: bool, interval_minutes: int
+    ) -> dict[str, Any]:
         with self._connection() as connection, connection.cursor() as cursor:
-            cursor.execute("SELECT id FROM collection_targets WHERE id = %s FOR UPDATE", (target_id,))
+            cursor.execute(
+                "SELECT id FROM collection_targets WHERE id = %s FOR UPDATE",
+                (target_id,),
+            )
             if not cursor.fetchone():
                 raise NotFoundError(f"Collection target '{target_id}' was not found")
             cursor.execute(
@@ -41,7 +47,9 @@ class PostgresExploreMixin:
             row = cursor.fetchone()
             return dict(row) if row else None
 
-    def mark_target_manual_dispatch(self, *, target_id: str, dispatched_at: Any) -> None:
+    def mark_target_manual_dispatch(
+        self, *, target_id: str, dispatched_at: Any
+    ) -> None:
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
                 """UPDATE collection_target_pins
@@ -53,7 +61,9 @@ class PostgresExploreMixin:
                 (dispatched_at, dispatched_at, target_id, dispatched_at),
             )
 
-    def dispatch_due_pins(self, *, runtime_config_id: str | None = None, limit: int = 10) -> int:
+    def dispatch_due_pins(
+        self, *, runtime_config_id: str | None = None, limit: int = 10
+    ) -> int:
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -81,7 +91,12 @@ class PostgresExploreMixin:
                 if not cursor.fetchone():
                     source = self._target_source(cursor, target_id)
                     if source:
-                        self._create_target_job(cursor, target_id=target_id, source=source, runtime_config_id=runtime_config_id)
+                        self._create_target_job(
+                            cursor,
+                            target_id=target_id,
+                            source=source,
+                            runtime_config_id=runtime_config_id,
+                        )
                         cursor.execute(
                             "UPDATE collection_target_pins SET last_dispatched_at = now(), next_run_at = now() + (interval_minutes * interval '1 minute'), updated_at = now() WHERE target_id = %s",
                             (target_id,),
@@ -94,7 +109,9 @@ class PostgresExploreMixin:
                 )
             return dispatched
 
-    def list_explore_channels(self, *, owner_id: str | None = None) -> list[dict[str, Any]]:
+    def list_explore_channels(
+        self, *, owner_id: str | None = None
+    ) -> list[dict[str, Any]]:
         """Aggregate each channel once over the caller's distinct visible videos."""
 
         if owner_id is None:
@@ -234,14 +251,21 @@ class PostgresExploreMixin:
                         "youtubeCommentCount": youtube_comment_count,
                         "videoCollectionRate": (
                             min(100, round((video_count / youtube_video_count) * 100))
-                            if youtube_video_count else 0
+                            if youtube_video_count
+                            else 0
                         ),
                         "commentCollectionRate": (
-                            min(100, round((comment_count / youtube_comment_count) * 100))
-                            if youtube_comment_count else 0
+                            min(
+                                100,
+                                round((comment_count / youtube_comment_count) * 100),
+                            )
+                            if youtube_comment_count
+                            else 0
                         ),
                         "lastFetchedAt": row["last_fetched_at"],
-                        "targetId": str(row["target_id"]) if row.get("target_id") else None,
+                        "targetId": str(row["target_id"])
+                        if row.get("target_id")
+                        else None,
                         "pin": pin,
                     }
                 )
@@ -361,7 +385,8 @@ class PostgresExploreMixin:
                     scope=scope,
                     filter_hash=filter_hash,
                 )
-                if has_more and videos else None
+                if has_more and videos
+                else None
             )
             return {
                 "videos": videos,
@@ -371,7 +396,12 @@ class PostgresExploreMixin:
             }
 
     def list_explore(
-        self, *, limit: int = 60, offset: int = 0, channel_id: str | None = None, owner_id: str | None = None
+        self,
+        *,
+        limit: int = 60,
+        offset: int = 0,
+        channel_id: str | None = None,
+        owner_id: str | None = None,
     ) -> dict[str, Any]:
         # Compatibility wrapper: keep the old offset contract while reusing the
         # set-based channel aggregate. New clients use the keyset endpoint.
@@ -448,11 +478,22 @@ class PostgresExploreMixin:
                 (youtube_channel_id, owner_id, owner_id, limit),
             )
             return [
-                {"fetchedAt": row["fetched_at"], "subscriberCount": row["subscriber_count"], "hiddenSubscriberCount": row["hidden_subscriber_count"]}
+                {
+                    "fetchedAt": row["fetched_at"],
+                    "subscriberCount": row["subscriber_count"],
+                    "hiddenSubscriberCount": row["hidden_subscriber_count"],
+                }
                 for row in reversed(cursor.fetchall())
             ]
 
-    def search_collected(self, *, query: str, limit: int = 20, owner_id: str | None = None, scope: str = "all") -> dict[str, Any]:
+    def search_collected(
+        self,
+        *,
+        query: str,
+        limit: int = 20,
+        owner_id: str | None = None,
+        scope: str = "all",
+    ) -> dict[str, Any]:
         """Search persisted public data with a Jaro-Winkler tolerance layer.
 
         Search scoring deliberately runs in the application so results are
@@ -463,13 +504,20 @@ class PostgresExploreMixin:
         terms = query.split()
 
         def escaped_pattern(value: str) -> str:
-            return "%" + value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            return (
+                "%"
+                + value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                + "%"
+            )
 
         exact_patterns = [escaped_pattern(term.casefold()) for term in terms]
         normalized_query = normalize_search_text(query)
         short_query = len(normalized_query) == 2
         prefix_pattern = (
-            normalized_query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            normalized_query.replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+            + "%"
         )
         # ACL is applied inside each candidate query, before this hard cap.
         candidate_limit = min(300, max(100, limit * 10))
@@ -479,12 +527,16 @@ class PostgresExploreMixin:
         # made a common term scan every visible video's comments. A fixed SQL
         # fragment per term remains injection-safe because only the values are
         # parameters, and is logically equivalent to ILIKE ALL.
-        video_indexed_contains = " AND ".join(
-            "search_document.document ILIKE %s" for _ in exact_patterns
-        ) or "TRUE"
-        comment_indexed_contains = " AND ".join(
-            "lower(COALESCE(cm.text_display, '')) ILIKE %s" for _ in exact_patterns
-        ) or "TRUE"
+        video_indexed_contains = (
+            " AND ".join("search_document.document ILIKE %s" for _ in exact_patterns)
+            or "TRUE"
+        )
+        comment_indexed_contains = (
+            " AND ".join(
+                "lower(COALESCE(cm.text_display, '')) ILIKE %s" for _ in exact_patterns
+            )
+            or "TRUE"
+        )
 
         with self._connection() as connection, connection.cursor() as cursor:
             video_results: list[dict[str, Any]] = []
@@ -510,7 +562,12 @@ class PostgresExploreMixin:
                     video_order = "v.source_fetched_at DESC NULLS LAST"
                     video_limit = "LIMIT %s"
                     video_params: tuple[Any, ...] = (
-                        owner_id, owner_id, prefix_pattern, prefix_pattern, prefix_pattern, candidate_limit
+                        owner_id,
+                        owner_id,
+                        prefix_pattern,
+                        prefix_pattern,
+                        prefix_pattern,
+                        candidate_limit,
                     )
                 elif self.enable_search_trigram:
                     # MATERIALIZED is an optimization barrier: build the
@@ -551,8 +608,12 @@ class PostgresExploreMixin:
                     video_order = "search_candidate.search_score DESC, search_candidate.source_fetched_at DESC NULLS LAST"
                     video_limit = ""
                     video_params = (
-                        normalized_query, *exact_patterns, normalized_query,
-                        owner_id, owner_id, candidate_limit,
+                        normalized_query,
+                        *exact_patterns,
+                        normalized_query,
+                        owner_id,
+                        owner_id,
+                        candidate_limit,
                     )
                 else:
                     video_cte = ""
@@ -572,7 +633,7 @@ class PostgresExploreMixin:
                     video_limit = "LIMIT %s"
                     video_params = (owner_id, owner_id, exact_patterns, candidate_limit)
                 cursor.execute(
-                f"""
+                    f"""
                 {video_cte}
                 SELECT v.id::text, v.youtube_video_id, c.youtube_channel_id, c.title AS channel_title,
                        c.handle AS channel_handle, v.title, v.description, v.published_at,
@@ -590,7 +651,7 @@ class PostgresExploreMixin:
                 ORDER BY {video_order}
                 {video_limit}
                 """,
-                video_params,
+                    video_params,
                 )
                 for row in cursor.fetchall():
                     if short_query:
@@ -603,17 +664,109 @@ class PostgresExploreMixin:
                             name
                             for name, value in short_fields.items()
                             if value
-                            and normalize_search_text(str(value)).startswith(normalized_query)
+                            and normalize_search_text(str(value)).startswith(
+                                normalized_query
+                            )
                         ]
                         score = 1.0 if matched_fields else 0.0
                     else:
-                        score, matched_fields = rank_text_fields(query, {
-                            "id": row.get("youtube_video_id"),
-                            "title": row.get("title"), "description": row.get("description"),
-                            "channel": row.get("channel_title"), "handle": row.get("channel_handle"),
-                        })
+                        score, matched_fields = rank_text_fields(
+                            query,
+                            {
+                                "id": row.get("youtube_video_id"),
+                                "title": row.get("title"),
+                                "description": row.get("description"),
+                                "channel": row.get("channel_title"),
+                                "handle": row.get("channel_handle"),
+                            },
+                        )
                     if matched_fields:
-                        video_results.append({"video": self._video(row), "score": score, "matched_fields": matched_fields})
+                        video_results.append(
+                            {
+                                "video": self._video(row),
+                                "score": score,
+                                "matched_fields": matched_fields,
+                            }
+                        )
+
+                if self.enable_transcript_search:
+                    transcript_terms = sorted(set(get_noun_analyzer().extract(query)))
+                    if transcript_terms:
+                        cursor.execute(
+                            """
+                            SELECT v.id::text, v.youtube_video_id,
+                                   c.youtube_channel_id, c.title AS channel_title,
+                                   c.handle AS channel_handle, v.title, v.description,
+                                   v.published_at, v.duration_seconds,
+                                   v.privacy_status, v.made_for_kids,
+                                   v.source_fetched_at,
+                                   segment.text AS transcript_snippet,
+                                   segment.start_ms, segment.duration_ms,
+                                   jsonb_build_object(
+                                     'viewCount', COALESCE(stats.view_count, 0),
+                                     'likeCount', COALESCE(stats.like_count, 0),
+                                     'commentCount', COALESCE(stats.comment_count, 0)
+                                   ) AS statistics
+                            FROM video_transcript_segments segment
+                            JOIN video_transcripts transcript
+                              ON transcript.id = segment.transcript_id
+                             AND transcript.state = 'available'
+                            JOIN videos v ON v.id = transcript.video_id
+                            LEFT JOIN channels c ON c.id = v.channel_id
+                            LEFT JOIN LATERAL (
+                              SELECT view_count, like_count, comment_count
+                              FROM video_stat_snapshots
+                              WHERE video_id = v.id
+                              ORDER BY fetched_at DESC LIMIT 1
+                            ) stats ON TRUE
+                            WHERE segment.search_terms @> %s::text[]
+                              AND (
+                                %s::uuid IS NULL
+                                OR EXISTS (
+                                  SELECT 1
+                                  FROM collection_target_videos membership
+                                  JOIN collection_subscriptions subscription
+                                    ON subscription.target_id = membership.target_id
+                                  WHERE membership.video_id = v.id
+                                    AND subscription.user_id = %s::uuid
+                                )
+                              )
+                            ORDER BY v.source_fetched_at DESC NULLS LAST,
+                                     segment.sequence
+                            LIMIT %s
+                            """,
+                            (transcript_terms, owner_id, owner_id, candidate_limit),
+                        )
+                        transcript_by_video: dict[str, dict[str, Any]] = {}
+                        for row in cursor.fetchall():
+                            video_id = str(row["youtube_video_id"])
+                            transcript_by_video.setdefault(
+                                video_id,
+                                {
+                                    "video": self._video(row),
+                                    "score": 0.9,
+                                    "matched_fields": ["transcript"],
+                                    "snippet": {
+                                        "text": row["transcript_snippet"],
+                                        "startMs": int(row["start_ms"]),
+                                        "durationMs": int(row["duration_ms"]),
+                                        "matchedTerms": transcript_terms,
+                                    },
+                                },
+                            )
+                        existing_by_video = {
+                            item["video"].youtube_video_id: item
+                            for item in video_results
+                        }
+                        for video_id, transcript_result in transcript_by_video.items():
+                            existing = existing_by_video.get(video_id)
+                            if existing is None:
+                                video_results.append(transcript_result)
+                                continue
+                            if "transcript" not in existing["matched_fields"]:
+                                existing["matched_fields"].append("transcript")
+                            existing["snippet"] = transcript_result["snippet"]
+                            existing["score"] = max(existing["score"], 0.9)
 
             comment_results: list[dict[str, Any]] = []
             if scope in {"all", "comments"} and not short_query:
@@ -658,8 +811,12 @@ class PostgresExploreMixin:
                     comment_order = "search_candidate.search_score DESC, search_candidate.source_fetched_at DESC NULLS LAST"
                     comment_limit = ""
                     comment_params: tuple[Any, ...] = (
-                        normalized_query, *exact_patterns, normalized_query,
-                        owner_id, owner_id, candidate_limit,
+                        normalized_query,
+                        *exact_patterns,
+                        normalized_query,
+                        owner_id,
+                        owner_id,
+                        candidate_limit,
                     )
                 else:
                     comment_cte = ""
@@ -677,9 +834,14 @@ class PostgresExploreMixin:
                     comment_match = "lower(COALESCE(cm.text_display, '')) ILIKE ALL(%s)"
                     comment_order = "cm.source_fetched_at DESC NULLS LAST"
                     comment_limit = "LIMIT %s"
-                    comment_params = (owner_id, owner_id, exact_patterns, candidate_limit)
+                    comment_params = (
+                        owner_id,
+                        owner_id,
+                        exact_patterns,
+                        candidate_limit,
+                    )
                 cursor.execute(
-                f"""
+                    f"""
                 {comment_cte}
                 SELECT cm.id::text AS comment_id, cm.youtube_comment_id, cm.youtube_parent_comment_id,
                        cm.youtube_thread_id, cm.author_channel_id, cm.author_display_name, cm.text_display, cm.like_count, cm.published_at AS comment_published_at,
@@ -702,33 +864,66 @@ class PostgresExploreMixin:
                 ORDER BY {comment_order}
                 {comment_limit}
                 """,
-                comment_params,
+                    comment_params,
                 )
                 for row in cursor.fetchall():
-                    score, matched_fields = rank_text_fields(query, {"comment": row.get("text_display")})
+                    score, matched_fields = rank_text_fields(
+                        query, {"comment": row.get("text_display")}
+                    )
                     if not matched_fields:
                         continue
-                    comment = self._comment({
-                    "id": row["comment_id"], "youtube_comment_id": row["youtube_comment_id"],
-                    "youtube_video_id": row["youtube_video_id"], "youtube_parent_comment_id": row.get("youtube_parent_comment_id"),
-                    "youtube_thread_id": row.get("youtube_thread_id"), "author_channel_id": row.get("author_channel_id"),
-                    "author_display_name": row.get("author_display_name"), "text_display": row.get("text_display"),
-                    "like_count": row.get("like_count"), "published_at": row.get("comment_published_at"),
-                    "updated_at": row.get("comment_updated_at"), "source_fetched_at": row.get("comment_fetched_at"),
-                    })
-                    video = self._video({
-                    "id": row["video_db_id"], "youtube_video_id": row["youtube_video_id"],
-                    "youtube_channel_id": row.get("youtube_channel_id"), "title": row.get("title"),
-                    "description": row.get("description"), "published_at": row.get("published_at"),
-                    "duration_seconds": row.get("duration_seconds"), "privacy_status": row.get("privacy_status"),
-                    "made_for_kids": row.get("made_for_kids"), "source_fetched_at": row.get("source_fetched_at"),
-                    "statistics": row.get("statistics"),
-                    })
-                    comment_results.append({
-                        "comment": comment, "video": video, "channel_title": row.get("channel_title"),
-                        "score": score, "matched_fields": matched_fields,
-                    })
+                    comment = self._comment(
+                        {
+                            "id": row["comment_id"],
+                            "youtube_comment_id": row["youtube_comment_id"],
+                            "youtube_video_id": row["youtube_video_id"],
+                            "youtube_parent_comment_id": row.get(
+                                "youtube_parent_comment_id"
+                            ),
+                            "youtube_thread_id": row.get("youtube_thread_id"),
+                            "author_channel_id": row.get("author_channel_id"),
+                            "author_display_name": row.get("author_display_name"),
+                            "text_display": row.get("text_display"),
+                            "like_count": row.get("like_count"),
+                            "published_at": row.get("comment_published_at"),
+                            "updated_at": row.get("comment_updated_at"),
+                            "source_fetched_at": row.get("comment_fetched_at"),
+                        }
+                    )
+                    video = self._video(
+                        {
+                            "id": row["video_db_id"],
+                            "youtube_video_id": row["youtube_video_id"],
+                            "youtube_channel_id": row.get("youtube_channel_id"),
+                            "title": row.get("title"),
+                            "description": row.get("description"),
+                            "published_at": row.get("published_at"),
+                            "duration_seconds": row.get("duration_seconds"),
+                            "privacy_status": row.get("privacy_status"),
+                            "made_for_kids": row.get("made_for_kids"),
+                            "source_fetched_at": row.get("source_fetched_at"),
+                            "statistics": row.get("statistics"),
+                        }
+                    )
+                    comment_results.append(
+                        {
+                            "comment": comment,
+                            "video": video,
+                            "channel_title": row.get("channel_title"),
+                            "score": score,
+                            "matched_fields": matched_fields,
+                        }
+                    )
 
-            video_results.sort(key=lambda item: (item["score"], item["video"].source_fetched_at), reverse=True)
-            comment_results.sort(key=lambda item: (item["score"], item["comment"].source_fetched_at), reverse=True)
-            return {"videos": video_results[:limit], "comments": comment_results[:limit]}
+            video_results.sort(
+                key=lambda item: (item["score"], item["video"].source_fetched_at),
+                reverse=True,
+            )
+            comment_results.sort(
+                key=lambda item: (item["score"], item["comment"].source_fetched_at),
+                reverse=True,
+            )
+            return {
+                "videos": video_results[:limit],
+                "comments": comment_results[:limit],
+            }

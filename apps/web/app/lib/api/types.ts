@@ -213,6 +213,12 @@ export interface CollectedSearchVideo {
   video: CollectedVideo;
   score: number;
   matchedFields: string[];
+  transcriptSnippet?: {
+    text: string;
+    startMs: number;
+    durationMs: number;
+    matchedTerms: string[];
+  };
 }
 
 export interface CollectedSearchComment {
@@ -312,6 +318,20 @@ export interface AnalysisCommentSignals {
   questionSampleSize: number;
 }
 
+export interface TfidfKeyword {
+  term: string;
+  score: number;
+  termCount: number;
+  documentCount: number;
+  documentRate: number;
+}
+
+export interface AnalysisKeywordCoverage {
+  indexedVideoDocuments: number;
+  indexedCommentDocuments: number;
+  analyzerVersion: string;
+}
+
 export interface AnalysisOverview {
   summary: WorkspaceAnalysisSummary;
   videoTrend: AnalysisTrendPoint[];
@@ -321,6 +341,9 @@ export interface AnalysisOverview {
   topVideos: AnalysisVideo[];
   topComments: AnalysisComment[];
   topWords: TopWord[];
+  videoKeywords: TfidfKeyword[];
+  commentKeywords: TfidfKeyword[];
+  keywordCoverage: AnalysisKeywordCoverage;
   commentSignals: AnalysisCommentSignals;
   coverage: AnalysisCoverage;
 }

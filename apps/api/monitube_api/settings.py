@@ -50,6 +50,10 @@ class Settings:
     enable_explore_rollup: bool
     enable_search_trigram: bool
     enable_redis_derived_cache: bool
+    enable_nlp_indexing: bool
+    nlp_index_batch_size: int
+    nlp_index_lease_seconds: int
+    enable_transcript_search: bool
 
     @property
     def key_fingerprint(self) -> str | None:
@@ -141,6 +145,10 @@ class Settings:
             enable_explore_rollup=enabled("ENABLE_EXPLORE_ROLLUP", False),
             enable_search_trigram=enabled("ENABLE_SEARCH_TRIGRAM"),
             enable_redis_derived_cache=enabled("ENABLE_REDIS_DERIVED_CACHE", False),
+            enable_nlp_indexing=enabled("ENABLE_NLP_INDEXING", True),
+            nlp_index_batch_size=positive_int("NLP_INDEX_BATCH_SIZE", 10),
+            nlp_index_lease_seconds=positive_int("NLP_INDEX_LEASE_SECONDS", 300),
+            enable_transcript_search=enabled("ENABLE_TRANSCRIPT_SEARCH", True),
         )
 
 
@@ -163,6 +171,7 @@ def create_repository(settings: Settings):
             enable_comment_rollup_read=settings.enable_comment_rollup_read,
             enable_explore_rollup=settings.enable_explore_rollup,
             enable_search_trigram=settings.enable_search_trigram,
+            enable_transcript_search=settings.enable_transcript_search,
         )
         if settings.database_url
         else InMemoryRepository()

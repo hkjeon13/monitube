@@ -54,6 +54,7 @@ from .postgres_comments import PostgresCommentReadMixin
 from .postgres_analysis import PostgresAnalysisMixin
 from .postgres_explore import PostgresExploreMixin
 from .postgres_jobs import PostgresJobMixin
+from .postgres_nlp import PostgresNlpMixin
 from .postgres_results import PostgresResultMixin
 from .postgres_writes import PostgresCollectionWriteMixin
 from ..repositories import (
@@ -84,6 +85,7 @@ class PostgresRepository(
     PostgresAnalysisMixin,
     PostgresExploreMixin,
     PostgresJobMixin,
+    PostgresNlpMixin,
     PostgresCollectionWriteMixin,
     PostgresResultMixin,
     CollectionRepository,
@@ -110,6 +112,7 @@ class PostgresRepository(
         enable_comment_rollup_read: bool = False,
         enable_explore_rollup: bool = False,
         enable_search_trigram: bool = True,
+        enable_transcript_search: bool = True,
     ) -> None:
         if not database_url:
             raise ValueError("database_url is required")
@@ -123,6 +126,7 @@ class PostgresRepository(
         self.enable_comment_rollup_read = enable_comment_rollup_read
         self.enable_explore_rollup = enable_explore_rollup
         self.enable_search_trigram = enable_search_trigram
+        self.enable_transcript_search = enable_transcript_search
         self._pool: Any | None = None
         if connect is None and ConnectionPool is not None:
             self._pool = ConnectionPool(
@@ -155,7 +159,7 @@ class PostgresRepository(
                 """
                 SELECT EXISTS (
                   SELECT 1 FROM monitube_schema_migrations
-                  WHERE filename = '019_noun_only_analysis_pipeline.sql'
+                  WHERE filename = '020_transcript_search_mecab_tfidf.sql'
                 ) AS migration_current
                 """
             )

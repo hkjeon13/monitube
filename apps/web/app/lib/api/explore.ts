@@ -61,7 +61,23 @@ export async function searchCollected(query: string, scope: CollectedSearchScope
       const video = normalizeVideo(itemRecord?.video);
       const score = asNumber(itemRecord?.score);
       if (!video || score === undefined) return [];
-      return [{ video, score, matchedFields: asTextArray(firstArray(itemRecord ?? {}, ["matchedFields", "matched_fields"])) }];
+      const rawSnippet = asRecord(itemRecord?.transcriptSnippet ?? itemRecord?.transcript_snippet);
+      const snippetText = asText(rawSnippet?.text);
+      const startMs = asNumber(rawSnippet?.startMs ?? rawSnippet?.start_ms);
+      const durationMs = asNumber(rawSnippet?.durationMs ?? rawSnippet?.duration_ms);
+      return [{
+        video,
+        score,
+        matchedFields: asTextArray(firstArray(itemRecord ?? {}, ["matchedFields", "matched_fields"])),
+        ...(snippetText && startMs !== undefined && durationMs !== undefined ? {
+          transcriptSnippet: {
+            text: snippetText,
+            startMs,
+            durationMs,
+            matchedTerms: asTextArray(firstArray(rawSnippet ?? {}, ["matchedTerms", "matched_terms"])),
+          },
+        } : {}),
+      }];
     }),
     comments: firstArray(record ?? {}, ["comments"]).flatMap((item) => {
       const itemRecord = asRecord(item);

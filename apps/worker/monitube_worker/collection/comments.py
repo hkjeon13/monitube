@@ -11,6 +11,44 @@ from .parsing import as_int, parse_rfc3339
 
 
 class CommentCollectionMixin:
+    @staticmethod
+    def _is_unavailable_comment_error(exc: YouTubeApiError) -> bool:
+        """Treat resource-scoped comment access failures as skippable.
+
+        YouTube sometimes reports deleted/private videos or restricted comments
+        as a generic 403 ``forbidden`` response instead of the more specific
+        ``commentsDisabled``/``videoNotFound`` reasons.  Keep quota, rate-limit,
+        and credential failures on their existing retry/failure paths.
+        """
+
+        classification = classify_youtube_error(
+            exc.status_code,
+            exc.reasons,
+            quota_bucket=exc.bucket,
+        )
+        return (
+            classification.category is YoutubeErrorCategory.RESOURCE_UNAVAILABLE
+            or (
+                exc.status_code == 403
+                and classification.category is YoutubeErrorCategory.PERMISSION
+            )
+        )
+
+    def _record_unavailable_comments(
+        self,
+        job: JobRecord,
+        *,
+        scope: str,
+        exc: YouTubeApiError,
+    ) -> None:
+        self._add_partial_error(
+            job,
+            scope=scope,
+            code="comments_unavailable",
+            message=str(exc),
+            retryable=False,
+        )
+
     def _comment_from_item(self, *, video_id: str, thread_id: str, item: Mapping[str, Any], parent_id: str | None = None) -> CommentRecord:
         snippet = item.get("snippet") or {}
         author_channel = snippet.get("authorChannelId") or {}
@@ -73,15 +111,34 @@ class CommentCollectionMixin:
         count = 0
         page_token: str | None = None
         while True:
-            payload = self._call(
-                job,
-                "comments",
-                part="snippet",
-                parentId=parent_comment_id,
-                maxResults=100,
-                textFormat="plainText",
-                pageToken=page_token,
-            )
+            try:
+                payload = self._call(
+                    job,
+                    "comments",
+                    part="snippet",
+                    parentId=parent_comment_id,
+                    maxResults=100,
+                    textFormat="plainText",
+                    pageToken=page_token,
+                )
+            except YouTubeApiError as exc:
+                if self._is_unavailable_comment_error(exc):
+                    self._record_unavailable_comments(
+                        job,
+                        scope="comment",
+                        exc=exc,
+                    )
+                    # This reply traversal is intentionally skipped.  Commit the
+                    # parent cursor when it belongs to the final traversal so a
+                    # resumed job does not retry the same inaccessible replies.
+                    if final_checkpoint is not None:
+                        self._persist_comment_page(
+                            [],
+                            job_id=job.id,
+                            checkpoint=final_checkpoint,
+                        )
+                    return count
+                raise
             reply_page = [
                 self._comment_from_item(
                     video_id=video_id,
@@ -125,9 +182,12 @@ class CommentCollectionMixin:
                     pageToken=page_token,
                 )
             except YouTubeApiError as exc:
-                classification = classify_youtube_error(exc.status_code, exc.reasons, quota_bucket=exc.bucket)
-                if classification.category is YoutubeErrorCategory.RESOURCE_UNAVAILABLE:
-                    self._add_partial_error(job, scope="video", code=exc.reasons[0] if exc.reasons else "comments_unavailable", message=str(exc), retryable=False)
+                if self._is_unavailable_comment_error(exc):
+                    self._record_unavailable_comments(
+                        job,
+                        scope="video",
+                        exc=exc,
+                    )
                     return count
                 raise
             threads = payload.get("items", [])
