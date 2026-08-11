@@ -159,7 +159,7 @@ class PostgresRepository(
                 """
                 SELECT EXISTS (
                   SELECT 1 FROM monitube_schema_migrations
-                  WHERE filename = '020_transcript_search_mecab_tfidf.sql'
+                  WHERE filename = '021_nlp_queue_claim_indexes.sql'
                 ) AS migration_current
                 """
             )

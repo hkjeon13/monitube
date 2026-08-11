@@ -155,7 +155,7 @@ def test_summary_reads_and_cutover_gate_reject_legacy_analysis_runs() -> None:
 def test_readiness_requires_latest_search_statistics_migration() -> None:
     readiness_sql = getsource(PostgresRepository.check_readiness)
 
-    assert "020_transcript_search_mecab_tfidf.sql" in readiness_sql
+    assert "021_nlp_queue_claim_indexes.sql" in readiness_sql
     assert "015_database_performance_foundation.sql" not in readiness_sql
 
 

@@ -17,30 +17,43 @@ class PostgresNlpMixin:
         lease_seconds: int,
     ) -> dict[str, Any] | None:
         with self._connection() as connection, connection.cursor() as cursor:
-            cursor.execute(
-                """
-                WITH candidate AS (
-                  SELECT source_kind, source_id, state AS requested_state
-                  FROM nlp_documents
-                  WHERE state IN ('pending', 'delete_pending')
-                     OR (state = 'running' AND lease_expires_at < now())
-                  ORDER BY CASE state WHEN 'delete_pending' THEN 0 ELSE 1 END,
-                           updated_at, source_id
-                  FOR UPDATE SKIP LOCKED
-                  LIMIT 1
-                )
-                UPDATE nlp_documents document
-                   SET state = 'running', lease_owner = %s,
-                       lease_expires_at = now() + (%s * interval '1 second'),
-                       updated_at = now()
-                  FROM candidate
-                 WHERE document.source_kind = candidate.source_kind
-                   AND document.source_id = candidate.source_id
-                RETURNING document.*, candidate.requested_state
-                """,
-                (worker_id, lease_seconds),
+            row = None
+            # Keep each queue class on an index-ordered partial scan.  A single
+            # OR/CASE query forces PostgreSQL to sort the entire pending corpus,
+            # which is prohibitively expensive during the initial backfill.
+            queue_order = (
+                ("state = 'delete_pending'", "updated_at, source_id"),
+                (
+                    "state = 'running' AND lease_expires_at < now()",
+                    "lease_expires_at, updated_at, source_id",
+                ),
+                ("state = 'pending'", "updated_at, source_id"),
             )
-            row = cursor.fetchone()
+            for predicate, order_by in queue_order:
+                cursor.execute(
+                    f"""
+                    WITH candidate AS (
+                      SELECT source_kind, source_id, state AS requested_state
+                      FROM nlp_documents
+                      WHERE {predicate}
+                      ORDER BY {order_by}
+                      FOR UPDATE SKIP LOCKED
+                      LIMIT 1
+                    )
+                    UPDATE nlp_documents document
+                       SET state = 'running', lease_owner = %s,
+                           lease_expires_at = now() + (%s * interval '1 second'),
+                           updated_at = now()
+                      FROM candidate
+                     WHERE document.source_kind = candidate.source_kind
+                       AND document.source_id = candidate.source_id
+                    RETURNING document.*, candidate.requested_state
+                    """,
+                    (worker_id, lease_seconds),
+                )
+                row = cursor.fetchone()
+                if row:
+                    break
             if not row:
                 return None
             document = dict(row)

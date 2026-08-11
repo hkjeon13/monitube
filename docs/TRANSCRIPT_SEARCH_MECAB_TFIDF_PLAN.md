@@ -704,6 +704,7 @@ Analysis의 언어 패널을 뷰에 따라 분리한다.
 - `apps/api/monitube_api/infrastructure/postgres_*`: NLP queue/term 저장, scope membership, 증분 N/DF/TF와 TF-IDF SQL
 - `apps/api/monitube_api/infrastructure/memory_*`: 동일 계약의 테스트 구현
 - `database/migrations/020_transcript_search_mecab_tfidf.sql`: additive schema/index
+- `database/migrations/021_nlp_queue_claim_indexes.sql`: 대규모 초기 백필에서도 전체 큐 정렬 없이 delete/만료 lease/pending 문서를 전용 partial index로 claim
 
 ### Worker
 
