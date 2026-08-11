@@ -68,10 +68,16 @@ class JobRunner:
                 lease_expires_at=None,
             )
         except RetryableCollectionError as exc:
+            latest_stage = self.repository.get_job(job_id).current_stage
+            retry_stage = (
+                latest_stage
+                if latest_stage in {"waiting_for_video_jobs", "waiting_for_quota"}
+                else "waiting_to_retry"
+            )
             return self.repository.transition_job(
                 job_id,
                 JobState.WAITING_RETRY,
-                current_stage="waiting_to_retry",
+                current_stage=retry_stage,
                 pause_reason=str(exc),
                 resume_at=utcnow() + timedelta(seconds=exc.retry_after_seconds),
                 resume_is_automatic=True,

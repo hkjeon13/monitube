@@ -69,6 +69,11 @@ class SourceRecord:
     # Populated for read models such as the Sources list.  It is intentionally
     # not a persisted source column: a job is the durable owner of progress.
     latest_job: JobRecord | None = None
+    # Read-model counters. They represent the distinct data currently visible
+    # through this source/target and are deliberately separate from latest-job
+    # progress.
+    stored_video_count: int = 0
+    stored_comment_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)

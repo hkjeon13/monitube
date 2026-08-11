@@ -19,15 +19,13 @@ import {
   type WorkspacePage,
 } from "./workbench-model";
 
-function collectionRate(progress: JobStatus["progress"] | undefined, state: JobStatus["state"] | undefined) {
-  if (!progress) return undefined;
-  if (progress.total === undefined) {
-    return state === "completed" || state === "completed_with_warnings" ? 100 : undefined;
-  }
-  if (progress.total <= 0) {
-    return state === "completed" || state === "completed_with_warnings" ? 100 : 0;
-  }
-  return Math.min(100, Math.max(0, Math.round((progress.completed / progress.total) * 100)));
+function progressCopy(progress: JobStatus["progress"] | undefined) {
+  if (!progress) return "기록 없음";
+  if (progress.total === undefined) return `${formatCount(progress.completed)}개 처리`;
+  if (progress.total <= 0) return "대상 없음";
+  const rate = (progress.completed / progress.total) * 100;
+  const percent = progress.completed > 0 && rate < 1 ? "<1%" : `${Math.round(rate)}%`;
+  return `${percent} · ${formatCount(progress.completed)}/${formatCount(progress.total)}`;
 }
 
 type StatusPageProps = {
@@ -155,8 +153,8 @@ export function SourcesPage({
             <span>구분</span>
             <span>수집 대상</span>
             <span>수집 상태</span>
-            <span>영상 수집률</span>
-            <span>댓글 수집률</span>
+            <span>보유 데이터</span>
+            <span>이번 수집</span>
             <span className="source-table-actions-header">관리</span>
           </div>
           {displayedSources.map((source) => {
@@ -167,10 +165,17 @@ export function SourcesPage({
             const targetValue = sourceTargetValue(source);
             const channelName = channel?.title ?? channel?.handle ?? (source.type === "channel" ? "채널 정보 확인 중" : targetValue);
             const channelId = channel?.youtubeChannelId ?? targetValue;
-            const keywordVideoRate = source.type === "keyword" ? collectionRate(source.latestJob?.videoProgress, source.latestJob?.state) : undefined;
-            const keywordCommentRate = source.type === "keyword" ? collectionRate(source.latestJob?.commentProgress, source.latestJob?.state) : undefined;
-            const videoCollectionRate = source.type === "keyword" ? keywordVideoRate : channel?.videoCollectionRate;
-            const commentCollectionRate = source.type === "keyword" ? keywordCommentRate : channel?.commentCollectionRate;
+            const reportedVideoCount = source.type === "channel" ? channel?.youtubeVideoCount : undefined;
+            const coverageRate = reportedVideoCount && reportedVideoCount > 0
+              ? Math.min(100, Math.round((source.storedVideoCount / reportedVideoCount) * 100))
+              : undefined;
+            const storedVideoCopy = reportedVideoCount && reportedVideoCount > 0
+              ? `영상 ${formatCount(source.storedVideoCount)}/${formatCount(reportedVideoCount)}${source.storedVideoCount > reportedVideoCount ? " · 채널 수치 갱신 필요" : ` · ${coverageRate}%`}`
+              : `영상 ${formatCount(source.storedVideoCount)}개${source.type === "channel" ? " · 전체 수 미확인" : ""}`;
+            const latestVideoCopy = progressCopy(source.latestJob?.videoProgress);
+            const latestCommentCopy = source.config.includeComments === true
+              ? progressCopy(source.latestJob?.commentProgress)
+              : "댓글 수집 안 함";
             return (
               <article key={source.id} className={`source-page-card${source.id === activeSourceId ? " source-page-card-active" : ""}${menuOpen ? " source-page-card-menu-open" : ""}`}>
                 <button type="button" className="source-page-select" onClick={() => { onMenuChange(null); onOpen(source.id); }} aria-label={`${sourceLabel(source)} 작업 공간 열기`}>
@@ -178,8 +183,8 @@ export function SourcesPage({
                   <strong title={channelId}>{channelName}</strong>
                 </button>
                 <SourceCollectionState source={source} />
-                <span className="source-collection-rate source-video-collection-rate">{videoCollectionRate === undefined ? "—" : `${videoCollectionRate}%`}</span>
-                <span className="source-collection-rate source-comment-collection-rate">{commentCollectionRate === undefined ? "—" : `${commentCollectionRate}%`}</span>
+                <span className="source-collection-rate source-video-collection-rate"><strong>{storedVideoCopy}</strong><small>댓글 {formatCount(source.storedCommentCount)}개</small></span>
+                <span className="source-collection-rate source-comment-collection-rate"><strong>영상 {latestVideoCopy}</strong><small>{latestCommentCopy}</small></span>
                 <div className="source-card-actions">
                   <button className="source-more-button" type="button" disabled={deletingSourceId === source.id} onClick={() => onMenuChange(menuOpen ? null : source.id)} aria-label={`${sourceLabel(source)} 관리 메뉴`} aria-expanded={menuOpen} aria-haspopup="menu"><EllipsisHorizontalIcon aria-hidden="true" /></button>
                   {menuOpen && <div className="source-action-menu" role="menu" aria-label={`${sourceLabel(source)} 관리`}>

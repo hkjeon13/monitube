@@ -74,6 +74,8 @@ export interface JobProgress {
   completed: number;
   total?: number;
   unit: "sources" | "pages" | "videos" | "comments";
+  failed?: number;
+  waitingQuota?: number;
 }
 
 export interface JobStatus {
@@ -82,6 +84,7 @@ export interface JobStatus {
   currentStage: string;
   progress: JobProgress;
   videoProgress?: JobProgress;
+  transcriptProgress?: JobProgress;
   commentProgress?: JobProgress;
   pauseReason?: string;
   quotaBucket?: QuotaBucket;
@@ -97,4 +100,6 @@ export interface CollectionSource {
   config: ChannelSourceConfig | KeywordSourceConfig | VideoSourceConfig;
   nextRunAt?: string;
   latestJob?: JobStatus;
+  storedVideoCount?: number;
+  storedCommentCount?: number;
 }

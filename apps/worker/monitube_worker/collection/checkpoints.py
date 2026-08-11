@@ -8,6 +8,9 @@ from .parsing import as_int
 DURABLE_CHECKPOINT_KEYS = (
     "jobKind",
     "youtubeVideoId",
+    "youtubeVideoIds",
+    "batchNumber",
+    "batchKey",
     "fanoutDiscovered",
     "fanoutVideoCount",
     "phaseProgress",
@@ -62,13 +65,20 @@ def with_phase_progress(
     phase: str,
     completed: int,
     total: int | None,
+    failed: int = 0,
+    waiting_quota: int = 0,
 ) -> dict[str, Any]:
     checkpoint = dict(active)
     existing = checkpoint.get("phaseProgress")
     phases = dict(existing) if isinstance(existing, dict) else {}
-    phases[phase] = {
+    item = {
         "completed": max(0, completed),
         "total": max(0, total) if total is not None else None,
     }
+    if failed > 0:
+        item["failed"] = failed
+    if waiting_quota > 0:
+        item["waitingQuota"] = waiting_quota
+    phases[phase] = item
     checkpoint["phaseProgress"] = phases
     return checkpoint

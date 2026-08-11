@@ -407,6 +407,12 @@ export function activeJobPollingDelay(entries: ActiveSourceJob[], failureCount =
     return Math.round(backoff * (0.8 + Math.random() * 0.4));
   }
   if (entries.length === 0) return 15_000;
+  const coordinatingFanout = entries.some(({ job }) => (
+    ["waiting_for_video_jobs", "waiting_for_quota"].includes(job.currentStage)
+    && job.videoProgress?.total !== undefined
+    && job.videoProgress.completed < job.videoProgress.total
+  ));
+  if (coordinatingFanout) return 5_000;
   const waitingJobs = entries.filter(({ job }) => job.state === "waiting_quota" || job.state === "waiting_retry");
   if (waitingJobs.length !== entries.length) return 5_000;
   const nextResumeIn = Math.min(...waitingJobs.map(({ job }) => {
@@ -444,9 +450,28 @@ export function sourceCollectionState(source: SourceSummary) {
   const job = source.latestJob;
   if (!job) return { label: "정지", tone: "idle" };
   if (job.state === "failed") return { label: "실패", tone: "failed" };
-  if (job.state === "running" || job.state === "queued" || job.state === "waiting_quota" || job.state === "waiting_retry") {
-    return { label: "진행 중", tone: "running" };
+  const phaseQuotaWaiting = (job.videoProgress?.waitingQuota ?? 0) > 0
+    || (job.commentProgress?.waitingQuota ?? 0) > 0;
+  if (job.state === "waiting_quota" || job.currentStage === "waiting_for_quota" || phaseQuotaWaiting) {
+    return { label: "할당량 대기", tone: "waiting" };
   }
+  if (job.state === "waiting_retry") {
+    return job.currentStage === "waiting_for_video_jobs"
+      ? { label: "영상 처리 중", tone: "running" }
+      : { label: "재시도 대기", tone: "waiting" };
+  }
+  if (job.state === "queued") return { label: "대기 중", tone: "waiting" };
+  if (job.state === "running") {
+    const label = job.currentStage.includes("comment")
+      ? "댓글 수집 중"
+      : job.currentStage.includes("transcript")
+        ? "대본 수집 중"
+        : job.currentStage.includes("discover") || job.currentStage.includes("search")
+          ? "영상 찾는 중"
+          : "영상 정보 저장 중";
+    return { label, tone: "running" };
+  }
+  if (job.state === "completed_with_warnings") return { label: "일부 경고와 함께 완료", tone: "completed" };
   return { label: "완료", tone: "completed" };
 }
 

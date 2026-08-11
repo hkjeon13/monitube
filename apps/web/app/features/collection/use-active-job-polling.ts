@@ -84,6 +84,7 @@ export function useActiveJobPolling({
     let timer: number | undefined;
     let controller: AbortController | null = null;
     let failureCount = 0;
+    let lastLiveRefreshAt = 0;
 
     const readLegacyActiveJobs = async (signal: AbortSignal) => {
       const candidates: ActiveSourceJob[] = sourcesRef.current.flatMap((source) => (
@@ -146,6 +147,16 @@ export function useActiveJobPolling({
         const disappeared = [...previous.entries()].flatMap(([key, entry]) => current.has(key) ? [] : [entry]);
         activeJobsRef.current = current;
 
+        const progressChangedSourceIds = new Set(activeEntries.flatMap((entry) => {
+          const prior = previous.get(activeJobKey(entry));
+          if (!prior) return [];
+          const changed = prior.job.videoProgress?.completed !== entry.job.videoProgress?.completed
+            || prior.job.commentProgress?.completed !== entry.job.commentProgress?.completed
+            || prior.job.state !== entry.job.state
+            || prior.job.currentStage !== entry.job.currentStage;
+          return changed ? [entry.sourceId] : [];
+        }));
+
         const latestBySource = new Map<string, ActiveSourceJob>();
         for (const entry of [...activeEntries, ...explicitTerminal]) latestBySource.set(entry.sourceId, entry);
         setSources((currentSources) => currentSources.map((source) => {
@@ -176,6 +187,16 @@ export function useActiveJobPolling({
             affectedSourceIds.has(selectedSourceId) && selectedSourceId ? refreshResults(selectedSourceId) : Promise.resolve(),
             refreshExplore(),
             page === "jobs" ? refreshRecentFailures() : Promise.resolve(),
+          ]);
+          lastLiveRefreshAt = Date.now();
+        } else if (progressChangedSourceIds.size > 0 && Date.now() - lastLiveRefreshAt >= 8_000) {
+          lastLiveRefreshAt = Date.now();
+          await Promise.all([
+            refreshSources(),
+            progressChangedSourceIds.has(selectedSourceId) && selectedSourceId
+              ? refreshResults(selectedSourceId)
+              : Promise.resolve(),
+            refreshExplore(),
           ]);
         }
       } catch (caught) {

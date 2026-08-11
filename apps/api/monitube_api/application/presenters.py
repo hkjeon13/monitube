@@ -44,6 +44,8 @@ def job_contract(
             completed=max(0, int(item.get("completed") or 0)),
             total=max(0, int(total)) if total is not None else None,
             unit=unit,
+            failed=max(0, int(item.get("failed") or 0)),
+            waitingQuota=max(0, int(item.get("waitingQuota") or 0)),
         )
 
     partial_errors = [
@@ -65,6 +67,7 @@ def job_contract(
             unit=record.progress_unit,
         ),
         videoProgress=phase("videos", "videos"),
+        transcriptProgress=phase("transcripts", "videos"),
         commentProgress=phase("comments", "comments"),
         pauseReason=record.pause_reason,
         quotaBucket=record.quota_bucket,
@@ -85,6 +88,8 @@ def source_contract(record: SourceRecord) -> CollectionSource:
         "coverage": record.coverage,
         "lastCompletedAt": record.last_completed_at,
         "latestJob": job_contract(record.latest_job) if record.latest_job else None,
+        "storedVideoCount": record.stored_video_count,
+        "storedCommentCount": record.stored_comment_count,
     }
     if record.type is SourceType.CHANNEL:
         return ChannelCollectionSource(

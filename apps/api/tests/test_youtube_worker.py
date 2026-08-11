@@ -333,7 +333,8 @@ def test_keyword_history_continues_below_provider_pagination_boundary() -> None:
     assert waiting.checkpoint["keywordHistoricalBackfillComplete"] is True
     assert waiting.checkpoint["keywordBackfill"]["complete"] is True
     total, terminal, failed = repository.child_job_summary(parent_job_id=parent.id)
-    assert (total, terminal, failed) == (4, 0, 0)
+    assert (total, terminal, failed) == (2, 0, 0)
+    assert repository.child_phase_summary(parent_job_id=parent.id)["video_total"] == 4
     assert len(client.search_requests) == 2
     assert client.search_requests[0]["order"] == "date"
     assert client.search_requests[0]["publishedAfter"] == "2005-04-23T00:00:00Z"
@@ -369,7 +370,8 @@ def test_active_legacy_keyword_fanout_is_upgraded_to_historical_backfill() -> No
 
     assert waiting.state is JobState.WAITING_RETRY
     assert waiting.checkpoint["keywordHistoricalBackfillComplete"] is True
-    assert repository.child_job_summary(parent_job_id=parent.id) == (4, 0, 0)
+    assert repository.child_job_summary(parent_job_id=parent.id) == (3, 0, 0)
+    assert repository.child_phase_summary(parent_job_id=parent.id)["video_total"] == 4
 
 
 class QuotaPausedHistoricalKeywordClient:
@@ -456,6 +458,28 @@ class FullChannelClient:
         raise AssertionError(f"Unexpected endpoint: {endpoint}")
 
 
+class BatchChannelClient(FullChannelClient):
+    def request(self, endpoint: str, params: dict[str, object]):
+        if endpoint != "videos":
+            return super().request(endpoint, params)
+        return {
+            "items": [
+                {
+                    "id": video_id,
+                    "snippet": {
+                        "channelId": "UCabcdefghijklmnopqrstuv",
+                        "title": video_id,
+                        "publishedAt": "2025-01-02T03:04:05Z",
+                    },
+                    "contentDetails": {"duration": "PT1M"},
+                    "status": {"privacyStatus": "public"},
+                    "statistics": {"commentCount": "0"},
+                }
+                for video_id in str(params["id"]).split(",")
+            ]
+        }
+
+
 def test_channel_all_content_flags_continue_past_legacy_numeric_limits() -> None:
     repository = InMemoryRepository()
     source = repository.create_source(
@@ -469,44 +493,159 @@ def test_channel_all_content_flags_continue_past_legacy_numeric_limits() -> None
             "maxCommentPagesPerVideo": 1,
         },
     )
-    job = repository.create_job(source_id=source.id, include_comments=True, max_videos=1, max_comments_per_video=1)
+    job = repository.create_job(
+        source_id=source.id,
+        include_comments=True,
+        max_videos=1,
+        max_comments_per_video=1,
+    )
     client = FullChannelClient()
 
     completed = JobRunner(repository, YouTubeCollector(repository, client)).run(job.id)
 
     assert completed.state is JobState.COMPLETED
     assert client.playlist_calls == 2
-    assert completed.checkpoint["phaseProgress"]["videos"] == {"completed": 2, "total": 2}
-    assert completed.checkpoint["phaseProgress"]["comments"] == {"completed": 0, "total": 0}
+    assert completed.checkpoint["phaseProgress"]["videos"] == {
+        "completed": 0,
+        "total": 2,
+        "failed": 2,
+    }
+    assert completed.checkpoint["phaseProgress"]["comments"] == {
+        "completed": 0,
+        "total": 0,
+    }
 
 
-def test_target_channel_fans_out_one_video_job_per_discovered_video() -> None:
+def test_target_channel_fans_out_quota_efficient_video_batches() -> None:
     repository = InMemoryRepository()
     source = repository.create_source(
         source_type=SourceType.CHANNEL,
-        config={"input": "@example", "collectAllVideos": True, "includeComments": False},
+        config={
+            "input": "@example",
+            "collectAllVideos": True,
+            "includeComments": False,
+        },
     )
-    parent = repository.create_job(source_id=source.id, include_comments=False, max_videos=None, max_comments_per_video=None)
+    parent = repository.create_job(
+        source_id=source.id,
+        include_comments=False,
+        max_videos=None,
+        max_comments_per_video=None,
+    )
     repository._jobs[parent.id] = replace(parent, target_id="shared-target")
-    client = FullChannelClient()
+    client = BatchChannelClient()
 
-    waiting_parent = JobRunner(repository, YouTubeCollector(repository, client)).run(parent.id)
+    waiting_parent = JobRunner(repository, YouTubeCollector(repository, client)).run(
+        parent.id
+    )
 
     assert waiting_parent.state is JobState.WAITING_RETRY
+    assert waiting_parent.current_stage == "waiting_for_video_jobs"
     total, terminal, failed = repository.child_job_summary(parent_job_id=parent.id)
-    assert (total, terminal, failed) == (2, 0, 0)
+    assert (total, terminal, failed) == (1, 0, 0)
+    assert repository.child_phase_summary(parent_job_id=parent.id)["video_total"] == 2
 
-    for _ in range(2):
-        child = repository.claim_next_job(worker_id="video-worker")
-        assert child is not None and child.parent_job_id == parent.id
-        assert JobRunner(repository, YouTubeCollector(repository, client)).run(child.id).state is JobState.COMPLETED
+    child = repository.claim_next_job(worker_id="video-worker")
+    assert child is not None and child.parent_job_id == parent.id
+    assert child.checkpoint["jobKind"] == "video_batch"
+    assert child.checkpoint["youtubeVideoIds"] == ["dQw4w9WgXcQ", "M7lc1UVf-VE"]
+    assert (
+        JobRunner(repository, YouTubeCollector(repository, client)).run(child.id).state
+        is JobState.COMPLETED
+    )
 
-    repository.transition_job(waiting_parent.id, JobState.WAITING_RETRY, resume_at=utcnow() - timedelta(seconds=1))
+    repository.transition_job(
+        waiting_parent.id,
+        JobState.WAITING_RETRY,
+        resume_at=utcnow() - timedelta(seconds=1),
+    )
     claimed_parent = repository.claim_next_job(worker_id="parent-worker")
     assert claimed_parent is not None and claimed_parent.id == parent.id
-    completed_parent = JobRunner(repository, YouTubeCollector(repository, client)).run(parent.id)
+    completed_parent = JobRunner(repository, YouTubeCollector(repository, client)).run(
+        parent.id
+    )
     assert completed_parent.state is JobState.COMPLETED
     assert completed_parent.progress_completed == 2
+
+
+def test_video_fanout_chunks_fifty_ids_per_official_detail_request() -> None:
+    repository = InMemoryRepository()
+    source = repository.create_source(
+        source_type=SourceType.CHANNEL,
+        config={"input": "@example", "includeComments": False},
+    )
+    parent = repository.create_job(
+        source_id=source.id,
+        include_comments=False,
+        max_videos=None,
+        max_comments_per_video=None,
+    )
+    ids = [f"video-{index:04d}" for index in range(51)]
+
+    assert repository.enqueue_video_jobs(parent_job=parent, youtube_video_ids=ids) == 2
+    children = sorted(
+        (job for job in repository._jobs.values() if job.parent_job_id == parent.id),
+        key=lambda job: int(job.checkpoint["batchNumber"]),
+    )
+    assert [len(job.checkpoint["youtubeVideoIds"]) for job in children] == [50, 1]
+    assert repository.child_phase_summary(parent_job_id=parent.id)["video_total"] == 51
+
+
+class BatchCommentClient(BatchChannelClient):
+    def request(self, endpoint: str, params: dict[str, object]):
+        payload = super().request(endpoint, params)
+        if endpoint == "videos":
+            for item in payload["items"]:
+                item["statistics"]["commentCount"] = "1"
+        return payload
+
+
+def test_video_batch_persists_metadata_before_independent_comment_job() -> None:
+    repository = InMemoryRepository()
+    source = repository.create_source(
+        source_type=SourceType.CHANNEL,
+        config={"input": "@example", "includeComments": True},
+    )
+    parent = repository.create_job(
+        source_id=source.id,
+        include_comments=True,
+        max_videos=None,
+        max_comments_per_video=1,
+    )
+    repository._jobs[parent.id] = replace(
+        parent,
+        target_id="shared-target",
+        state=JobState.WAITING_RETRY,
+        resume_at=utcnow() + timedelta(hours=1),
+    )
+    repository.enqueue_video_jobs(parent_job=parent, youtube_video_ids=["dQw4w9WgXcQ"])
+    client = BatchCommentClient()
+
+    batch = repository.claim_next_job(worker_id="video-worker")
+    assert batch is not None and batch.checkpoint["jobKind"] == "video_batch"
+    assert (
+        JobRunner(repository, YouTubeCollector(repository, client)).run(batch.id).state
+        is JobState.COMPLETED
+    )
+
+    summary = repository.child_phase_summary(parent_job_id=parent.id)
+    assert summary["video_completed"] == 1
+    assert summary["comment_total"] == 1
+    assert summary["comment_completed"] == 0
+    assert repository.child_job_summary(parent_job_id=parent.id) == (2, 1, 0)
+
+    comment = repository.claim_next_job(worker_id="comment-worker")
+    assert comment is not None and comment.checkpoint["jobKind"] == "comment"
+    assert (
+        JobRunner(repository, YouTubeCollector(repository, client))
+        .run(comment.id)
+        .state
+        is JobState.COMPLETED
+    )
+    assert (
+        repository.child_phase_summary(parent_job_id=parent.id)["comment_completed"]
+        == 1
+    )
 
 
 class IncrementalChannelClient:

@@ -28,6 +28,8 @@ export async function getSourceResults(sourceId: string, signal?: AbortSignal): 
     type: "unknown",
     enabled: true,
     config: {},
+    storedVideoCount: 0,
+    storedCommentCount: 0,
   };
   const videoValues = firstArray(record, ["videos", "items", "results"]);
 

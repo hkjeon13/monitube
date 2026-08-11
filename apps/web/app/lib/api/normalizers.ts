@@ -65,6 +65,8 @@ export function normalizeSource(value: unknown): SourceSummary | null {
     type: asText(record.type) ?? "unknown",
     enabled: record.enabled !== false,
     config: asRecord(record.config) ?? {},
+    storedVideoCount: asNumber(record.storedVideoCount ?? record.stored_video_count) ?? 0,
+    storedCommentCount: asNumber(record.storedCommentCount ?? record.stored_comment_count) ?? 0,
     ...(asText(record.nextRunAt ?? record.next_run_at)
       ? { nextRunAt: asText(record.nextRunAt ?? record.next_run_at) }
       : {}),
@@ -137,6 +139,8 @@ export function normalizeJob(value: unknown): JobStatus | undefined {
       completed: phaseCompleted,
       ...(phaseTotal === undefined ? {} : { total: phaseTotal }),
       unit: (asText(phase.unit) ?? fallbackUnit) as JobStatus["progress"]["unit"],
+      failed: asNumber(phase.failed) ?? 0,
+      waitingQuota: asNumber(phase.waitingQuota ?? phase.waiting_quota) ?? 0,
     };
   };
 
@@ -151,6 +155,9 @@ export function normalizeJob(value: unknown): JobStatus | undefined {
     },
     ...(phaseProgress(record.videoProgress ?? record.video_progress, "videos")
       ? { videoProgress: phaseProgress(record.videoProgress ?? record.video_progress, "videos") }
+      : {}),
+    ...(phaseProgress(record.transcriptProgress ?? record.transcript_progress, "videos")
+      ? { transcriptProgress: phaseProgress(record.transcriptProgress ?? record.transcript_progress, "videos") }
       : {}),
     ...(phaseProgress(record.commentProgress ?? record.comment_progress, "comments")
       ? { commentProgress: phaseProgress(record.commentProgress ?? record.comment_progress, "comments") }

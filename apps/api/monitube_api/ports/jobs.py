@@ -92,8 +92,21 @@ class JobLeaseRepository(Protocol):
         youtube_video_ids: Iterable[str],
     ) -> int: ...
 
+    def enqueue_comment_jobs(
+        self,
+        *,
+        video_batch_job: JobRecord,
+        youtube_video_ids: Iterable[str],
+    ) -> int: ...
+
     def child_job_summary(
         self,
         *,
         parent_job_id: str,
     ) -> tuple[int, int, int]: ...
+
+    def child_phase_summary(
+        self,
+        *,
+        parent_job_id: str,
+    ) -> dict[str, int]: ...

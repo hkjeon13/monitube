@@ -220,7 +220,11 @@ class PostgresRepository(
             canonical_key=row.get("canonical_key"),
             coverage=dict(row.get("coverage") or {}),
             last_completed_at=row.get("last_completed_at"),
-            latest_job=PostgresRepository._job(latest_job) if isinstance(latest_job, dict) else None,
+            latest_job=PostgresRepository._job(latest_job)
+            if isinstance(latest_job, dict)
+            else None,
+            stored_video_count=int(row.get("stored_video_count") or 0),
+            stored_comment_count=int(row.get("stored_comment_count") or 0),
         )
 
     @staticmethod
@@ -626,7 +630,14 @@ class PostgresRepository(
                            target.canonical_key,
                            target.coverage,
                            target.last_completed_at,
-                           latest_job.latest_job
+                           latest_job.latest_job,
+                           (SELECT count(*)::bigint
+                            FROM collection_target_videos membership
+                            WHERE membership.target_id = target.id) AS stored_video_count,
+                           (SELECT count(comment.id)::bigint
+                            FROM collection_target_videos membership
+                            LEFT JOIN comments comment ON comment.video_id = membership.video_id
+                            WHERE membership.target_id = target.id) AS stored_comment_count
                     FROM collection_subscriptions subscription
                     JOIN collection_targets target ON target.id = subscription.target_id
                     LEFT JOIN LATERAL (
@@ -651,7 +662,14 @@ class PostgresRepository(
                            NULL::text AS canonical_key,
                            '{}'::jsonb AS coverage,
                            NULL::timestamptz AS last_completed_at,
-                           latest_job.latest_job
+                           latest_job.latest_job,
+                           (SELECT count(*)::bigint
+                            FROM source_videos membership
+                            WHERE membership.source_id = source.id) AS stored_video_count,
+                           (SELECT count(comment.id)::bigint
+                            FROM source_videos membership
+                            LEFT JOIN comments comment ON comment.video_id = membership.video_id
+                            WHERE membership.source_id = source.id) AS stored_comment_count
                     FROM collection_sources source
                     LEFT JOIN LATERAL (
                       SELECT to_jsonb(job) AS latest_job
@@ -673,7 +691,21 @@ class PostgresRepository(
             cursor.execute(
                 """
                 SELECT cs.id::text, cs.type::text, cs.config, cs.enabled, cs.created_at, cs.updated_at, cs.next_run_at,
-                       cs.target_id::text, ct.canonical_key, ct.coverage, ct.last_completed_at, latest_job.latest_job
+                       cs.target_id::text, ct.canonical_key, ct.coverage, ct.last_completed_at, latest_job.latest_job,
+                       CASE WHEN cs.target_id IS NOT NULL
+                         THEN (SELECT count(*)::bigint FROM collection_target_videos membership WHERE membership.target_id = cs.target_id)
+                         ELSE (SELECT count(*)::bigint FROM source_videos membership WHERE membership.source_id = cs.id)
+                       END AS stored_video_count,
+                       CASE WHEN cs.target_id IS NOT NULL
+                         THEN (SELECT count(comment.id)::bigint
+                               FROM collection_target_videos membership
+                               LEFT JOIN comments comment ON comment.video_id = membership.video_id
+                               WHERE membership.target_id = cs.target_id)
+                         ELSE (SELECT count(comment.id)::bigint
+                               FROM source_videos membership
+                               LEFT JOIN comments comment ON comment.video_id = membership.video_id
+                               WHERE membership.source_id = cs.id)
+                       END AS stored_comment_count
                 FROM collection_sources cs
                 LEFT JOIN collection_targets ct ON ct.id = cs.target_id
                 LEFT JOIN LATERAL (

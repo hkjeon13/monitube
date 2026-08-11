@@ -136,8 +136,24 @@ class InMemoryRepository(
                 or (not record.target_id and job.source_id == record.id)
             )
         ]
-        latest_job = max(latest_candidates, key=lambda job: job.created_at, default=None)
-        source = replace(self._clone_source(record), latest_job=self._clone_job(latest_job) if latest_job else None)
+        latest_job = max(
+            latest_candidates, key=lambda job: job.created_at, default=None
+        )
+        visible_ids = (
+            self._target_videos.get(record.target_id, set())
+            if record.target_id
+            else self._source_videos.get(record.id, set())
+        )
+        source = replace(
+            self._clone_source(record),
+            latest_job=self._clone_job(latest_job) if latest_job else None,
+            stored_video_count=len(visible_ids),
+            stored_comment_count=sum(
+                1
+                for comment in self._comments.values()
+                if comment.youtube_video_id in visible_ids
+            ),
+        )
         if not record.target_id or record.target_id not in self._targets:
             return source
         target = self._targets[record.target_id]
@@ -166,6 +182,7 @@ class InMemoryRepository(
         # Store the complete request config in display_config.  Older/backfilled
         # rows can be empty, in which case target config is the safe fallback.
         config = subscription.display_config or target.config
+        visible_ids = self._target_videos.get(target.id, set())
         return SourceRecord(
             id=subscription.id,
             type=target.type,
@@ -178,6 +195,12 @@ class InMemoryRepository(
             coverage=deepcopy(target.coverage),
             last_completed_at=target.last_completed_at,
             latest_job=self._clone_job(latest_job) if latest_job else None,
+            stored_video_count=len(visible_ids),
+            stored_comment_count=sum(
+                1
+                for comment in self._comments.values()
+                if comment.youtube_video_id in visible_ids
+            ),
         )
 
     def _subscription_for_source_locked(

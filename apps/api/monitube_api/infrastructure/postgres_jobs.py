@@ -31,6 +31,8 @@ from ..repositories import (
 
 
 class PostgresJobMixin:
+    video_batch_size = 50
+
     def _active_runtime_config(self, cursor: Any) -> str:
         cursor.execute("SELECT id::text FROM youtube_runtime_configs WHERE status = 'active' ORDER BY activated_at DESC LIMIT 1")
         row = cursor.fetchone()
@@ -175,23 +177,57 @@ class PostgresJobMixin:
         if not ids:
             return 0
         with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT checkpoint FROM sync_jobs WHERE parent_job_id = %s",
+                (parent_job.id,),
+            )
+            known_ids: set[str] = set()
+            for row in cursor.fetchall():
+                checkpoint = row.get("checkpoint") or {}
+                legacy_id = checkpoint.get("youtubeVideoId")
+                if legacy_id:
+                    known_ids.add(str(legacy_id))
+                batch_ids = checkpoint.get("youtubeVideoIds")
+                if isinstance(batch_ids, list):
+                    known_ids.update(str(value) for value in batch_ids if str(value))
+            ids = [value for value in ids if value not in known_ids]
+            batches = [
+                ids[offset : offset + self.video_batch_size]
+                for offset in range(0, len(ids), self.video_batch_size)
+            ]
+            if not batches:
+                return 0
             cursor.executemany(
                 """
                 INSERT INTO sync_jobs (
                   source_id, runtime_config_id, parent_job_id, state, current_stage,
                   idempotency_key, include_comments, max_videos, max_comments_per_video,
                   progress_total, progress_unit, checkpoint
-                ) VALUES (%s, %s, %s, 'queued', 'queued_video', %s, %s, 1, %s, 1, 'videos', %s)
+                ) VALUES (%s, %s, %s, 'queued', 'queued_video_batch', %s, %s, %s, %s, %s, 'videos', %s)
                 ON CONFLICT (source_id, idempotency_key) DO NOTHING
                 """,
                 [
                     (
-                        parent_job.source_id, parent_job.runtime_config_id, parent_job.id,
-                        f"video:{parent_job.id}:{video_id}", parent_job.include_comments,
+                        parent_job.source_id,
+                        parent_job.runtime_config_id,
+                        parent_job.id,
+                        f"video-batch:{parent_job.id}:{hashlib.sha256(chr(10).join(batch).encode('utf-8')).hexdigest()[:20]}",
+                        parent_job.include_comments,
+                        len(batch),
                         parent_job.max_comments_per_video,
-                        Json({"jobKind": "video", "youtubeVideoId": video_id}),
+                        len(batch),
+                        Json(
+                            {
+                                "jobKind": "video_batch",
+                                "batchNumber": batch_number,
+                                "batchKey": hashlib.sha256(
+                                    "\n".join(batch).encode("utf-8")
+                                ).hexdigest()[:20],
+                                "youtubeVideoIds": batch,
+                            }
+                        ),
                     )
-                    for video_id in ids
+                    for batch_number, batch in enumerate(batches)
                 ],
             )
             return cursor.rowcount
@@ -209,6 +245,146 @@ class PostgresJobMixin:
             )
             row = cursor.fetchone()
             return int(row["total"]), int(row["terminal"]), int(row["failed"])
+
+    def enqueue_comment_jobs(
+        self, *, video_batch_job: JobRecord, youtube_video_ids: Iterable[str]
+    ) -> int:
+        if not video_batch_job.parent_job_id:
+            raise RepositoryError("Comment jobs require a discovery parent")
+        ids = list(
+            dict.fromkeys(str(value) for value in youtube_video_ids if str(value))
+        )
+        if not ids:
+            return 0
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.executemany(
+                """
+                INSERT INTO sync_jobs (
+                  source_id, runtime_config_id, parent_job_id, state, current_stage,
+                  idempotency_key, include_comments, max_videos, max_comments_per_video,
+                  progress_total, progress_unit, checkpoint
+                ) VALUES (%s, %s, %s, 'queued', 'queued_comment', %s, TRUE, 1, %s, 1, 'comments', %s)
+                ON CONFLICT (source_id, idempotency_key) DO NOTHING
+                """,
+                [
+                    (
+                        video_batch_job.source_id,
+                        video_batch_job.runtime_config_id,
+                        video_batch_job.parent_job_id,
+                        f"comment:{video_batch_job.parent_job_id}:{video_id}",
+                        video_batch_job.max_comments_per_video,
+                        Json({"jobKind": "comment", "youtubeVideoId": video_id}),
+                    )
+                    for video_id in ids
+                ],
+            )
+            return cursor.rowcount
+
+    def child_phase_summary(self, *, parent_job_id: str) -> dict[str, int]:
+        """Aggregate successful per-video phases independently of child terminal state."""
+
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                WITH child AS (
+                  SELECT state, current_stage, include_comments, checkpoint,
+                         checkpoint ->> 'jobKind' AS job_kind,
+                         CASE
+                           WHEN jsonb_typeof(checkpoint -> 'youtubeVideoIds') = 'array'
+                             THEN jsonb_array_length(checkpoint -> 'youtubeVideoIds')
+                           ELSE 1
+                         END AS units
+                  FROM sync_jobs
+                  WHERE parent_job_id = %s
+                )
+                SELECT count(*)::integer AS job_total,
+                       count(*) FILTER (WHERE state IN ('completed', 'completed_with_warnings', 'failed', 'cancelled'))::integer AS job_terminal,
+                       count(*) FILTER (WHERE state IN ('failed', 'cancelled'))::integer AS job_failed,
+                       COALESCE(sum(CASE WHEN job_kind IN ('video', 'video_batch') THEN units ELSE 0 END), 0)::integer AS video_total,
+                       COALESCE(sum(
+                         CASE
+                           WHEN job_kind NOT IN ('video', 'video_batch') THEN 0
+                           WHEN checkpoint #> '{phaseProgress,videos}' IS NOT NULL
+                             THEN COALESCE((checkpoint #>> '{phaseProgress,videos,completed}')::integer, 0)
+                           WHEN state IN ('completed', 'completed_with_warnings') THEN units
+                           ELSE 0
+                         END
+                       ), 0)::integer AS video_completed,
+                       COALESCE(sum(
+                         CASE
+                           WHEN job_kind NOT IN ('video', 'video_batch') THEN 0
+                           WHEN COALESCE((checkpoint #>> '{phaseProgress,videos,failed}')::integer, 0) > 0
+                             THEN (checkpoint #>> '{phaseProgress,videos,failed}')::integer
+                           WHEN state IN ('failed', 'cancelled') THEN GREATEST(
+                             units - COALESCE((checkpoint #>> '{phaseProgress,videos,completed}')::integer, 0), 0
+                           )
+                           ELSE 0
+                         END
+                       ), 0)::integer AS video_failed,
+                       COALESCE(sum(
+                         CASE WHEN job_kind IN ('video', 'video_batch') AND state = 'waiting_quota' THEN GREATEST(
+                           units - COALESCE((checkpoint #>> '{phaseProgress,videos,completed}')::integer, 0), 0
+                         ) ELSE 0 END
+                       ), 0)::integer AS video_waiting_quota,
+                       COALESCE(sum(COALESCE((checkpoint #>> '{phaseProgress,transcripts,total}')::integer, 0)), 0)::integer AS transcript_total,
+                       COALESCE(sum(COALESCE((checkpoint #>> '{phaseProgress,transcripts,completed}')::integer, 0)), 0)::integer AS transcript_completed,
+                       COALESCE(sum(
+                         CASE WHEN state IN ('failed', 'cancelled') THEN GREATEST(
+                           COALESCE((checkpoint #>> '{phaseProgress,transcripts,total}')::integer, 0)
+                           - COALESCE((checkpoint #>> '{phaseProgress,transcripts,completed}')::integer, 0), 0
+                         ) ELSE 0 END
+                       ), 0)::integer AS transcript_failed,
+                       COALESCE(sum(
+                         CASE WHEN job_kind = 'comment' OR (job_kind = 'video' AND include_comments)
+                           THEN units ELSE 0 END
+                       ), 0)::integer AS comment_total,
+                       COALESCE(sum(
+                         CASE
+                           WHEN job_kind NOT IN ('video', 'comment') OR NOT include_comments THEN 0
+                           WHEN checkpoint #> '{phaseProgress,comments}' IS NOT NULL
+                             THEN COALESCE((checkpoint #>> '{phaseProgress,comments,completed}')::integer, 0)
+                           WHEN state IN ('completed', 'completed_with_warnings') THEN units
+                           ELSE 0
+                         END
+                       ), 0)::integer AS comment_completed,
+                       COALESCE(sum(
+                         CASE WHEN job_kind IN ('video', 'comment') AND include_comments AND state IN ('failed', 'cancelled') THEN GREATEST(
+                           units - COALESCE((checkpoint #>> '{phaseProgress,comments,completed}')::integer, 0), 0
+                         ) ELSE 0 END
+                       ), 0)::integer AS comment_failed,
+                       COALESCE(sum(
+                         CASE WHEN job_kind IN ('video', 'comment') AND include_comments AND state = 'waiting_quota'
+                           AND (job_kind = 'comment' OR COALESCE((checkpoint #>> '{phaseProgress,videos,completed}')::integer, 0) >= units)
+                         THEN GREATEST(
+                           units - COALESCE((checkpoint #>> '{phaseProgress,comments,completed}')::integer, 0), 0
+                         ) ELSE 0 END
+                       ), 0)::integer AS comment_waiting_quota,
+                       COALESCE(sum(CASE WHEN state = 'waiting_quota' THEN units ELSE 0 END), 0)::integer AS waiting_quota
+                FROM child
+                """,
+                (parent_job_id,),
+            )
+            row = cursor.fetchone() or {}
+            return {
+                key: int(row.get(key) or 0)
+                for key in (
+                    "job_total",
+                    "job_terminal",
+                    "job_failed",
+                    "video_total",
+                    "video_completed",
+                    "video_failed",
+                    "video_waiting_quota",
+                    "transcript_total",
+                    "transcript_completed",
+                    "transcript_failed",
+                    "comment_total",
+                    "comment_completed",
+                    "comment_failed",
+                    "comment_waiting_quota",
+                    "waiting_quota",
+                )
+            }
 
     def _submission(self, cursor: Any, request: CollectionRequestRecord) -> CollectionSubmission:
         cursor.execute("SELECT * FROM collection_targets WHERE id = %s", (request.target_id,))

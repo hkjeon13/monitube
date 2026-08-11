@@ -17,6 +17,8 @@ export interface SourceSummary {
   coverage?: Record<string, unknown>;
   lastCompletedAt?: string;
   latestJob?: JobStatus;
+  storedVideoCount: number;
+  storedCommentCount: number;
 }
 
 export interface AuthUser { username: string; }

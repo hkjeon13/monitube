@@ -154,6 +154,8 @@ class JobProgress(ApiModel):
     completed: int = Field(ge=0)
     total: int | None = Field(default=None, ge=0)
     unit: Literal["sources", "pages", "videos", "comments"] = "sources"
+    failed: int = Field(default=0, ge=0, exclude_if=lambda value: value == 0)
+    waitingQuota: int = Field(default=0, ge=0, exclude_if=lambda value: value == 0)
 
 
 class PartialError(ApiModel):
@@ -172,6 +174,7 @@ class JobStatus(ApiModel):
     # These two values are retained independently in the job checkpoint, so a
     # completed card can state what happened to video details and comments.
     videoProgress: JobProgress | None = None
+    transcriptProgress: JobProgress | None = None
     commentProgress: JobProgress | None = None
     pauseReason: str | None = None
     quotaBucket: QuotaBucket | None = None
@@ -198,6 +201,8 @@ class CollectionSourceBase(ApiModel):
     coverage: dict[str, Any] = Field(default_factory=dict)
     lastCompletedAt: datetime | None = None
     latestJob: JobStatus | None = None
+    storedVideoCount: int = Field(default=0, ge=0)
+    storedCommentCount: int = Field(default=0, ge=0)
 
 
 class TargetPinUpdate(ApiModel):

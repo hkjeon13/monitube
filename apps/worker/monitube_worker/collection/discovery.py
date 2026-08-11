@@ -621,7 +621,7 @@ class DiscoveryCollectionMixin:
             self._set_phase_progress(
                 job,
                 phase="videos",
-                completed=offset + len(batch),
+                completed=len(records),
                 total=len(distinct_ids),
                 current_stage="fetching_videos",
             )

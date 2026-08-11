@@ -3,6 +3,7 @@
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+import hashlib
 from typing import Any, Iterable
 
 from ..collection_policy import (
@@ -32,6 +33,8 @@ from ..repositories import (
 
 
 class MemoryJobMixin:
+    video_batch_size = 50
+
     def create_job(
         self,
         *,
@@ -77,30 +80,60 @@ class MemoryJobMixin:
             self._jobs[record.id] = record
             return self._clone_job(record)
 
-    def enqueue_video_jobs(self, *, parent_job: JobRecord, youtube_video_ids: Iterable[str]) -> int:
-        """Fan out one discovery job into idempotent, independently retryable video jobs."""
+    def enqueue_video_jobs(
+        self, *, parent_job: JobRecord, youtube_video_ids: Iterable[str]
+    ) -> int:
+        """Fan out discovery into quota-efficient, independently retryable batches."""
         with self._lock:
             created = 0
-            known = {
-                str(job.checkpoint.get("youtubeVideoId"))
-                for job in self._jobs.values()
-                if job.parent_job_id == parent_job.id
-            }
-            now = utcnow()
-            for youtube_video_id in dict.fromkeys(str(value) for value in youtube_video_ids):
-                if not youtube_video_id or youtube_video_id in known:
+            known_ids: set[str] = set()
+            for job in self._jobs.values():
+                if job.parent_job_id != parent_job.id:
                     continue
+                legacy_id = job.checkpoint.get("youtubeVideoId")
+                if legacy_id:
+                    known_ids.add(str(legacy_id))
+                batch_ids = job.checkpoint.get("youtubeVideoIds")
+                if isinstance(batch_ids, list):
+                    known_ids.update(str(value) for value in batch_ids if str(value))
+            now = utcnow()
+            ids = [
+                value
+                for value in dict.fromkeys(
+                    str(value) for value in youtube_video_ids if str(value)
+                )
+                if value not in known_ids
+            ]
+            for offset in range(0, len(ids), self.video_batch_size):
+                batch = ids[offset : offset + self.video_batch_size]
+                batch_number = offset // self.video_batch_size
+                batch_key = hashlib.sha256(
+                    "\n".join(batch).encode("utf-8")
+                ).hexdigest()[:20]
                 record = JobRecord(
-                    id=new_id(), source_id=parent_job.source_id, state=JobState.QUEUED,
-                    current_stage="queued_video", progress_completed=0, progress_total=1,
-                    progress_unit="videos", include_comments=parent_job.include_comments,
-                    max_videos=1, max_comments_per_video=parent_job.max_comments_per_video,
-                    checkpoint={"jobKind": "video", "youtubeVideoId": youtube_video_id},
-                    runtime_config_id=parent_job.runtime_config_id, created_at=now, updated_at=now,
+                    id=new_id(),
+                    source_id=parent_job.source_id,
+                    state=JobState.QUEUED,
+                    current_stage="queued_video_batch",
+                    progress_completed=0,
+                    progress_total=len(batch),
+                    progress_unit="videos",
+                    include_comments=parent_job.include_comments,
+                    max_videos=len(batch),
+                    max_comments_per_video=parent_job.max_comments_per_video,
+                    checkpoint={
+                        "jobKind": "video_batch",
+                        "batchNumber": batch_number,
+                        "batchKey": batch_key,
+                        "youtubeVideoIds": batch,
+                    },
+                    runtime_config_id=parent_job.runtime_config_id,
+                    created_at=now,
+                    updated_at=now,
                     parent_job_id=parent_job.id,
                 )
                 self._jobs[record.id] = record
-                known.add(youtube_video_id)
+                known_ids.update(batch)
                 created += 1
             return created
 
@@ -110,6 +143,164 @@ class MemoryJobMixin:
             completed = sum(job.state.is_terminal for job in children)
             failed = sum(job.state in {JobState.FAILED, JobState.CANCELLED} for job in children)
             return len(children), completed, failed
+
+    def enqueue_comment_jobs(
+        self, *, video_batch_job: JobRecord, youtube_video_ids: Iterable[str]
+    ) -> int:
+        if not video_batch_job.parent_job_id:
+            raise RepositoryError("Comment jobs require a discovery parent")
+        with self._lock:
+            known = {
+                str(job.checkpoint.get("youtubeVideoId"))
+                for job in self._jobs.values()
+                if job.parent_job_id == video_batch_job.parent_job_id
+                and job.checkpoint.get("jobKind") == "comment"
+            }
+            now = utcnow()
+            created = 0
+            for video_id in dict.fromkeys(
+                str(value) for value in youtube_video_ids if str(value)
+            ):
+                if video_id in known:
+                    continue
+                record = JobRecord(
+                    id=new_id(),
+                    source_id=video_batch_job.source_id,
+                    state=JobState.QUEUED,
+                    current_stage="queued_comment",
+                    progress_completed=0,
+                    progress_total=1,
+                    progress_unit="comments",
+                    include_comments=True,
+                    max_videos=1,
+                    max_comments_per_video=video_batch_job.max_comments_per_video,
+                    checkpoint={"jobKind": "comment", "youtubeVideoId": video_id},
+                    runtime_config_id=video_batch_job.runtime_config_id,
+                    created_at=now,
+                    updated_at=now,
+                    parent_job_id=video_batch_job.parent_job_id,
+                )
+                self._jobs[record.id] = record
+                known.add(video_id)
+                created += 1
+            return created
+
+    def child_phase_summary(self, *, parent_job_id: str) -> dict[str, int]:
+        with self._lock:
+            children = [
+                job for job in self._jobs.values() if job.parent_job_id == parent_job_id
+            ]
+
+            def units(job: JobRecord) -> int:
+                values = job.checkpoint.get("youtubeVideoIds")
+                return len(values) if isinstance(values, list) else 1
+
+            def phase_value(job: JobRecord, name: str, field: str) -> int | None:
+                phases = job.checkpoint.get("phaseProgress")
+                phase = phases.get(name) if isinstance(phases, dict) else None
+                if not isinstance(phase, dict) or field not in phase:
+                    return None
+                return max(0, int(phase.get(field) or 0))
+
+            summary = {
+                "job_total": len(children),
+                "job_terminal": sum(job.state.is_terminal for job in children),
+                "job_failed": sum(
+                    job.state in {JobState.FAILED, JobState.CANCELLED}
+                    for job in children
+                ),
+                "video_total": sum(
+                    units(job)
+                    for job in children
+                    if job.checkpoint.get("jobKind") in {"video", "video_batch"}
+                ),
+                "video_completed": 0,
+                "video_failed": 0,
+                "video_waiting_quota": 0,
+                "transcript_total": 0,
+                "transcript_completed": 0,
+                "transcript_failed": 0,
+                "comment_total": sum(
+                    units(job)
+                    for job in children
+                    if job.checkpoint.get("jobKind") == "comment"
+                    or (
+                        job.checkpoint.get("jobKind") == "video"
+                        and job.include_comments
+                    )
+                ),
+                "comment_completed": 0,
+                "comment_failed": 0,
+                "comment_waiting_quota": 0,
+                "waiting_quota": sum(
+                    units(job)
+                    for job in children
+                    if job.state is JobState.WAITING_QUOTA
+                ),
+            }
+            for child in children:
+                successful = child.state in {
+                    JobState.COMPLETED,
+                    JobState.COMPLETED_WITH_WARNINGS,
+                }
+                child_units = units(child)
+                kind = child.checkpoint.get("jobKind")
+                video_completed = phase_value(child, "videos", "completed")
+                effective_video_completed = (
+                    (
+                        child_units
+                        if video_completed is None and successful
+                        else (video_completed or 0)
+                    )
+                    if kind in {"video", "video_batch"}
+                    else 0
+                )
+                summary["video_completed"] += effective_video_completed
+                transcript_total = phase_value(child, "transcripts", "total")
+                transcript_completed = phase_value(child, "transcripts", "completed")
+                summary["transcript_total"] += transcript_total or 0
+                summary["transcript_completed"] += transcript_completed or 0
+                failed = child.state in {JobState.FAILED, JobState.CANCELLED}
+                phase_video_failed = phase_value(child, "videos", "failed") or 0
+                summary["video_failed"] += phase_video_failed
+                if (
+                    failed
+                    and kind in {"video", "video_batch"}
+                    and phase_video_failed == 0
+                ):
+                    summary["video_failed"] += max(
+                        0, child_units - effective_video_completed
+                    )
+                    summary["transcript_failed"] += max(
+                        0, (transcript_total or 0) - (transcript_completed or 0)
+                    )
+                if (
+                    kind in {"video", "video_batch"}
+                    and child.state is JobState.WAITING_QUOTA
+                    and effective_video_completed < child_units
+                ):
+                    summary["video_waiting_quota"] += (
+                        child_units - effective_video_completed
+                    )
+                if kind in {"video", "comment"} and child.include_comments:
+                    comment_completed = phase_value(child, "comments", "completed")
+                    effective_comment_completed = (
+                        child_units
+                        if comment_completed is None and successful
+                        else (comment_completed or 0)
+                    )
+                    summary["comment_completed"] += effective_comment_completed
+                    if failed:
+                        summary["comment_failed"] += max(
+                            0, child_units - effective_comment_completed
+                        )
+                    if child.state is JobState.WAITING_QUOTA and (
+                        kind == "comment" or effective_video_completed >= child_units
+                    ):
+                        summary["comment_waiting_quota"] += max(
+                            0, child_units - effective_comment_completed
+                        )
+            return summary
 
     _desired_coverage = staticmethod(desired_coverage)
     _merge_config = staticmethod(merge_collection_config)
