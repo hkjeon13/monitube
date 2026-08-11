@@ -66,7 +66,16 @@ def top_words_from_texts(texts: Iterable[str | None], *, limit: int = 10) -> lis
     ]
     for tokens in _korean_analyzer().tokenize(normalized_texts):
         for token in tokens:
-            word = _content_word(token.form, token.tag)
+            try:
+                token_form = token.form
+                token_tag = token.tag
+            except UnicodeError:
+                # Some public comments contain Unicode sequences that Kiwi can
+                # tokenize but cannot materialize back into one token string.
+                # Skip only that malformed token so one comment cannot fail an
+                # entire source analysis run.
+                continue
+            word = _content_word(token_form, token_tag)
             if word and word not in _STOP_WORDS:
                 counts[word] += 1
     return [{"word": word, "count": count} for word, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]]
