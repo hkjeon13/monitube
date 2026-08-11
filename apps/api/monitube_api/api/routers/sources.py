@@ -13,6 +13,7 @@ from ...contracts import (
     SourceOverviewResponse,
     SourceResultsResponse,
     SourceVideosPageResponse,
+    VideoTranscriptResponse,
 )
 from ...repositories import CollectionRepository
 from ...settings import Settings
@@ -64,9 +65,50 @@ def create_sources_router(
             idempotency_key=idempotency_key,
         )
 
+    @router.post(
+        "/sources/{source_id}/refresh",
+        response_model=CollectionRequestResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+        tags=["collection"],
+    )
+    def refresh_source(
+        source_id: str,
+        service: Service,
+        user: User,
+        idempotency_key: str | None = Header(
+            default=None,
+            alias="Idempotency-Key",
+            max_length=255,
+        ),
+    ) -> CollectionRequestResponse:
+        require_source_owner(repository, source_id=source_id, user=user)
+        try:
+            return service.refresh_source(
+                source_id,
+                owner_id=user.id,
+                idempotency_key=idempotency_key,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
+
     @router.get("/sources", response_model=list[CollectionSource], tags=["sources"])
     def list_sources(service: Service, user: User) -> list[CollectionSource]:
         return service.list_sources(owner_id=user.id)
+
+    @router.get(
+        "/videos/{youtube_video_id}/transcript",
+        response_model=VideoTranscriptResponse,
+        tags=["transcripts"],
+    )
+    def get_video_transcript(
+        youtube_video_id: str,
+        service: Service,
+        user: User,
+    ) -> VideoTranscriptResponse:
+        return service.get_video_transcript(youtube_video_id, owner_id=user.id)
 
     @router.get(
         "/sources/{source_id}",

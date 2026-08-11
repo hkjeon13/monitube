@@ -20,6 +20,8 @@ EXPECTED_OPERATIONS = {
     ("POST", "/v1/collection-requests"),
     ("GET", "/v1/collection-targets/{target_id}/pin"),
     ("PUT", "/v1/collection-targets/{target_id}/pin"),
+    ("POST", "/v1/sources/{source_id}/refresh"),
+    ("GET", "/v1/videos/{youtube_video_id}/transcript"),
     ("GET", "/v1/comments/{comment_id}"),
     ("GET", "/v1/comments/{comment_id}/replies"),
     ("GET", "/v1/explore"),

@@ -772,3 +772,148 @@ def test_comment_collection_follows_every_reply_page() -> None:
     assert {comment.youtube_comment_id for comment in result["comments"]} == {"comment-1", "reply-1", "reply-2"}
     replies = [comment for comment in result["comments"] if comment.youtube_parent_comment_id]
     assert {comment.youtube_parent_comment_id for comment in replies} == {"comment-1"}
+
+
+class TranscriptSearchClient:
+    def __init__(self) -> None:
+        self.languages: list[str] = []
+
+    def transcripts(self, *, video_id: str, language: str, transcript_type: str):
+        assert video_id == "transcript01"
+        assert transcript_type == "manual"
+        self.languages.append(language)
+        if language == "ko":
+            return {
+                "search_parameters": {"lang": "ko"},
+                "available_languages": [{"lang": "en", "name": "English"}],
+                "error": "Selected language has not been transcribed",
+            }
+        return {
+            "search_parameters": {"lang": "en"},
+            "available_languages": [{"lang": "en", "name": "English"}],
+            "transcripts": [
+                {"text": "Hello", "start": 0.15, "duration": 1.2},
+                {"text": "world", "start": 1.35, "duration": 0.8},
+            ],
+        }
+
+
+def test_transcript_collection_prefers_korean_then_falls_back_to_english() -> None:
+    repository = InMemoryRepository()
+    source = repository.create_source(
+        source_type=SourceType.KEYWORD,
+        config={"query": "transcript"},
+    )
+    job = repository.create_job(
+        source_id=source.id,
+        include_comments=False,
+        max_videos=None,
+        max_comments_per_video=None,
+    )
+    video = repository.upsert_video(
+        VideoRecord(
+            id=new_id(),
+            youtube_video_id="transcript01",
+            youtube_channel_id=None,
+            title="Transcript",
+            description=None,
+            published_at=None,
+            duration_seconds=3,
+            privacy_status="public",
+            made_for_kids=False,
+            statistics={},
+            source_fetched_at=utcnow(),
+        )
+    )
+    search_client = TranscriptSearchClient()
+    collector = YouTubeCollector(
+        repository,
+        DirectVideoClient(),
+        transcript_client=search_client,
+        transcript_collection_enabled=True,
+    )
+
+    collector._collect_transcript(job, video)
+
+    transcript = repository.get_video_transcript("transcript01")
+    assert search_client.languages == ["ko", "en"]
+    assert transcript.state == "available"
+    assert transcript.resolved_language == "en"
+    assert transcript.selection_reason == "fallback_language"
+    assert transcript.full_text == "Hello\nworld"
+    assert [(segment.start_ms, segment.duration_ms) for segment in transcript.segments] == [
+        (150, 1200),
+        (1350, 800),
+    ]
+
+
+class SearchDiscoveryClient:
+    def channel(self, *, channel_id: str):
+        assert channel_id == "@example"
+        return {
+            "channel": {
+                "id": "UCabcdefghijklmnopqrstuv",
+                "handle": "@example",
+                "title": "Example",
+                "videos": 2,
+                "keywords": "example keyword",
+                "is_verified": True,
+            },
+            "about": {"joined_date": "2020-01-02", "views": 100},
+        }
+
+    def channel_videos(self, *, channel_id: str, next_page_token: str | None = None):
+        assert channel_id == "UCabcdefghijklmnopqrstuv"
+        assert next_page_token is None
+        return {"videos": [{"id": "channelVid1"}, {"id": "channelVid2"}]}
+
+    def youtube(self, *, query: str, page_token: str | None = None):
+        assert query == "example query"
+        assert page_token is None
+        return {
+            "videos": [{"id": "keywordVid1"}],
+            "sections": [
+                {"section_name": "Shorts", "items": [{"id": "shortVideo1"}]},
+                {"section_name": "Channels", "items": [{"id": "UCnot-a-video"}]},
+            ],
+        }
+
+
+def test_searchapi_discovery_collects_channel_and_keyword_video_ids() -> None:
+    repository = InMemoryRepository()
+    channel_source = repository.create_source(
+        source_type=SourceType.CHANNEL,
+        config={"input": "@example", "collectAllVideos": True},
+    )
+    channel_job = repository.create_job(
+        source_id=channel_source.id,
+        include_comments=False,
+        max_videos=None,
+        max_comments_per_video=None,
+    )
+    keyword_source = repository.create_source(
+        source_type=SourceType.KEYWORD,
+        config={"query": "example query", "maxPagesPerRun": 1},
+    )
+    keyword_job = repository.create_job(
+        source_id=keyword_source.id,
+        include_comments=False,
+        max_videos=None,
+        max_comments_per_video=None,
+    )
+    collector = YouTubeCollector(
+        repository,
+        DirectVideoClient(),
+        discovery_provider="searchapi",
+        discovery_client=SearchDiscoveryClient(),
+    )
+
+    channel_ids, _, _ = collector._channel_video_ids(
+        channel_job, channel_source.config, incremental_refresh=False
+    )
+    keyword_ids = collector._keyword_video_ids(
+        keyword_job, keyword_source.config, historical_backfill=True
+    )
+
+    assert channel_ids == ["channelVid2", "channelVid1"]
+    assert keyword_ids == ["keywordVid1", "shortVideo1"]

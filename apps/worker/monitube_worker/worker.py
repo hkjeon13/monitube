@@ -12,6 +12,7 @@ from monitube_api.settings import Settings, create_repository
 
 from .collector import YouTubeCollector
 from .runner import JobRunner
+from .searchapi import SearchApiClient
 from .youtube_data import RotatingYouTubeDataClient
 
 
@@ -47,6 +48,23 @@ def main() -> None:
         base_url=settings.youtube_api_base_url,
         timeout_seconds=settings.youtube_api_timeout_seconds,
     )
+    searchapi_client = (
+        SearchApiClient(
+            settings.searchapi_api_key,
+            base_url=settings.searchapi_base_url,
+            timeout_seconds=settings.searchapi_timeout_seconds,
+            gl=settings.searchapi_gl,
+            hl=settings.searchapi_hl,
+            zero_retention=settings.searchapi_zero_retention,
+            channel_token_post_threshold_bytes=settings.searchapi_channel_token_post_threshold_bytes,
+        )
+        if settings.searchapi_api_key
+        else None
+    )
+    if settings.discovery_provider == "searchapi" and searchapi_client is None:
+        logger.warning(
+            "DISCOVERY_PROVIDER=searchapi but SEARCH_API_KEY is not configured; discovery jobs will fail closed."
+        )
     # Spread independently started workers across the configured pool. Failover
     # still rotates normally, and replace_keys preserves this selected key when
     # runtime-registered keys are loaded before a claimed job.
@@ -55,6 +73,14 @@ def main() -> None:
     collector = YouTubeCollector(
         repository,
         client,
+        discovery_provider=settings.discovery_provider,
+        discovery_client=searchapi_client,
+        transcript_client=searchapi_client,
+        transcript_collection_enabled=settings.transcript_collection_enabled,
+        transcript_primary_language=settings.transcript_primary_language,
+        transcript_fallback_language=settings.transcript_fallback_language,
+        transcript_type_preference=settings.transcript_type_preference,
+        transcript_max_segments=settings.transcript_max_segments,
         lease_seconds=settings.worker_lease_seconds,
     )
     runner = JobRunner(repository, collector)

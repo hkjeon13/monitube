@@ -87,7 +87,7 @@ readonly ROLLBACK_IMAGE_TAG="rollback-${DEPLOY_TIMESTAMP}-${CURRENT_SHA:0:12}"
 cd "$TARGET_DIR"
 [[ -f "$ENV_TEMPLATE" ]] || die "missing committed .env.example template."
 [[ -f scripts/apply_migrations.sh ]] || die "missing migration runner."
-for repository_secret_name in YOUTUBE_API_KEY YOUTUBE_API_KEYS YOUTUBE_API_KEY_ENCRYPTION_KEY YOUTUBE_KEY_REGISTRATION_TOKEN; do
+for repository_secret_name in YOUTUBE_API_KEY YOUTUBE_API_KEYS YOUTUBE_API_KEY_ENCRYPTION_KEY YOUTUBE_KEY_REGISTRATION_TOKEN SEARCH_API_KEY; do
   grep -qx "${repository_secret_name}=" "$ENV_TEMPLATE" || die ".env.example must keep ${repository_secret_name} blank."
 done
 
@@ -102,7 +102,7 @@ elif [[ ! -f "$ENV_FILE" ]]; then
   die ".env exists but is not a regular file; refusing to replace it."
 fi
 
-for repository_secret_name in YOUTUBE_API_KEY YOUTUBE_API_KEYS YOUTUBE_API_KEY_ENCRYPTION_KEY YOUTUBE_KEY_REGISTRATION_TOKEN; do
+for repository_secret_name in YOUTUBE_API_KEY YOUTUBE_API_KEYS YOUTUBE_API_KEY_ENCRYPTION_KEY YOUTUBE_KEY_REGISTRATION_TOKEN SEARCH_API_KEY; do
   if ! grep -qE "^${repository_secret_name}=" "$ENV_FILE"; then
     printf '\n%s=\n' "$repository_secret_name" >> "$ENV_FILE"
   fi
@@ -121,7 +121,7 @@ elif [[ ! -e "$YOUTUBE_SECRET_ENV_FILE" ]]; then
 fi
 
 chmod 600 "$YOUTUBE_SECRET_ENV_FILE"
-invalid_secret_lines="$(grep -cvE '^[[:space:]]*(#|$)|^YOUTUBE_API_KEY=[^[:space:]]*$|^YOUTUBE_API_KEYS=[^[:space:]]*$|^YOUTUBE_API_KEY_ENCRYPTION_KEY=[^[:space:]]*$|^YOUTUBE_KEY_REGISTRATION_TOKEN=[^[:space:]]*$' "$YOUTUBE_SECRET_ENV_FILE" || true)"
+invalid_secret_lines="$(grep -cvE '^[[:space:]]*(#|$)|^YOUTUBE_API_KEY=[^[:space:]]*$|^YOUTUBE_API_KEYS=[^[:space:]]*$|^YOUTUBE_API_KEY_ENCRYPTION_KEY=[^[:space:]]*$|^YOUTUBE_KEY_REGISTRATION_TOKEN=[^[:space:]]*$|^SEARCH_API_KEY=[^[:space:]]*$' "$YOUTUBE_SECRET_ENV_FILE" || true)"
 [[ "$invalid_secret_lines" == "0" ]] || die "server secret env file contains an unsupported entry."
 
 dotenv_has_key() {
@@ -199,6 +199,18 @@ ensure_env_setting POSTGRES_SHM_SIZE 1gb
 ensure_env_setting REDIS_APPENDONLY no
 ensure_env_setting REDIS_MAXMEMORY 512mb
 ensure_env_setting REDIS_MAXMEMORY_POLICY allkeys-lru
+ensure_env_setting DISCOVERY_PROVIDER searchapi
+ensure_env_setting SEARCHAPI_BASE_URL https://www.searchapi.io/api/v1/search
+ensure_env_setting SEARCHAPI_TIMEOUT_SECONDS 20
+ensure_env_setting SEARCHAPI_GL kr
+ensure_env_setting SEARCHAPI_HL ko
+ensure_env_setting SEARCHAPI_ZERO_RETENTION false
+ensure_env_setting SEARCHAPI_CHANNEL_TOKEN_POST_THRESHOLD_BYTES 1800
+ensure_env_setting TRANSCRIPT_COLLECTION_ENABLED true
+ensure_env_setting TRANSCRIPT_PRIMARY_LANGUAGE ko
+ensure_env_setting TRANSCRIPT_FALLBACK_LANGUAGE en
+ensure_env_setting TRANSCRIPT_TYPE_PREFERENCE manual
+ensure_env_setting TRANSCRIPT_MAX_SEGMENTS 100000
 
 performance_flags=(
   ENABLE_SOURCE_OVERVIEW_V2

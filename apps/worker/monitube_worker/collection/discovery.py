@@ -19,6 +19,8 @@ def _rfc3339(value: datetime) -> str:
 
 class DiscoveryCollectionMixin:
     def _resolve_channel(self, job: JobRecord, input_value: str) -> Mapping[str, Any]:
+        if getattr(self, "discovery_provider", "youtube") == "searchapi":
+            return self._resolve_channel_searchapi(job, input_value)
         resolution = resolve_channel_input(input_value)
         if resolution.requires_search:
             search = self._call(job, "search", part="snippet", type="channel", q=resolution.normalized, maxResults=1)
@@ -67,9 +69,98 @@ class DiscoveryCollectionMixin:
         )
         return item
 
+    def _resolve_channel_searchapi(
+        self, job: JobRecord, input_value: str
+    ) -> Mapping[str, Any]:
+        client = getattr(self, "discovery_client", None)
+        if client is None:
+            raise RuntimeError(
+                "SearchAPI.io discovery is enabled but SEARCH_API_KEY is not configured"
+            )
+        resolution = resolve_channel_input(input_value)
+        channel_input = resolution.normalized
+        if resolution.requires_search:
+            search_payload = self._searchapi_call(
+                job,
+                "youtube",
+                client.youtube,
+                query=resolution.normalized,
+            )
+            candidates = search_payload.get("channels") or []
+            if not candidates:
+                for section in search_payload.get("sections") or []:
+                    for item in section.get("items") or []:
+                        if item.get("id") and not item.get("length"):
+                            candidates.append(item)
+            if not candidates or not candidates[0].get("id"):
+                raise RuntimeError("No YouTube channel matched this source input")
+            channel_input = str(candidates[0]["id"])
+        payload = self._searchapi_call(
+            job,
+            "youtube_channel",
+            client.channel,
+            channel_id=channel_input,
+        )
+        channel = payload.get("channel") or {}
+        about = payload.get("about") or {}
+        channel_id = channel.get("id")
+        if not channel_id:
+            raise RuntimeError("SearchAPI.io channel response did not contain an ID")
+        fetched_at = utcnow()
+        video_count = as_int(channel.get("videos") or about.get("videos"))
+        self.repository.upsert_channel(
+            {
+                "youtube_channel_id": str(channel_id),
+                "handle": channel.get("handle"),
+                "title": channel.get("title"),
+                "description": channel.get("description") or about.get("description"),
+                "thumbnail_url": channel.get("avatar"),
+                "uploads_playlist_id": None,
+                "statistics": {
+                    "subscriberCount": as_int(channel.get("subscribers") or about.get("subscribers")),
+                    "viewCount": as_int(channel.get("views") or about.get("views")),
+                    "videoCount": video_count,
+                    "hiddenSubscriberCount": False,
+                },
+                "source_attribution": "searchapi_youtube_channel",
+                "provider_profile": {
+                    "provider": "searchapi_youtube_channel",
+                    "keywords": channel.get("keywords"),
+                    "tags": channel.get("tags") or [],
+                    "available_countries": channel.get("available_countries") or [],
+                    "badges": channel.get("badges") or [],
+                    "is_verified": channel.get("is_verified"),
+                    "is_family_safe": channel.get("is_family_safe"),
+                    "banner_url": channel.get("banner"),
+                    "avatar_url": channel.get("avatar"),
+                    "external_links": about.get("links") or [],
+                    "joined_date": about.get("joined_date"),
+                },
+                "source_fetched_at": fetched_at,
+            }
+        )
+        self.repository.promote_channel_target(
+            source_id=job.source_id,
+            youtube_channel_id=str(channel_id),
+            handle=channel.get("handle"),
+        )
+        return {
+            "id": str(channel_id),
+            "snippet": {
+                "customUrl": channel.get("handle"),
+                "title": channel.get("title"),
+                "description": channel.get("description") or about.get("description"),
+            },
+            "statistics": {"videoCount": video_count},
+        }
+
     def _channel_video_ids(
         self, job: JobRecord, source_config: Mapping[str, Any], *, incremental_refresh: bool
     ) -> tuple[list[str], dict[str, VideoRecord], bool]:
+        if getattr(self, "discovery_provider", "youtube") == "searchapi":
+            return self._channel_video_ids_searchapi(
+                job, source_config, incremental_refresh=incremental_refresh
+            )
         channel = self._resolve_channel(job, str(source_config["input"]))
         playlist_id = ((channel.get("contentDetails") or {}).get("relatedPlaylists") or {}).get("uploads")
         if not playlist_id:
@@ -124,6 +215,129 @@ class DiscoveryCollectionMixin:
         if backfill_required:
             ids.reverse()
         return ids, known_videos, backfill_required
+
+    def _channel_video_ids_searchapi(
+        self,
+        job: JobRecord,
+        source_config: Mapping[str, Any],
+        *,
+        incremental_refresh: bool,
+    ) -> tuple[list[str], dict[str, VideoRecord], bool]:
+        client = getattr(self, "discovery_client", None)
+        if client is None:
+            raise RuntimeError(
+                "SearchAPI.io discovery is enabled but SEARCH_API_KEY is not configured"
+            )
+        channel = self._resolve_channel(job, str(source_config["input"]))
+        channel_id = str(channel["id"])
+        collect_all = bool(source_config.get("collectAllVideos"))
+        limit = None if collect_all else job.max_videos or as_int(source_config.get("maxVideos")) or 50
+        expected_video_count = as_int((channel.get("statistics") or {}).get("videoCount"))
+        stored_video_count = self.repository.count_videos_by_channel(channel_id)
+        backfill_required = bool(collect_all and expected_video_count > stored_video_count)
+        ids: list[str] = []
+        known_videos: dict[str, VideoRecord] = {}
+        page_token: str | None = None
+        page_count = 0
+        while limit is None or len(ids) < limit:
+            payload = self._searchapi_call(
+                job,
+                "youtube_channel_videos",
+                client.channel_videos,
+                channel_id=channel_id,
+                next_page_token=page_token,
+            )
+            page_count += 1
+            page_ids = [
+                str(item["id"])
+                for item in payload.get("videos") or []
+                if item.get("id")
+            ]
+            page_ids = list(dict.fromkeys(page_ids))
+            for video_id in page_ids:
+                if video_id not in ids:
+                    ids.append(video_id)
+                    if limit is not None and len(ids) >= limit:
+                        break
+            existing = self.repository.get_videos_by_youtube_ids(page_ids)
+            known_videos.update(existing)
+            page_token = (payload.get("pagination") or {}).get("next_page_token")
+            self._checkpoint(
+                job,
+                stage="searchapi_channel_videos",
+                scope_key=channel_id,
+                page_token=page_token,
+                batch_cursor=page_count,
+            )
+            if (
+                incremental_refresh
+                and not backfill_required
+                and collect_all
+                and page_ids
+                and len(existing) == len(page_ids)
+            ):
+                break
+            if not page_ids or not page_token:
+                break
+        if backfill_required:
+            ids.reverse()
+        return ids, known_videos, backfill_required
+
+    @staticmethod
+    def _searchapi_keyword_page_ids(payload: Mapping[str, Any]) -> list[str]:
+        ids = [
+            str(item["id"])
+            for item in payload.get("videos") or []
+            if item.get("id")
+        ]
+        for section in payload.get("sections") or []:
+            section_name = str(
+                section.get("section_name") or section.get("section_title") or ""
+            ).lower()
+            if "short" not in section_name:
+                continue
+            ids.extend(
+                str(item["id"])
+                for item in section.get("items") or []
+                if item.get("id")
+            )
+        return list(dict.fromkeys(ids))
+
+    def _keyword_video_ids_searchapi(
+        self, job: JobRecord, source_config: Mapping[str, Any]
+    ) -> list[str]:
+        client = getattr(self, "discovery_client", None)
+        if client is None:
+            raise RuntimeError(
+                "SearchAPI.io discovery is enabled but SEARCH_API_KEY is not configured"
+            )
+        max_pages = max(1, as_int(source_config.get("maxPagesPerRun")) or 1)
+        ids: list[str] = []
+        page_token: str | None = None
+        for page in range(1, max_pages + 1):
+            payload = self._searchapi_call(
+                job,
+                "youtube",
+                client.youtube,
+                query=str(source_config["query"]),
+                page_token=page_token,
+            )
+            page_ids = self._searchapi_keyword_page_ids(payload)
+            ids.extend(video_id for video_id in page_ids if video_id not in ids)
+            page_token = (payload.get("pagination") or {}).get("next_page_token")
+            self._checkpoint(
+                job,
+                stage="searchapi_keyword",
+                scope_key=str(source_config["query"]),
+                page_token=page_token,
+                batch_cursor=page,
+            )
+            if not page_ids or not page_token:
+                break
+        self._active_checkpoint["keywordHistoricalBackfillComplete"] = True
+        if page_token:
+            self._active_checkpoint["keywordCoverage"] = "limited"
+        return ids
 
     def _keyword_video_ids_incremental(self, job: JobRecord, source_config: Mapping[str, Any]) -> list[str]:
         ids: list[str] = []
@@ -350,6 +564,8 @@ class DiscoveryCollectionMixin:
         *,
         historical_backfill: bool,
     ) -> list[str]:
+        if getattr(self, "discovery_provider", "youtube") == "searchapi":
+            return self._keyword_video_ids_searchapi(job, source_config)
         if historical_backfill:
             return self._keyword_video_ids_historical(job, source_config)
         self._active_checkpoint["keywordHistoricalBackfillComplete"] = True

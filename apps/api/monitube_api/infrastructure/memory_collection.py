@@ -4,7 +4,7 @@ from copy import deepcopy
 from dataclasses import replace
 from typing import Any, Iterable
 
-from ..domain import CommentRecord, QuotaBucket, VideoRecord, utcnow
+from ..domain import CommentRecord, QuotaBucket, VideoRecord, VideoTranscriptRecord, utcnow
 from ..repositories import (
     NotFoundError,
     RepositoryError,
@@ -158,6 +158,58 @@ class MemoryCollectionMixin:
                 if comment.youtube_video_id in counts:
                     counts[comment.youtube_video_id] += 1
             return counts
+
+    def has_video_transcript(self, youtube_video_id: str) -> bool:
+        with self._lock:
+            return youtube_video_id in self._transcripts
+
+    def upsert_video_transcript(
+        self, transcript: VideoTranscriptRecord
+    ) -> VideoTranscriptRecord:
+        with self._lock:
+            current = self._transcripts.get(transcript.youtube_video_id)
+            stored = replace(transcript, id=current.id) if current else transcript
+            self._transcripts[transcript.youtube_video_id] = stored
+            return deepcopy(stored)
+
+    def get_video_transcript(
+        self, youtube_video_id: str, *, owner_id: str | None = None
+    ) -> VideoTranscriptRecord:
+        with self._lock:
+            transcript = self._transcripts.get(youtube_video_id)
+            if not transcript:
+                raise NotFoundError(f"Transcript for video '{youtube_video_id}' was not found")
+            visible = self._visible_video_ids_locked(owner_id)
+            if visible is not None and youtube_video_id not in visible:
+                raise NotFoundError(f"Transcript for video '{youtube_video_id}' was not found")
+            return deepcopy(transcript)
+
+    def record_provider_request(
+        self,
+        *,
+        job_id: str,
+        provider: str,
+        operation: str,
+        status_code: int,
+        error_code: str | None = None,
+        item_count: int | None = None,
+        requested_language: str | None = None,
+        resolved_language: str | None = None,
+    ) -> None:
+        with self._lock:
+            self._request_logs.append(
+                {
+                    "job_id": job_id,
+                    "provider": provider,
+                    "operation": operation,
+                    "status_code": status_code,
+                    "error_reason": error_code,
+                    "item_count": item_count,
+                    "requested_language": requested_language,
+                    "resolved_language": resolved_language,
+                    "occurred_at": utcnow(),
+                }
+            )
 
     def record_api_request(
         self, *, job_id: str, bucket: QuotaBucket, endpoint: str, status_code: int, error_reason: str | None = None

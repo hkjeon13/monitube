@@ -62,6 +62,34 @@ export async function startJob(sourceId: string, requestBody: StartJobRequest) {
   );
 }
 
+export async function refreshSource(
+  sourceId: string,
+  idempotencyKey?: string,
+): Promise<CollectionRequestResponse> {
+  const response = await request<unknown>(
+    `/v1/sources/${encodeURIComponent(sourceId)}/refresh`,
+    {
+      method: "POST",
+      headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined,
+    },
+  );
+  const record = asRecord(response);
+  const source = normalizeSource(record?.source);
+  const id = asText(record?.id);
+  const targetId = asText(record?.targetId ?? record?.target_id);
+  const disposition = asText(record?.disposition);
+  if (!record || !source || !id || !targetId || !disposition) {
+    throw new ApiError("즉시 재수집 응답을 해석할 수 없습니다.", 502);
+  }
+  return {
+    id,
+    targetId,
+    disposition: disposition as CollectionRequestDisposition,
+    source,
+    ...(normalizeJob(record.job) ? { job: normalizeJob(record.job) } : {}),
+  };
+}
+
 export async function createCollectionRequest(
   requestBody: CreateCollectionSourceRequest,
   options: { forceRefresh?: boolean; idempotencyKey?: string } = {},

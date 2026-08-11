@@ -206,3 +206,32 @@ class CommentRecord:
     source_fetched_at: datetime
     author_channel_id: str | None = None
     author_display_name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptSegmentRecord:
+    sequence: int
+    start_ms: int
+    duration_ms: int
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class VideoTranscriptRecord:
+    id: str
+    youtube_video_id: str
+    provider: str
+    requested_language: str
+    resolved_language: str | None
+    language_name: str | None
+    selection_reason: str | None
+    transcript_type: str | None
+    is_auto_generated: bool | None
+    is_translated: bool | None
+    state: str
+    full_text: str | None
+    content_hash: str | None
+    fetched_at: datetime | None
+    last_attempted_at: datetime
+    error_code: str | None = None
+    segments: tuple[TranscriptSegmentRecord, ...] = ()

@@ -21,3 +21,18 @@ def test_settings_accepts_a_same_project_failover_key_pool() -> None:
     assert settings.youtube_api_keys == ("key-a", "key-b")
     assert settings.youtube_api_key == "key-a"
     assert settings.youtube_api_key_encryption_key == "master"
+
+
+def test_settings_reads_search_api_key_and_transcript_preferences() -> None:
+    settings = Settings.from_environment(
+        {
+            "SEARCH_API_KEY": "search-secret",
+            "DISCOVERY_PROVIDER": "SEARCHAPI",
+            "TRANSCRIPT_PRIMARY_LANGUAGE": "ko",
+            "TRANSCRIPT_FALLBACK_LANGUAGE": "en",
+        }
+    )
+    assert settings.searchapi_api_key == "search-secret"
+    assert settings.discovery_provider == "searchapi"
+    assert settings.transcript_primary_language == "ko"
+    assert settings.transcript_fallback_language == "en"

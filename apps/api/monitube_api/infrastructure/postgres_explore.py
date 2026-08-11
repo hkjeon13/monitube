@@ -41,6 +41,18 @@ class PostgresExploreMixin:
             row = cursor.fetchone()
             return dict(row) if row else None
 
+    def mark_target_manual_dispatch(self, *, target_id: str, dispatched_at: Any) -> None:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """UPDATE collection_target_pins
+                   SET last_dispatched_at = %s,
+                       next_run_at = %s + (interval_minutes * interval '1 minute'),
+                       updated_at = now()
+                   WHERE target_id = %s AND enabled = TRUE
+                     AND (last_dispatched_at IS NULL OR last_dispatched_at < %s)""",
+                (dispatched_at, dispatched_at, target_id, dispatched_at),
+            )
+
     def dispatch_due_pins(self, *, runtime_config_id: str | None = None, limit: int = 10) -> int:
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(

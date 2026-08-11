@@ -1,5 +1,6 @@
 """Source, subscription, and canonical-target persistence ports."""
 
+from datetime import datetime
 from typing import Any, Protocol
 
 from ..domain import (
@@ -118,6 +119,10 @@ class CollectionRequestRepository(Protocol):
     ) -> dict[str, Any]: ...
 
     def get_target_pin(self, *, target_id: str) -> dict[str, Any] | None: ...
+
+    def mark_target_manual_dispatch(
+        self, *, target_id: str, dispatched_at: datetime
+    ) -> None: ...
 
     def dispatch_due_pins(
         self,

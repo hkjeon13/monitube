@@ -26,6 +26,7 @@ from ..domain import (
     SourceRecord,
     SourceType,
     VideoRecord,
+    VideoTranscriptRecord,
     new_id,
     utcnow,
 )
@@ -93,6 +94,7 @@ class InMemoryRepository(
         self._videos: dict[str, VideoRecord] = {}
         self._video_first_seen: dict[str, datetime] = {}
         self._comments: dict[str, CommentRecord] = {}
+        self._transcripts: dict[str, VideoTranscriptRecord] = {}
         self._source_videos: dict[str, set[str]] = {}
         self._source_video_first_seen: dict[tuple[str, str], datetime] = {}
         self._analysis: dict[str, dict[str, Any]] = {}

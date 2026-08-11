@@ -6,7 +6,14 @@ from typing import Any, Iterable
 
 from psycopg.types.json import Json
 
-from ..domain import CommentRecord, JobRecord, QuotaBucket, VideoRecord
+from ..domain import (
+    CommentRecord,
+    JobRecord,
+    QuotaBucket,
+    TranscriptSegmentRecord,
+    VideoRecord,
+    VideoTranscriptRecord,
+)
 from ..repositories import NotFoundError, RepositoryError
 from .postgres_support import _optional_nonnegative_int, _strip_nul
 
@@ -36,11 +43,12 @@ class PostgresCollectionWriteMixin:
             if statistics:
                 cursor.execute(
                     """
-                    INSERT INTO channel_snapshots (channel_id, fetched_at, subscriber_count, view_count, video_count, hidden_subscriber_count)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                    INSERT INTO channel_snapshots (channel_id, fetched_at, subscriber_count, view_count, video_count, hidden_subscriber_count, source_attribution)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (channel_id, fetched_at) DO UPDATE SET
                       subscriber_count = EXCLUDED.subscriber_count, view_count = EXCLUDED.view_count,
-                      video_count = EXCLUDED.video_count, hidden_subscriber_count = EXCLUDED.hidden_subscriber_count
+                      video_count = EXCLUDED.video_count, hidden_subscriber_count = EXCLUDED.hidden_subscriber_count,
+                      source_attribution = EXCLUDED.source_attribution
                     """,
                     (
                         stored["id"], channel["source_fetched_at"],
@@ -48,6 +56,42 @@ class PostgresCollectionWriteMixin:
                         _optional_nonnegative_int(statistics.get("viewCount")),
                         _optional_nonnegative_int(statistics.get("videoCount")),
                         bool(statistics.get("hiddenSubscriberCount")) if statistics.get("hiddenSubscriberCount") is not None else None,
+                        channel.get("source_attribution") or "youtube_data_api",
+                    ),
+                )
+            provider_profile = channel.get("provider_profile")
+            if isinstance(provider_profile, dict):
+                cursor.execute(
+                    """
+                    INSERT INTO channel_provider_profiles (
+                      channel_id, provider, keywords, tags, available_countries,
+                      badges, is_verified, is_family_safe, banner_url, avatar_url,
+                      external_links, joined_date, source_fetched_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (channel_id, provider) DO UPDATE SET
+                      keywords = EXCLUDED.keywords, tags = EXCLUDED.tags,
+                      available_countries = EXCLUDED.available_countries,
+                      badges = EXCLUDED.badges, is_verified = EXCLUDED.is_verified,
+                      is_family_safe = EXCLUDED.is_family_safe,
+                      banner_url = EXCLUDED.banner_url, avatar_url = EXCLUDED.avatar_url,
+                      external_links = EXCLUDED.external_links,
+                      joined_date = EXCLUDED.joined_date,
+                      source_fetched_at = EXCLUDED.source_fetched_at
+                    """,
+                    (
+                        stored["id"],
+                        provider_profile.get("provider", "searchapi_youtube_channel"),
+                        provider_profile.get("keywords"),
+                        Json(provider_profile.get("tags") or []),
+                        Json(provider_profile.get("available_countries") or []),
+                        Json(provider_profile.get("badges") or []),
+                        provider_profile.get("is_verified"),
+                        provider_profile.get("is_family_safe"),
+                        provider_profile.get("banner_url"),
+                        provider_profile.get("avatar_url"),
+                        Json(provider_profile.get("external_links") or []),
+                        provider_profile.get("joined_date"),
+                        channel["source_fetched_at"],
                     ),
                 )
             return stored
@@ -500,6 +544,184 @@ class PostgresCollectionWriteMixin:
                 (video_ids,),
             )
             return {str(row["youtube_video_id"]): int(row["comment_count"]) for row in cursor.fetchall()}
+
+    def has_video_transcript(self, youtube_video_id: str) -> bool:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT 1 FROM video_transcripts transcript
+                   JOIN videos video ON video.id = transcript.video_id
+                   WHERE video.youtube_video_id = %s LIMIT 1""",
+                (youtube_video_id,),
+            )
+            return cursor.fetchone() is not None
+
+    def upsert_video_transcript(
+        self, transcript: VideoTranscriptRecord
+    ) -> VideoTranscriptRecord:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT id FROM videos WHERE youtube_video_id = %s FOR UPDATE",
+                (transcript.youtube_video_id,),
+            )
+            video = cursor.fetchone()
+            if not video:
+                raise NotFoundError(
+                    f"Video '{transcript.youtube_video_id}' was not found"
+                )
+            cursor.execute(
+                """SELECT id::text, content_hash FROM video_transcripts
+                   WHERE video_id = %s AND provider = %s FOR UPDATE""",
+                (video["id"], transcript.provider),
+            )
+            current = cursor.fetchone()
+            same_content = bool(
+                current
+                and transcript.content_hash
+                and current.get("content_hash") == transcript.content_hash
+            )
+            cursor.execute(
+                """
+                INSERT INTO video_transcripts (
+                  video_id, provider, requested_language, resolved_language,
+                  language_name, selection_reason, transcript_type,
+                  is_auto_generated, is_translated, state, full_text,
+                  content_hash, fetched_at, last_attempted_at, error_code
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (video_id, provider) DO UPDATE SET
+                  requested_language = EXCLUDED.requested_language,
+                  resolved_language = EXCLUDED.resolved_language,
+                  language_name = EXCLUDED.language_name,
+                  selection_reason = EXCLUDED.selection_reason,
+                  transcript_type = EXCLUDED.transcript_type,
+                  is_auto_generated = EXCLUDED.is_auto_generated,
+                  is_translated = EXCLUDED.is_translated,
+                  state = EXCLUDED.state,
+                  full_text = EXCLUDED.full_text,
+                  content_hash = EXCLUDED.content_hash,
+                  fetched_at = EXCLUDED.fetched_at,
+                  last_attempted_at = EXCLUDED.last_attempted_at,
+                  error_code = EXCLUDED.error_code,
+                  updated_at = now()
+                RETURNING id::text
+                """,
+                (
+                    video["id"], transcript.provider,
+                    transcript.requested_language, transcript.resolved_language,
+                    transcript.language_name, transcript.selection_reason,
+                    transcript.transcript_type, transcript.is_auto_generated,
+                    transcript.is_translated, transcript.state,
+                    transcript.full_text, transcript.content_hash,
+                    transcript.fetched_at, transcript.last_attempted_at,
+                    transcript.error_code,
+                ),
+            )
+            transcript_id = str(cursor.fetchone()["id"])
+            if not same_content:
+                cursor.execute(
+                    "DELETE FROM video_transcript_segments WHERE transcript_id = %s",
+                    (transcript_id,),
+                )
+                if transcript.segments:
+                    cursor.executemany(
+                        """INSERT INTO video_transcript_segments
+                           (transcript_id, sequence, start_ms, duration_ms, text)
+                           VALUES (%s, %s, %s, %s, %s)""",
+                        [
+                            (
+                                transcript_id, segment.sequence,
+                                segment.start_ms, segment.duration_ms,
+                                _strip_nul(segment.text),
+                            )
+                            for segment in transcript.segments
+                        ],
+                    )
+            return replace(transcript, id=transcript_id)
+
+    def get_video_transcript(
+        self, youtube_video_id: str, *, owner_id: str | None = None
+    ) -> VideoTranscriptRecord:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT transcript.*, video.youtube_video_id
+                FROM video_transcripts transcript
+                JOIN videos video ON video.id = transcript.video_id
+                WHERE video.youtube_video_id = %s
+                  AND (
+                    %s::uuid IS NULL OR EXISTS (
+                      SELECT 1 FROM collection_target_videos membership
+                      JOIN collection_subscriptions subscription
+                        ON subscription.target_id = membership.target_id
+                      WHERE membership.video_id = video.id
+                        AND subscription.user_id = %s::uuid
+                    )
+                  )
+                """,
+                (youtube_video_id, owner_id, owner_id),
+            )
+            row = cursor.fetchone()
+            if not row:
+                raise NotFoundError(
+                    f"Transcript for video '{youtube_video_id}' was not found"
+                )
+            cursor.execute(
+                """SELECT sequence, start_ms, duration_ms, text
+                   FROM video_transcript_segments
+                   WHERE transcript_id = %s ORDER BY sequence""",
+                (row["id"],),
+            )
+            segments = tuple(
+                TranscriptSegmentRecord(
+                    sequence=int(item["sequence"]),
+                    start_ms=int(item["start_ms"]),
+                    duration_ms=int(item["duration_ms"]),
+                    text=str(item["text"]),
+                )
+                for item in cursor.fetchall()
+            )
+            return VideoTranscriptRecord(
+                id=str(row["id"]),
+                youtube_video_id=str(row["youtube_video_id"]),
+                provider=str(row["provider"]),
+                requested_language=str(row["requested_language"]),
+                resolved_language=row.get("resolved_language"),
+                language_name=row.get("language_name"),
+                selection_reason=row.get("selection_reason"),
+                transcript_type=row.get("transcript_type"),
+                is_auto_generated=row.get("is_auto_generated"),
+                is_translated=row.get("is_translated"),
+                state=str(row["state"]),
+                full_text=row.get("full_text"),
+                content_hash=row.get("content_hash"),
+                fetched_at=row.get("fetched_at"),
+                last_attempted_at=row["last_attempted_at"],
+                error_code=row.get("error_code"),
+                segments=segments,
+            )
+
+    def record_provider_request(
+        self,
+        *,
+        job_id: str,
+        provider: str,
+        operation: str,
+        status_code: int,
+        error_code: str | None = None,
+        item_count: int | None = None,
+        requested_language: str | None = None,
+        resolved_language: str | None = None,
+    ) -> None:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """INSERT INTO provider_request_logs (
+                     job_id, provider, operation, status_code, error_code,
+                     item_count, requested_language, resolved_language
+                   ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                (
+                    job_id, provider, operation, status_code, error_code,
+                    item_count, requested_language, resolved_language,
+                ),
+            )
 
     def record_api_request(
         self, *, job_id: str, bucket: QuotaBucket, endpoint: str, status_code: int, error_reason: str | None = None

@@ -11,9 +11,11 @@ from monitube_api.quota import YoutubeErrorCategory, classify_youtube_error
 from monitube_api.repositories import CollectionRepository
 
 from .runner import LeaseLostError, QuotaExhaustedError, RetryableCollectionError
+from .searchapi import SearchApiError
 from .youtube_data import YouTubeApiError, YouTubeDataClient
 from .collection.comments import CommentCollectionMixin
 from .collection.discovery import DiscoveryCollectionMixin
+from .collection.transcripts import TranscriptCollectionMixin
 from .collection.checkpoints import (
     checkpoint_payload,
     resume_cursor,
@@ -28,14 +30,77 @@ from .collection.parsing import (
 )
 
 
-class YouTubeCollector(DiscoveryCollectionMixin, CommentCollectionMixin):
+class YouTubeCollector(DiscoveryCollectionMixin, CommentCollectionMixin, TranscriptCollectionMixin):
     """Collect one source with a single configured API key; it never rotates keys."""
 
-    def __init__(self, repository: CollectionRepository, client: YouTubeDataClient, *, lease_seconds: int = 120) -> None:
+    def __init__(
+        self,
+        repository: CollectionRepository,
+        client: YouTubeDataClient,
+        *,
+        discovery_provider: str = "youtube",
+        discovery_client: Any | None = None,
+        transcript_client: Any | None = None,
+        transcript_collection_enabled: bool = False,
+        transcript_primary_language: str = "ko",
+        transcript_fallback_language: str = "en",
+        transcript_type_preference: str = "manual",
+        transcript_max_segments: int = 100_000,
+        lease_seconds: int = 120,
+    ) -> None:
         self.repository = repository
         self.client = client
+        self.discovery_provider = discovery_provider
+        self.discovery_client = discovery_client
+        self.transcript_client = transcript_client
+        self.transcript_collection_enabled = transcript_collection_enabled
+        self.transcript_primary_language = transcript_primary_language
+        self.transcript_fallback_language = transcript_fallback_language
+        self.transcript_type_preference = transcript_type_preference
+        self.transcript_max_segments = transcript_max_segments
         self.lease_seconds = lease_seconds
         self._active_checkpoint: dict[str, Any] = {}
+
+    def _searchapi_call(
+        self,
+        job: JobRecord,
+        operation: str,
+        method: Any,
+        **params: Any,
+    ) -> Mapping[str, Any]:
+        if job.lease_owner and not self.repository.renew_job_lease(
+            job_id=job.id,
+            worker_id=job.lease_owner,
+            lease_seconds=self.lease_seconds,
+        ):
+            raise LeaseLostError("Collection job lease is no longer owned by this worker")
+        try:
+            payload = method(**params)
+        except SearchApiError as exc:
+            self.repository.record_provider_request(
+                job_id=job.id,
+                provider="searchapi",
+                operation=operation,
+                status_code=exc.status_code,
+                error_code=exc.error_code,
+                requested_language=params.get("language"),
+            )
+            if exc.status_code == 429 or exc.status_code >= 500:
+                raise RetryableCollectionError(
+                    str(exc), retry_after_seconds=60
+                ) from exc
+            raise
+        items = payload.get("videos") or payload.get("transcripts") or []
+        self.repository.record_provider_request(
+            job_id=job.id,
+            provider="searchapi",
+            operation=operation,
+            status_code=200,
+            item_count=len(items) if isinstance(items, list) else None,
+            requested_language=params.get("language"),
+            resolved_language=(payload.get("search_parameters") or {}).get("lang"),
+        )
+        return payload
 
     def _checkpoint(self, job: JobRecord, *, stage: str, scope_key: str, page_token: str | None, batch_cursor: int = 0) -> None:
         checkpoint = self._checkpoint_payload(
@@ -196,7 +261,6 @@ class YouTubeCollector(DiscoveryCollectionMixin, CommentCollectionMixin):
                         source.coverage.get("historicalBackfillComplete")
                     ),
                 )
-                known_videos = {}
                 incremental_refresh = False
                 backfill_required = False
             if job.target_id is None:
@@ -238,9 +302,19 @@ class YouTubeCollector(DiscoveryCollectionMixin, CommentCollectionMixin):
     ) -> None:
         stage = "backfilling_oldest_videos" if backfill_required else "fetching_videos"
         self._set_phase_progress(job, phase="videos", completed=0, total=len(video_ids), current_stage=stage)
-        videos = self._video_records(job, video_ids)
+        known = self.repository.get_videos_by_youtube_ids(video_ids)
+        videos = [
+            video for video in self._video_records(job, video_ids)
+            if self._video_matches_source_window(source, video)
+        ]
         for video in videos:
             self.repository.link_source_video(source.id, video.youtube_video_id)
+            if source.type in {SourceType.CHANNEL, SourceType.KEYWORD}:
+                self._maybe_collect_transcript(
+                    job,
+                    video,
+                    newly_discovered=video.youtube_video_id not in known,
+                )
         self._set_phase_progress(job, phase="videos", completed=len(video_ids), total=len(video_ids), current_stage="videos_persisted")
         if job.include_comments or source.config.get("includeComments"):
             max_pages = None if source.config.get("collectAllComments") else (
@@ -265,9 +339,17 @@ class YouTubeCollector(DiscoveryCollectionMixin, CommentCollectionMixin):
         # checkpoint. Persist the video identity before the first detail cursor
         # so retry routing and cross-target terminal invalidation remain exact.
         self._active_checkpoint["youtubeVideoId"] = video_id
-        videos = self._video_records(job, [video_id])
+        newly_discovered = video_id not in self.repository.get_videos_by_youtube_ids([video_id])
+        videos = [
+            video for video in self._video_records(job, [video_id])
+            if self._video_matches_source_window(source, video)
+        ]
         for video in videos:
             self.repository.link_source_video(source.id, video.youtube_video_id)
+            if source.type in {SourceType.CHANNEL, SourceType.KEYWORD}:
+                self._maybe_collect_transcript(
+                    job, video, newly_discovered=newly_discovered
+                )
         self._set_phase_progress(job, phase="videos", completed=len(videos), total=1, current_stage="video_persisted")
         if not videos:
             return
@@ -283,3 +365,17 @@ class YouTubeCollector(DiscoveryCollectionMixin, CommentCollectionMixin):
                 self._collect_comments(job, video, max_pages, incremental_refresh=False)
             self._set_phase_progress(job, phase="comments", completed=1, total=1, current_stage="comments_persisted")
         self._checkpoint(job, stage="completed", scope_key=video_id, page_token=None, batch_cursor=1)
+
+    @staticmethod
+    def _video_matches_source_window(source: Any, video: VideoRecord) -> bool:
+        """Enforce exact keyword timestamps after canonical videos.list hydration."""
+
+        if source.type is not SourceType.KEYWORD or video.published_at is None:
+            return True
+        published_after = parse_rfc3339(source.config.get("publishedAfter"))
+        published_before = parse_rfc3339(source.config.get("publishedBefore"))
+        if published_after and video.published_at < published_after:
+            return False
+        if published_before and video.published_at > published_before:
+            return False
+        return True

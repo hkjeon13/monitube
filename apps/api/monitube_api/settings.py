@@ -19,6 +19,19 @@ class Settings:
     youtube_api_timeout_seconds: float
     youtube_api_secret_ref: str
     youtube_google_project_number: str
+    discovery_provider: str
+    searchapi_api_key: str | None
+    searchapi_base_url: str
+    searchapi_timeout_seconds: float
+    searchapi_gl: str
+    searchapi_hl: str
+    searchapi_zero_retention: bool
+    searchapi_channel_token_post_threshold_bytes: int
+    transcript_collection_enabled: bool
+    transcript_primary_language: str
+    transcript_fallback_language: str
+    transcript_type_preference: str
+    transcript_max_segments: int
     environment: str
     worker_poll_seconds: float
     worker_lease_seconds: int
@@ -97,6 +110,19 @@ class Settings:
             youtube_api_timeout_seconds=positive_float("YOUTUBE_API_TIMEOUT_SECONDS", 20.0),
             youtube_api_secret_ref=values.get("YOUTUBE_API_KEY_SECRET_REF", "env:YOUTUBE_API_KEY").strip() or "env:YOUTUBE_API_KEY",
             youtube_google_project_number=values.get("YOUTUBE_GOOGLE_PROJECT_NUMBER", "server-managed").strip() or "server-managed",
+            discovery_provider=(values.get("DISCOVERY_PROVIDER", "youtube").strip().lower() or "youtube"),
+            searchapi_api_key=optional("SEARCH_API_KEY") or optional("SEARCHAPI_API_KEY"),
+            searchapi_base_url=(values.get("SEARCHAPI_BASE_URL", "").strip() or "https://www.searchapi.io/api/v1/search").rstrip("?"),
+            searchapi_timeout_seconds=positive_float("SEARCHAPI_TIMEOUT_SECONDS", 20.0),
+            searchapi_gl=(values.get("SEARCHAPI_GL", "kr").strip().lower() or "kr"),
+            searchapi_hl=(values.get("SEARCHAPI_HL", "ko").strip().lower() or "ko"),
+            searchapi_zero_retention=enabled("SEARCHAPI_ZERO_RETENTION"),
+            searchapi_channel_token_post_threshold_bytes=positive_int("SEARCHAPI_CHANNEL_TOKEN_POST_THRESHOLD_BYTES", 1800),
+            transcript_collection_enabled=enabled("TRANSCRIPT_COLLECTION_ENABLED", True),
+            transcript_primary_language=(values.get("TRANSCRIPT_PRIMARY_LANGUAGE", "ko").strip() or "ko"),
+            transcript_fallback_language=(values.get("TRANSCRIPT_FALLBACK_LANGUAGE", "en").strip() or "en"),
+            transcript_type_preference=(values.get("TRANSCRIPT_TYPE_PREFERENCE", "manual").strip().lower() or "manual"),
+            transcript_max_segments=positive_int("TRANSCRIPT_MAX_SEGMENTS", 100_000),
             environment=values.get("APP_ENV", "development").strip() or "development",
             worker_poll_seconds=positive_float("WORKER_POLL_SECONDS", 3.0),
             worker_lease_seconds=positive_int("WORKER_LEASE_SECONDS", 120),

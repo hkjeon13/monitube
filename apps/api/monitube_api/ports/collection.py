@@ -2,7 +2,7 @@
 
 from typing import Any, Iterable, Protocol
 
-from ..domain import CommentRecord, QuotaBucket, VideoRecord
+from ..domain import CommentRecord, QuotaBucket, VideoRecord, VideoTranscriptRecord
 
 
 class CollectionWriteRepository(Protocol):
@@ -46,6 +46,29 @@ class CollectionWriteRepository(Protocol):
         self,
         youtube_video_ids: Iterable[str],
     ) -> dict[str, int]: ...
+
+    def has_video_transcript(self, youtube_video_id: str) -> bool: ...
+
+    def upsert_video_transcript(
+        self, transcript: VideoTranscriptRecord
+    ) -> VideoTranscriptRecord: ...
+
+    def get_video_transcript(
+        self, youtube_video_id: str, *, owner_id: str | None = None
+    ) -> VideoTranscriptRecord: ...
+
+    def record_provider_request(
+        self,
+        *,
+        job_id: str,
+        provider: str,
+        operation: str,
+        status_code: int,
+        error_code: str | None = None,
+        item_count: int | None = None,
+        requested_language: str | None = None,
+        resolved_language: str | None = None,
+    ) -> None: ...
 
 
 class QuotaAuditRepository(Protocol):

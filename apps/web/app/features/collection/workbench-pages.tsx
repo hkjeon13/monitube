@@ -112,11 +112,13 @@ type SourcesPageProps = {
   activeSourceId: string;
   openMenuId: string | null;
   updatingSourceId: string | null;
+  refreshingSourceId: string | null;
   deletingSourceId: string | null;
   onAdd: (type?: "keyword") => void;
   onOpen: (sourceId: string) => void;
   onMenuChange: (sourceId: string | null) => void;
   onToggleRefresh: (source: SourceSummary) => void;
+  onRefreshNow: (source: SourceSummary) => void;
   onRemove: (source: SourceSummary) => void;
 };
 
@@ -127,11 +129,13 @@ export function SourcesPage({
   activeSourceId,
   openMenuId,
   updatingSourceId,
+  refreshingSourceId,
   deletingSourceId,
   onAdd,
   onOpen,
   onMenuChange,
   onToggleRefresh,
+  onRefreshNow,
   onRemove,
 }: SourcesPageProps) {
   const isKeywords = page === "keywords";
@@ -157,6 +161,7 @@ export function SourcesPage({
           </div>
           {displayedSources.map((source) => {
             const canToggleRefresh = source.type === "channel" && Boolean(source.targetId);
+            const canRefreshNow = ["channel", "keyword"].includes(source.type) && Boolean(source.targetId);
             const menuOpen = openMenuId === source.id;
             const channel = source.targetId ? explore.channels.find((item) => item.targetId === source.targetId) : undefined;
             const targetValue = sourceTargetValue(source);
@@ -178,6 +183,7 @@ export function SourcesPage({
                 <div className="source-card-actions">
                   <button className="source-more-button" type="button" disabled={deletingSourceId === source.id} onClick={() => onMenuChange(menuOpen ? null : source.id)} aria-label={`${sourceLabel(source)} 관리 메뉴`} aria-expanded={menuOpen} aria-haspopup="menu"><EllipsisHorizontalIcon aria-hidden="true" /></button>
                   {menuOpen && <div className="source-action-menu" role="menu" aria-label={`${sourceLabel(source)} 관리`}>
+                    {canRefreshNow && <button type="button" role="menuitem" disabled={refreshingSourceId === source.id} onClick={() => { onMenuChange(null); onRefreshNow(source); }}>{refreshingSourceId === source.id ? "재수집 요청 중…" : "지금 재수집"}</button>}
                     {canToggleRefresh && <button type="button" role="menuitem" disabled={updatingSourceId === source.id} onClick={() => { onMenuChange(null); onToggleRefresh(source); }}>{source.enabled ? "수집 일시정지" : "수집 재개"}</button>}
                     <button className="source-action-menu-delete" type="button" role="menuitem" onClick={() => onRemove(source)}>삭제</button>
                   </div>}

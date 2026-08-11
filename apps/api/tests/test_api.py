@@ -108,6 +108,42 @@ def test_source_and_job_contract_is_project_free() -> None:
     assert client.get("/v1/projects").status_code == 404
 
 
+def test_manual_source_refresh_deduplicates_and_resets_automatic_cadence() -> None:
+    repository = InMemoryRepository()
+    client = _multi_user_client(repository)
+    source = client.post(
+        "/v1/sources",
+        headers={"X-Test-User": "user-a"},
+        json={"type": "keyword", "config": {"query": "new product"}},
+    ).json()
+    initial_job = source["latestJob"]
+    repository.transition_job(initial_job["id"], JobState.RUNNING)
+    repository.transition_job(initial_job["id"], JobState.COMPLETED)
+
+    response = client.post(
+        f"/v1/sources/{source['id']}/refresh",
+        headers={"X-Test-User": "user-a", "Idempotency-Key": "manual-refresh-1"},
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["disposition"] == "queued"
+    pin = repository.get_target_pin(target_id=body["targetId"])
+    assert pin is not None
+    assert pin["last_dispatched_at"] is not None
+    assert pin["next_run_at"] > pin["last_dispatched_at"]
+    assert (pin["next_run_at"] - pin["last_dispatched_at"]).total_seconds() == 6 * 60 * 60
+    next_run_at = pin["next_run_at"]
+
+    replay = client.post(
+        f"/v1/sources/{source['id']}/refresh",
+        headers={"X-Test-User": "user-a", "Idempotency-Key": "manual-refresh-1"},
+    )
+    assert replay.status_code == 202
+    assert replay.json()["id"] == body["id"]
+    assert repository.get_target_pin(target_id=body["targetId"])["next_run_at"] == next_run_at
+
+
 def test_active_jobs_returns_only_the_callers_parent_jobs() -> None:
     repository = InMemoryRepository()
     client = _multi_user_client(repository)

@@ -85,7 +85,10 @@ Copy `.env.example` to `.env` and edit only local values. `.env` is ignored by G
 | `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET` | same | same | local MinIO analysis-artifact bucket access |
 | `*_BIND_ADDRESS` / `*_PORT` | `127.0.0.1` and local defaults | n/a | host binding and collision-safe published ports |
 | `NEXT_PUBLIC_API_BASE_URL` | browser-reachable API URL | passed into the web build/runtime | public browser configuration only |
-| `YOUTUBE_API_KEY` | optional local server secret | API/worker only | server-managed YouTube Data API access |
+| `YOUTUBE_API_KEY` | optional local server secret | API/worker only | canonical video hydration and official comment collection |
+| `SEARCH_API_KEY` | optional local server secret | API/worker only | SearchAPI.io channel/keyword discovery and transcript collection |
+| `DISCOVERY_PROVIDER` | `searchapi` | API/worker | `searchapi` uses SearchAPI.io for channel and keyword discovery; `youtube` is the rollback path |
+| `TRANSCRIPT_COLLECTION_ENABLED` | `true` | worker | collect transcripts for newly discovered channel/keyword videos, preferring Korean then English |
 | `MONITUBE_WORKER_REPLICAS` | `2` | deployment script only | number of concurrent collection workers |
 | `MONITUBE_ANALYSIS_WORKER_REPLICAS` | `1` | deployment script only | number of independent summary workers |
 | `*_DB_POOL_*` | per-process values | same | bounded PostgreSQL connection-pool budgets |
@@ -179,7 +182,8 @@ services, and verifies `/health` plus `/ready`. Operational procedures are in
 Do not put a YouTube key in `.env`, a shell command, Git configuration, logs, or a
 commit. The deployment host uses the regular, mode-`0600` file
 `/data/psyche/.config/monitube/youtube.env` by default (override only with
-`MONITUBE_YOUTUBE_SECRET_ENV_FILE`). It may contain one `YOUTUBE_API_KEY=...` entry
+`MONITUBE_YOUTUBE_SECRET_ENV_FILE`). It may contain `YOUTUBE_API_KEY=...` and
+`SEARCH_API_KEY=...` entries
 and is loaded only into API and worker; the deployment script validates it without
 printing or sourcing the value. If the file is empty, deployment remains valid and
 API/worker operate in fixture/no-op mode until live collection is intentionally

@@ -55,6 +55,16 @@ class MemoryReadMixin:
             pin = self._pins.get(target_id)
             return deepcopy(pin) if pin else None
 
+    def mark_target_manual_dispatch(self, *, target_id: str, dispatched_at: datetime) -> None:
+        with self._lock:
+            pin = self._pins.get(target_id)
+            if not pin or not pin["enabled"]:
+                return
+            if pin.get("last_dispatched_at") and pin["last_dispatched_at"] >= dispatched_at:
+                return
+            pin["last_dispatched_at"] = dispatched_at
+            pin["next_run_at"] = dispatched_at + timedelta(minutes=int(pin["interval_minutes"]))
+
     def dispatch_due_pins(self, *, runtime_config_id: str | None = None, limit: int = 10) -> int:
         with self._lock:
             now = utcnow()

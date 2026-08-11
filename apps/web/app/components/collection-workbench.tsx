@@ -37,6 +37,7 @@ import {
   getVideoCommentThreads,
   listRecentJobFailures,
   listSources,
+  refreshSource,
   updateSource,
   type CommentThreadItem,
   type CommentThreadSort,
@@ -147,6 +148,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   const [isExploreLoadingMore, setIsExploreLoadingMore] = useState(false);
   const [exploreError, setExploreError] = useState<string | null>(null);
   const [updatingSourceId, setUpdatingSourceId] = useState<string | null>(null);
+  const [refreshingSourceId, setRefreshingSourceId] = useState<string | null>(null);
   const [deletingSourceId, setDeletingSourceId] = useState<string | null>(null);
   const [openSourceMenuId, setOpenSourceMenuId] = useState<string | null>(null);
   const [exploreChannelId, setExploreChannelId] = useState<string | null>(null);
@@ -547,6 +549,32 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
       setExploreError(caught instanceof Error ? caught.message : "수집 상태를 변경하지 못했습니다.");
     } finally {
       setUpdatingSourceId(null);
+    }
+  }, [refreshExplore, refreshSources]);
+
+  const refreshSourceNow = useCallback(async (source: SourceSummary) => {
+    setRefreshingSourceId(source.id);
+    setExploreError(null);
+    try {
+      const response = await refreshSource(source.id, idempotencyKey());
+      if (response.job) {
+        const entry: ActiveSourceJob = {
+          sourceId: source.id,
+          ...(response.targetId ? { targetId: response.targetId } : {}),
+          job: response.job,
+        };
+        activeJobsRef.current.set(activeJobKey(entry), entry);
+        handledTerminalJobsRef.current.delete(activeJobKey(entry));
+        wakeActiveJobsPollRef.current?.();
+      }
+      await Promise.all([refreshSources(), refreshExplore()]);
+      setNotice(response.disposition === "joined"
+        ? "이미 진행 중인 수집 작업에 합류했습니다."
+        : "즉시 재수집을 요청했습니다. 다음 자동 수집은 이 요청 시점부터 약 6시간 뒤입니다.");
+    } catch (caught) {
+      setExploreError(caught instanceof Error ? caught.message : "즉시 재수집을 요청하지 못했습니다.");
+    } finally {
+      setRefreshingSourceId(null);
     }
   }, [refreshExplore, refreshSources]);
 
@@ -1053,11 +1081,13 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
           activeSourceId={activeSourceId}
           openMenuId={openSourceMenuId}
           updatingSourceId={updatingSourceId}
+          refreshingSourceId={refreshingSourceId}
           deletingSourceId={deletingSourceId}
           onAdd={(type) => openCollectionDrawer(undefined, type)}
           onOpen={openSourceWorkspace}
           onMenuChange={setOpenSourceMenuId}
           onToggleRefresh={(source) => { void toggleSubscriptionRefresh(source); }}
+          onRefreshNow={(source) => { void refreshSourceNow(source); }}
           onRemove={(source) => { void removeSource(source); }}
         />
 

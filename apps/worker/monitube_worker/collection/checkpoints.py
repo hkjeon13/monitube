@@ -15,6 +15,7 @@ DURABLE_CHECKPOINT_KEYS = (
     "keywordExpectedTotal",
     "keywordBackfill",
     "keywordHistoricalBackfillComplete",
+    "transcriptVideoId",
 )
 
 
