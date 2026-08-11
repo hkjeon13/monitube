@@ -48,17 +48,15 @@ def _korean_analyzer() -> Kiwi:
 
 
 def _content_word(token_form: str, token_tag: str) -> str | None:
-    """Return a display lemma for content nouns and lexical verbs only."""
+    """Return a normalized display form for common and proper nouns only."""
 
     if token_tag in _CONTENT_NOUN_TAGS:
         return token_form.lower()
-    if token_tag.startswith("VV"):
-        return f"{token_form}다"
     return None
 
 
 def top_words_from_texts(texts: Iterable[str | None], *, limit: int = 10) -> list[dict[str, int | str]]:
-    """Count Korean content nouns and lexical verb lemmas from public text."""
+    """Count Korean common and proper nouns from public text."""
 
     counts: Counter[str] = Counter()
     normalized_texts = [
@@ -75,7 +73,7 @@ def top_words_from_texts(texts: Iterable[str | None], *, limit: int = 10) -> lis
 
 
 def top_words(comments: Iterable[CommentRecord], *, limit: int = 10) -> list[dict[str, int | str]]:
-    """Return Korean noun and verb frequencies from public comments."""
+    """Return Korean common and proper noun frequencies from public comments."""
 
     return top_words_from_texts((comment.text_display for comment in comments), limit=limit)
 

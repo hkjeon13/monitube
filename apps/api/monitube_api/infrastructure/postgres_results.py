@@ -410,7 +410,7 @@ class PostgresResultMixin:
                     FROM analysis_runs run
                     JOIN analysis_results result ON result.analysis_run_id = run.id
                     WHERE run.target_id = %s AND run.state = 'completed'
-                      AND run.pipeline_version = 'deterministic-v2'
+                      AND run.pipeline_version = 'deterministic-v3'
                       AND result.result_kind = 'basic_summary'
                       AND result.deleted_at IS NULL
                       AND (result.expires_at IS NULL OR result.expires_at > now())
@@ -429,7 +429,7 @@ class PostgresResultMixin:
                     JOIN analysis_results result ON result.analysis_run_id = run.id
                     WHERE run.target_id IS NULL AND run.source_id = %s
                       AND run.state = 'completed'
-                      AND run.pipeline_version = 'deterministic-v2'
+                      AND run.pipeline_version = 'deterministic-v3'
                       AND result.result_kind = 'basic_summary'
                       AND result.deleted_at IS NULL
                       AND (result.expires_at IS NULL OR result.expires_at > now())
@@ -447,7 +447,7 @@ class PostgresResultMixin:
                     """
                     SELECT run.state, run.coverage FROM analysis_runs run
                     WHERE run.target_id = %s AND run.data_version = %s
-                      AND run.pipeline_version = 'deterministic-v2'
+                      AND run.pipeline_version = 'deterministic-v3'
                     ORDER BY run.created_at DESC LIMIT 1
                     """,
                     (target_id, data_version),
@@ -458,7 +458,7 @@ class PostgresResultMixin:
                     SELECT run.state, run.coverage FROM analysis_runs run
                     WHERE run.target_id IS NULL AND run.source_id = %s
                       AND run.data_version = %s
-                      AND run.pipeline_version = 'deterministic-v2'
+                      AND run.pipeline_version = 'deterministic-v3'
                     ORDER BY run.created_at DESC LIMIT 1
                     """,
                     (membership_id, data_version),
@@ -670,7 +670,7 @@ class PostgresResultMixin:
                     SELECT 1 FROM analysis_runs run
                     WHERE run.target_id = target.id
                       AND run.data_version = target.data_version
-                      AND run.pipeline_version = 'deterministic-v2'
+                      AND run.pipeline_version = 'deterministic-v3'
                   )
                   ORDER BY target.updated_at DESC
                   LIMIT %s
@@ -680,7 +680,7 @@ class PostgresResultMixin:
                   pipeline_version, policy_gate_version, sample_plan
                 )
                 SELECT source_id, target_id, job_id, data_version, 'queued',
-                       'deterministic-v2', 'server-managed', %s
+                       'deterministic-v3', 'server-managed', %s
                 FROM candidate
                 ON CONFLICT DO NOTHING
                 """,
@@ -708,7 +708,7 @@ class PostgresResultMixin:
                       SELECT 1 FROM analysis_runs run
                       WHERE run.target_id IS NULL AND run.source_id = source.id
                         AND run.data_version = source.data_version
-                        AND run.pipeline_version = 'deterministic-v2'
+                        AND run.pipeline_version = 'deterministic-v3'
                     )
                   ORDER BY source.updated_at DESC
                   LIMIT %s
@@ -718,7 +718,7 @@ class PostgresResultMixin:
                   pipeline_version, policy_gate_version, sample_plan
                 )
                 SELECT source_id, job_id, data_version, 'queued',
-                       'deterministic-v2', 'server-managed', %s
+                       'deterministic-v3', 'server-managed', %s
                 FROM candidate
                 ON CONFLICT DO NOTHING
                 """,
@@ -770,14 +770,13 @@ class PostgresResultMixin:
         max_comments: int = 50_000,
         max_per_video: int = 1_000,
     ) -> dict[str, Any]:
-        """Build one bounded deterministic summary and atomically publish it."""
+        """Build one bounded summary without holding a transaction during NLP."""
 
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
                 SELECT * FROM analysis_runs
                 WHERE id = %s AND state = 'running' AND lease_owner = %s
-                FOR UPDATE
                 """,
                 (run_id, worker_id),
             )
@@ -836,27 +835,32 @@ class PostgresResultMixin:
                 (scope_value, per_video_limit, max_comments),
             )
             sampled_texts = [str(row["text_display"]) for row in cursor.fetchall()]
-            generated_at = utcnow()
-            summary = {
-                "videoCount": video_count,
-                "commentCount": int(aggregate.get("comment_count") or 0),
-                "latestVideoPublishedAt": aggregate.get("latest_video_published_at"),
-                "latestCommentPublishedAt": aggregate.get("latest_comment_published_at"),
-                "topWords": top_words_from_texts(sampled_texts),
-                "generatedAt": generated_at,
-            }
             coverage = dict(run.get("coverage") or {})
-            coverage.update(
-                {
-                    "sampledComments": len(sampled_texts),
-                    "totalComments": summary["commentCount"],
-                    "sampleRatio": (
-                        len(sampled_texts) / summary["commentCount"]
-                        if summary["commentCount"]
-                        else 1.0
-                    ),
-                }
-            )
+
+        # Kiwi tokenization of a large comment sample can take longer than the
+        # server's idle-in-transaction timeout. Keep the durable lease, but release
+        # the read transaction before doing CPU-only analysis.
+        summary = {
+            "videoCount": video_count,
+            "commentCount": int(aggregate.get("comment_count") or 0),
+            "latestVideoPublishedAt": aggregate.get("latest_video_published_at"),
+            "latestCommentPublishedAt": aggregate.get("latest_comment_published_at"),
+            "topWords": top_words_from_texts(sampled_texts),
+            "generatedAt": utcnow(),
+        }
+        coverage.update(
+            {
+                "sampledComments": len(sampled_texts),
+                "totalComments": summary["commentCount"],
+                "sampleRatio": (
+                    len(sampled_texts) / summary["commentCount"]
+                    if summary["commentCount"]
+                    else 1.0
+                ),
+            }
+        )
+
+        with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
                 INSERT INTO analysis_results (analysis_run_id, result_kind, payload)
@@ -871,13 +875,13 @@ class PostgresResultMixin:
                 UPDATE analysis_runs
                 SET state = 'completed', completed_at = now(), coverage = %s,
                     lease_owner = NULL, lease_expires_at = NULL, last_error = NULL
-                WHERE id = %s AND lease_owner = %s
+                WHERE id = %s AND state = 'running' AND lease_owner = %s
                 """,
                 (Json(coverage), run_id, worker_id),
             )
             if cursor.rowcount != 1:
                 raise RepositoryError(f"Analysis run '{run_id}' lease was lost")
-            return summary
+        return summary
 
     def fail_analysis_run(
         self,
@@ -930,11 +934,11 @@ class PostgresResultMixin:
                   source_id, target_id, data_version, state,
                   pipeline_version, policy_gate_version, sample_plan
                 )
-                SELECT %s, %s, %s, 'queued', 'deterministic-v2',
+                SELECT %s, %s, %s, 'queued', 'deterministic-v3',
                        'server-managed', %s
                 WHERE NOT EXISTS (
                   SELECT 1 FROM analysis_runs
-                  WHERE data_version = %s AND pipeline_version = 'deterministic-v2'
+                  WHERE data_version = %s AND pipeline_version = 'deterministic-v3'
                     AND (
                       (%s::uuid IS NOT NULL AND target_id = %s::uuid)
                       OR (%s::uuid IS NULL AND target_id IS NULL AND source_id = %s::uuid)

@@ -6,7 +6,7 @@ import {
   PlusIcon,
   TrashIcon,
 } from "@heroicons/react/24/outline";
-import type { JobStatus } from "@monitube/contracts";
+import Link from "next/link";
 
 import type { ExploreData, RecentJobFailure, SourceSummary } from "../../lib/api";
 import { SourceCollectionState } from "./workbench-components";
@@ -18,15 +18,6 @@ import {
   sourceTypeCopy,
   type WorkspacePage,
 } from "./workbench-model";
-
-function progressCopy(progress: JobStatus["progress"] | undefined) {
-  if (!progress) return "기록 없음";
-  if (progress.total === undefined) return `${formatCount(progress.completed)}개 처리`;
-  if (progress.total <= 0) return "대상 없음";
-  const rate = (progress.completed / progress.total) * 100;
-  const percent = progress.completed > 0 && rate < 1 ? "<1%" : `${Math.round(rate)}%`;
-  return `${percent} · ${formatCount(progress.completed)}/${formatCount(progress.total)}`;
-}
 
 type StatusPageProps = {
   failures: RecentJobFailure[];
@@ -47,11 +38,11 @@ export function StatusPage({ failures, error, loading, onClear, onRefresh }: Sta
       <section className="panel recent-failures-panel" aria-labelledby="recent-failures-title" aria-busy={loading}>
         <div className="panel-heading">
           <div>
-            <p className="section-kicker">RECENT FAILURES</p>
-            <h2 id="recent-failures-title">최근 공유 수집 대상 실패</h2>
+            <p className="section-kicker">COLLECTION HISTORY</p>
+            <h2 id="recent-failures-title">수집 기록</h2>
           </div>
           <div className="panel-heading-actions">
-            <button className="icon-button recent-failures-clear" type="button" onClick={onClear} disabled={loading || failures.length === 0} aria-label="과거 수집 실패 기록 숨기기">
+            <button className="icon-button recent-failures-clear" type="button" onClick={onClear} disabled={loading || failures.length === 0} aria-label="수집 기록 삭제">
               <TrashIcon aria-hidden="true" />
             </button>
             <button className="icon-button" type="button" onClick={onRefresh} disabled={loading} aria-label="최근 수집 실패 새로고침">
@@ -107,6 +98,7 @@ type SourcesPageProps = {
   page: WorkspacePage;
   sources: SourceSummary[];
   explore: ExploreData;
+  loading: boolean;
   activeSourceId: string;
   openMenuId: string | null;
   updatingSourceId: string | null;
@@ -124,6 +116,7 @@ export function SourcesPage({
   page,
   sources,
   explore,
+  loading,
   activeSourceId,
   openMenuId,
   updatingSourceId,
@@ -137,7 +130,7 @@ export function SourcesPage({
   onRemove,
 }: SourcesPageProps) {
   const isKeywords = page === "keywords";
-  const displayedSources = isKeywords ? sources.filter((source) => source.type === "keyword") : sources;
+  const displayedSources = sources.filter((source) => source.type === (isKeywords ? "keyword" : "channel"));
 
   return (
     <section className="sources-page" aria-labelledby="sources-page-title">
@@ -147,14 +140,16 @@ export function SourcesPage({
           <PlusIcon aria-hidden="true" />
         </button>
       </div>
+      <nav className="source-kind-tabs" aria-label="수집 대상 종류">
+        <Link href="/sources" aria-current={!isKeywords ? "page" : undefined}>채널</Link>
+        <Link href="/keywords" aria-current={isKeywords ? "page" : undefined}>키워드</Link>
+      </nav>
       <div className="sources-table-wrap">
-        <div className="sources-page-list" aria-label="수집 대상 목록">
+        <div className="sources-page-list" aria-label="수집 대상 목록" aria-busy={loading}>
           <div className="source-table-header">
-            <span>구분</span>
             <span>수집 대상</span>
             <span>수집 상태</span>
-            <span>보유 데이터</span>
-            <span>이번 수집</span>
+            <span>수집 현황</span>
             <span className="source-table-actions-header">관리</span>
           </div>
           {displayedSources.map((source) => {
@@ -166,25 +161,26 @@ export function SourcesPage({
             const channelName = channel?.title ?? channel?.handle ?? (source.type === "channel" ? "채널 정보 확인 중" : targetValue);
             const channelId = channel?.youtubeChannelId ?? targetValue;
             const reportedVideoCount = source.type === "channel" ? channel?.youtubeVideoCount : undefined;
-            const coverageRate = reportedVideoCount && reportedVideoCount > 0
+            const videoRate = reportedVideoCount && reportedVideoCount > 0
               ? Math.min(100, Math.round((source.storedVideoCount / reportedVideoCount) * 100))
               : undefined;
-            const storedVideoCopy = reportedVideoCount && reportedVideoCount > 0
-              ? `영상 ${formatCount(source.storedVideoCount)}/${formatCount(reportedVideoCount)}${source.storedVideoCount > reportedVideoCount ? " · 채널 수치 갱신 필요" : ` · ${coverageRate}%`}`
-              : `영상 ${formatCount(source.storedVideoCount)}개${source.type === "channel" ? " · 전체 수 미확인" : ""}`;
-            const latestVideoCopy = progressCopy(source.latestJob?.videoProgress);
-            const latestCommentCopy = source.config.includeComments === true
-              ? progressCopy(source.latestJob?.commentProgress)
-              : "댓글 수집 안 함";
+            const videoCollectionCopy = reportedVideoCount !== undefined
+              ? `영상 ${formatCount(source.storedVideoCount)}/${formatCount(reportedVideoCount)}개 (${reportedVideoCount === 0 ? 100 : videoRate}%)`
+              : `영상 ${formatCount(source.storedVideoCount)}개 · 전체 미확인`;
+            const reportedCommentCount = source.reportedCommentCount;
+            const commentRate = reportedCommentCount > 0
+              ? Math.min(100, Math.round((source.storedCommentCount / reportedCommentCount) * 100))
+              : source.storedCommentCount === 0 ? 100 : undefined;
+            const commentCollectionCopy = commentRate === undefined
+              ? `댓글 ${formatCount(source.storedCommentCount)}개 · 전체 미확인`
+              : `댓글 ${formatCount(source.storedCommentCount)}/${formatCount(reportedCommentCount)}개 (${commentRate}%)`;
             return (
               <article key={source.id} className={`source-page-card${source.id === activeSourceId ? " source-page-card-active" : ""}${menuOpen ? " source-page-card-menu-open" : ""}`}>
                 <button type="button" className="source-page-select" onClick={() => { onMenuChange(null); onOpen(source.id); }} aria-label={`${sourceLabel(source)} 작업 공간 열기`}>
-                  <span className="source-type-chip">{sourceTypeCopy(source.type)}</span>
                   <strong title={channelId}>{channelName}</strong>
                 </button>
                 <SourceCollectionState source={source} />
-                <span className="source-collection-rate source-video-collection-rate"><strong>{storedVideoCopy}</strong><small>댓글 {formatCount(source.storedCommentCount)}개</small></span>
-                <span className="source-collection-rate source-comment-collection-rate"><strong>영상 {latestVideoCopy}</strong><small>{latestCommentCopy}</small></span>
+                <span className="source-collection-rate source-overall-collection-rate"><strong>{videoCollectionCopy}</strong><small>{commentCollectionCopy}</small></span>
                 <div className="source-card-actions">
                   <button className="source-more-button" type="button" disabled={deletingSourceId === source.id} onClick={() => onMenuChange(menuOpen ? null : source.id)} aria-label={`${sourceLabel(source)} 관리 메뉴`} aria-expanded={menuOpen} aria-haspopup="menu"><EllipsisHorizontalIcon aria-hidden="true" /></button>
                   {menuOpen && <div className="source-action-menu" role="menu" aria-label={`${sourceLabel(source)} 관리`}>
@@ -196,7 +192,13 @@ export function SourcesPage({
               </article>
             );
           })}
-          {displayedSources.length === 0 && <div className="explore-empty">{isKeywords ? "아직 등록된 키워드가 없습니다." : "아직 등록된 수집 대상이 없습니다."}</div>}
+          {loading && displayedSources.length === 0 && (
+            <div className="source-list-loading" role="status">
+              <span className="loading-spinner" aria-hidden="true" />
+              <span>수집 대상을 불러오는 중입니다.</span>
+            </div>
+          )}
+          {!loading && displayedSources.length === 0 && <div className="explore-empty">{isKeywords ? "아직 등록된 키워드가 없습니다." : "아직 등록된 수집 대상이 없습니다."}</div>}
         </div>
       </div>
     </section>

@@ -445,7 +445,7 @@ class FullChannelClient:
 
     def request(self, endpoint: str, _params: dict[str, object]):
         if endpoint == "channels":
-            return {"items": [{"id": "UCabcdefghijklmnopqrstuv", "snippet": {"title": "Example"}, "contentDetails": {"relatedPlaylists": {"uploads": "UUexample"}}}]}
+            return {"items": [{"id": "UCabcdefghijklmnopqrstuv", "snippet": {"title": "Example"}, "contentDetails": {"relatedPlaylists": {"uploads": "UUexample"}}, "statistics": {"videoCount": "2"}}]}
         if endpoint == "playlistItems":
             self.playlist_calls += 1
             video_id = "dQw4w9WgXcQ" if self.playlist_calls == 1 else "M7lc1UVf-VE"
@@ -825,16 +825,17 @@ class HistoricalBackfillClient:
 def test_channel_count_deficit_continues_to_oldest_playlist_pages() -> None:
     repository = InMemoryRepository()
     channel_id = "UCabcdefghijklmnopqrstuv"
+    source = repository.create_source(
+        source_type=SourceType.CHANNEL,
+        config={"input": "@example", "includeComments": False, "collectAllVideos": True},
+    )
     for video_id in ("newest-1", "newest-2"):
         repository.upsert_video(VideoRecord(
             id=new_id(), youtube_video_id=video_id, youtube_channel_id=channel_id,
             title="Stored", description=None, published_at=None, duration_seconds=None,
             privacy_status="public", made_for_kids=False, statistics={}, source_fetched_at=utcnow(),
         ))
-    source = repository.create_source(
-        source_type=SourceType.CHANNEL,
-        config={"input": "@example", "includeComments": False, "collectAllVideos": True},
-    )
+        repository.link_source_video(source.id, video_id)
     job = repository.create_job(source_id=source.id, include_comments=False, max_videos=None, max_comments_per_video=None)
     client = HistoricalBackfillClient()
 
@@ -844,7 +845,7 @@ def test_channel_count_deficit_continues_to_oldest_playlist_pages() -> None:
 
     assert backfill_required is True
     assert client.playlist_calls == 2
-    assert ids == ["oldest-2", "oldest-1", "newest-2", "newest-1"]
+    assert ids == ["newest-1", "newest-2", "oldest-1", "oldest-2"]
     assert set(known_videos) == {"newest-1", "newest-2"}
 
 
@@ -889,9 +890,12 @@ def test_direct_video_collection_persists_video_comments_and_summary() -> None:
     assert completed.checkpoint["youtubeVideoId"] == "dQw4w9WgXcQ"
     assert result["videos"][0].title == "Demo"
     assert result["comments"][0].youtube_comment_id == "comment-1"
-    assert {"분석", "결과", "보이다"}.issubset(
+    assert {"분석", "결과"}.issubset(
         {item["word"] for item in result["analysis"]["topWords"]}
     )
+    assert "보이다" not in {
+        item["word"] for item in result["analysis"]["topWords"]
+    }
 
 
 def test_comment_collection_follows_every_reply_page() -> None:
@@ -1018,6 +1022,141 @@ class SearchDiscoveryClient:
         }
 
 
+class SearchDeficitDiscoveryClient:
+    def __init__(self, *, reported_video_count: int) -> None:
+        self.reported_video_count = reported_video_count
+        self.page_tokens: list[str | None] = []
+
+    def channel(self, *, channel_id: str):
+        assert channel_id == "@deficit"
+        return {
+            "channel": {
+                "id": "UCdeficitabcdefghijklmn",
+                "handle": "@deficit",
+                "title": "Deficit",
+                "videos": self.reported_video_count,
+            }
+        }
+
+    def channel_videos(
+        self, *, channel_id: str, next_page_token: str | None = None
+    ):
+        assert channel_id == "UCdeficitabcdefghijklmn"
+        self.page_tokens.append(next_page_token)
+        if next_page_token is None:
+            return {
+                "videos": [{"id": f"known-{index}"} for index in range(10)],
+                "pagination": {"next_page_token": "page-2"},
+            }
+        if next_page_token == "page-2":
+            return {
+                "videos": [{"id": f"known-{index}"} for index in range(10)],
+                "pagination": {"next_page_token": "page-3"},
+            }
+        assert next_page_token == "page-3"
+        return {"videos": [{"id": "new-historical-video"}]}
+
+
+def test_searchapi_channel_deficit_continues_past_all_known_pages_by_video_id() -> None:
+    repository = InMemoryRepository()
+    source = repository.create_source(
+        source_type=SourceType.CHANNEL,
+        config={"input": "@deficit", "collectAllVideos": True},
+    )
+    for index in range(10):
+        video_id = f"known-{index}"
+        repository.upsert_video(
+            VideoRecord(
+                id=new_id(),
+                youtube_video_id=video_id,
+                youtube_channel_id="UCdeficitabcdefghijklmn",
+                title=video_id,
+                description=None,
+                published_at=None,
+                duration_seconds=None,
+                privacy_status="public",
+                made_for_kids=False,
+                statistics={},
+                source_fetched_at=utcnow(),
+            )
+        )
+        repository.link_source_video(source.id, video_id)
+    job = repository.create_job(
+        source_id=source.id,
+        include_comments=False,
+        max_videos=None,
+        max_comments_per_video=None,
+    )
+    discovery_client = SearchDeficitDiscoveryClient(reported_video_count=100)
+    collector = YouTubeCollector(
+        repository,
+        DirectVideoClient(),
+        discovery_provider="searchapi",
+        discovery_client=discovery_client,
+    )
+
+    video_ids, _, backfill_required = collector._channel_video_ids(
+        job, source.config, incremental_refresh=True
+    )
+
+    assert backfill_required is True
+    assert discovery_client.page_tokens == [None, "page-2", "page-3"]
+    assert video_ids == [
+        *(f"known-{index}" for index in range(10)),
+        "new-historical-video",
+    ]
+    checkpoint = repository.get_job(job.id).checkpoint["channelDiscovery"]
+    assert checkpoint["newVideoCount"] == 1
+    assert checkpoint["reconciliationComplete"] is True
+
+
+def test_searchapi_channel_without_count_deficit_checks_head_page_only() -> None:
+    repository = InMemoryRepository()
+    source = repository.create_source(
+        source_type=SourceType.CHANNEL,
+        config={"input": "@deficit", "collectAllVideos": True},
+    )
+    for index in range(10):
+        video_id = f"known-{index}"
+        repository.upsert_video(
+            VideoRecord(
+                id=new_id(),
+                youtube_video_id=video_id,
+                youtube_channel_id="UCdeficitabcdefghijklmn",
+                title=video_id,
+                description=None,
+                published_at=None,
+                duration_seconds=None,
+                privacy_status="public",
+                made_for_kids=False,
+                statistics={},
+                source_fetched_at=utcnow(),
+            )
+        )
+        repository.link_source_video(source.id, video_id)
+    job = repository.create_job(
+        source_id=source.id,
+        include_comments=False,
+        max_videos=None,
+        max_comments_per_video=None,
+    )
+    discovery_client = SearchDeficitDiscoveryClient(reported_video_count=10)
+    collector = YouTubeCollector(
+        repository,
+        DirectVideoClient(),
+        discovery_provider="searchapi",
+        discovery_client=discovery_client,
+    )
+
+    video_ids, _, backfill_required = collector._channel_video_ids(
+        job, source.config, incremental_refresh=True
+    )
+
+    assert backfill_required is False
+    assert discovery_client.page_tokens == [None]
+    assert video_ids == [f"known-{index}" for index in range(10)]
+
+
 def test_searchapi_discovery_collects_channel_and_keyword_video_ids() -> None:
     repository = InMemoryRepository()
     channel_source = repository.create_source(
@@ -1054,5 +1193,5 @@ def test_searchapi_discovery_collects_channel_and_keyword_video_ids() -> None:
         keyword_job, keyword_source.config, historical_backfill=True
     )
 
-    assert channel_ids == ["channelVid2", "channelVid1"]
+    assert channel_ids == ["channelVid1", "channelVid2"]
     assert keyword_ids == ["keywordVid1", "shortVideo1"]

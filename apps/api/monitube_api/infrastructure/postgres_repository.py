@@ -155,7 +155,7 @@ class PostgresRepository(
                 """
                 SELECT EXISTS (
                   SELECT 1 FROM monitube_schema_migrations
-                  WHERE filename = '016_search_planner_statistics.sql'
+                  WHERE filename = '019_noun_only_analysis_pipeline.sql'
                 ) AS migration_current
                 """
             )
@@ -225,6 +225,7 @@ class PostgresRepository(
             else None,
             stored_video_count=int(row.get("stored_video_count") or 0),
             stored_comment_count=int(row.get("stored_comment_count") or 0),
+            reported_comment_count=int(row.get("reported_comment_count") or 0),
         )
 
     @staticmethod
@@ -637,7 +638,17 @@ class PostgresRepository(
                            (SELECT count(comment.id)::bigint
                             FROM collection_target_videos membership
                             LEFT JOIN comments comment ON comment.video_id = membership.video_id
-                            WHERE membership.target_id = target.id) AS stored_comment_count
+                            WHERE membership.target_id = target.id) AS stored_comment_count,
+                           (SELECT COALESCE(sum(COALESCE(latest_stats.comment_count, 0)), 0)::bigint
+                            FROM collection_target_videos membership
+                            LEFT JOIN LATERAL (
+                              SELECT snapshot.comment_count
+                              FROM video_stat_snapshots snapshot
+                              WHERE snapshot.video_id = membership.video_id
+                              ORDER BY snapshot.fetched_at DESC
+                              LIMIT 1
+                            ) latest_stats ON TRUE
+                            WHERE membership.target_id = target.id) AS reported_comment_count
                     FROM collection_subscriptions subscription
                     JOIN collection_targets target ON target.id = subscription.target_id
                     LEFT JOIN LATERAL (
@@ -669,7 +680,17 @@ class PostgresRepository(
                            (SELECT count(comment.id)::bigint
                             FROM source_videos membership
                             LEFT JOIN comments comment ON comment.video_id = membership.video_id
-                            WHERE membership.source_id = source.id) AS stored_comment_count
+                            WHERE membership.source_id = source.id) AS stored_comment_count,
+                           (SELECT COALESCE(sum(COALESCE(latest_stats.comment_count, 0)), 0)::bigint
+                            FROM source_videos membership
+                            LEFT JOIN LATERAL (
+                              SELECT snapshot.comment_count
+                              FROM video_stat_snapshots snapshot
+                              WHERE snapshot.video_id = membership.video_id
+                              ORDER BY snapshot.fetched_at DESC
+                              LIMIT 1
+                            ) latest_stats ON TRUE
+                            WHERE membership.source_id = source.id) AS reported_comment_count
                     FROM collection_sources source
                     LEFT JOIN LATERAL (
                       SELECT to_jsonb(job) AS latest_job
@@ -705,7 +726,29 @@ class PostgresRepository(
                                FROM source_videos membership
                                LEFT JOIN comments comment ON comment.video_id = membership.video_id
                                WHERE membership.source_id = cs.id)
-                       END AS stored_comment_count
+                       END AS stored_comment_count,
+                       CASE WHEN cs.target_id IS NOT NULL
+                         THEN (SELECT COALESCE(sum(COALESCE(latest_stats.comment_count, 0)), 0)::bigint
+                               FROM collection_target_videos membership
+                               LEFT JOIN LATERAL (
+                                 SELECT snapshot.comment_count
+                                 FROM video_stat_snapshots snapshot
+                                 WHERE snapshot.video_id = membership.video_id
+                                 ORDER BY snapshot.fetched_at DESC
+                                 LIMIT 1
+                               ) latest_stats ON TRUE
+                               WHERE membership.target_id = cs.target_id)
+                         ELSE (SELECT COALESCE(sum(COALESCE(latest_stats.comment_count, 0)), 0)::bigint
+                               FROM source_videos membership
+                               LEFT JOIN LATERAL (
+                                 SELECT snapshot.comment_count
+                                 FROM video_stat_snapshots snapshot
+                                 WHERE snapshot.video_id = membership.video_id
+                                 ORDER BY snapshot.fetched_at DESC
+                                 LIMIT 1
+                               ) latest_stats ON TRUE
+                               WHERE membership.source_id = cs.id)
+                       END AS reported_comment_count
                 FROM collection_sources cs
                 LEFT JOIN collection_targets ct ON ct.id = cs.target_id
                 LEFT JOIN LATERAL (

@@ -123,6 +123,18 @@ def job_coverage(
         coverage["maxVideos"] = int(
             job.max_videos or source_config.get("maxVideos") or 50
         )
+        coverage["channelReconciliationNextPageToken"] = (
+            job.checkpoint.get("channelReconciliationNextPageToken")
+        )
+        coverage["channelReconciliationComplete"] = bool(
+            job.checkpoint.get("channelReconciliationComplete")
+        )
+        coverage["channelReportedVideoCount"] = int(
+            job.checkpoint.get("channelReportedVideoCount") or 0
+        )
+        coverage["channelStoredVideoCount"] = int(
+            job.checkpoint.get("channelStoredVideoCount") or 0
+        )
     elif source_type is SourceType.KEYWORD:
         coverage["maxPagesPerRun"] = int(
             source_config.get("maxPagesPerRun") or 1

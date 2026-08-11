@@ -90,6 +90,7 @@ def source_contract(record: SourceRecord) -> CollectionSource:
         "latestJob": job_contract(record.latest_job) if record.latest_job else None,
         "storedVideoCount": record.stored_video_count,
         "storedCommentCount": record.stored_comment_count,
+        "reportedCommentCount": record.reported_comment_count,
     }
     if record.type is SourceType.CHANNEL:
         return ChannelCollectionSource(

@@ -67,6 +67,7 @@ export function normalizeSource(value: unknown): SourceSummary | null {
     config: asRecord(record.config) ?? {},
     storedVideoCount: asNumber(record.storedVideoCount ?? record.stored_video_count) ?? 0,
     storedCommentCount: asNumber(record.storedCommentCount ?? record.stored_comment_count) ?? 0,
+    reportedCommentCount: asNumber(record.reportedCommentCount ?? record.reported_comment_count) ?? 0,
     ...(asText(record.nextRunAt ?? record.next_run_at)
       ? { nextRunAt: asText(record.nextRunAt ?? record.next_run_at) }
       : {}),

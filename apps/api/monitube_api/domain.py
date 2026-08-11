@@ -74,6 +74,7 @@ class SourceRecord:
     # progress.
     stored_video_count: int = 0
     stored_comment_count: int = 0
+    reported_comment_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)

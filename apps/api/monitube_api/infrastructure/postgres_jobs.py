@@ -1020,13 +1020,13 @@ class PostgresJobMixin:
                                   source_id, job_id, data_version, state,
                                   pipeline_version, policy_gate_version, sample_plan, coverage
                                 )
-                                SELECT %s, %s, %s, 'queued', 'deterministic-v2',
+                                SELECT %s, %s, %s, 'queued', 'deterministic-v3',
                                        'server-managed', %s, %s
                                 WHERE NOT EXISTS (
                                   SELECT 1 FROM analysis_runs
                                   WHERE target_id IS NULL AND source_id = %s
                                     AND data_version = %s
-                                    AND pipeline_version = 'deterministic-v2'
+                                    AND pipeline_version = 'deterministic-v3'
                                 )
                                 """,
                                 (
@@ -1051,12 +1051,12 @@ class PostgresJobMixin:
                                   source_id, target_id, job_id, data_version, state,
                                   pipeline_version, policy_gate_version, sample_plan, coverage
                                 )
-                                SELECT %s, %s, %s, %s, 'queued', 'deterministic-v2',
+                                SELECT %s, %s, %s, %s, 'queued', 'deterministic-v3',
                                        'server-managed', %s, %s
                                 WHERE NOT EXISTS (
                                   SELECT 1 FROM analysis_runs
                                   WHERE target_id = %s AND data_version = %s
-                                    AND pipeline_version = 'deterministic-v2'
+                                    AND pipeline_version = 'deterministic-v3'
                                 )
                                 """,
                                 (

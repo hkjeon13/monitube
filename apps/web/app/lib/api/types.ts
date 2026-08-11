@@ -19,6 +19,7 @@ export interface SourceSummary {
   latestJob?: JobStatus;
   storedVideoCount: number;
   storedCommentCount: number;
+  reportedCommentCount: number;
 }
 
 export interface AuthUser { username: string; }

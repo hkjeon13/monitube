@@ -27,9 +27,10 @@ export async function getSourceResults(sourceId: string, signal?: AbortSignal): 
     id: sourceId,
     type: "unknown",
     enabled: true,
-    config: {},
-    storedVideoCount: 0,
-    storedCommentCount: 0,
+      config: {},
+      storedVideoCount: 0,
+      storedCommentCount: 0,
+      reportedCommentCount: 0,
   };
   const videoValues = firstArray(record, ["videos", "items", "results"]);
 

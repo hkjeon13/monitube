@@ -102,4 +102,5 @@ export interface CollectionSource {
   latestJob?: JobStatus;
   storedVideoCount?: number;
   storedCommentCount?: number;
+  reportedCommentCount?: number;
 }

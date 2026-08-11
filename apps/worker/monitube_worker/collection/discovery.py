@@ -1,16 +1,20 @@
 """Channel, keyword, and video discovery/detail collection phases."""
 
 from datetime import UTC, datetime, timedelta
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from monitube_api.channel_resolution import resolve_channel_input
 from monitube_api.domain import JobRecord, VideoRecord, new_id, utcnow
 
+from ..searchapi import SearchApiError
 from .parsing import as_int, parse_duration_seconds, parse_rfc3339
 
 
 _YOUTUBE_PUBLICATION_EPOCH = datetime(2005, 4, 23, tzinfo=UTC)
 _KEYWORD_BACKFILL_VERSION = 1
+_CHANNEL_DISCOVERY_VERSION = 1
+_CHANNEL_BACKFILL_PAGES_PER_RUN = 5
+_KEYWORD_SEARCH_RUN_VERSION = 1
 
 
 def _rfc3339(value: datetime) -> str:
@@ -18,6 +22,194 @@ def _rfc3339(value: datetime) -> str:
 
 
 class DiscoveryCollectionMixin:
+    def _channel_discovery_pages(
+        self,
+        job: JobRecord,
+        *,
+        channel_id: str,
+        expected_video_count: int,
+        collect_all: bool,
+        limit: int | None,
+        provider: str,
+        stage: str,
+        fetch_page: Callable[[str | None], Mapping[str, Any]],
+        page_ids_from: Callable[[Mapping[str, Any]], list[str]],
+        next_token_from: Callable[[Mapping[str, Any]], str | None],
+    ) -> tuple[list[str], dict[str, VideoRecord], bool]:
+        """Fetch the head once and continue a bounded ID reconciliation lane."""
+
+        stored_video_count = self.repository.count_source_videos(job.source_id)
+        backfill_required = bool(
+            collect_all
+            and expected_video_count > 0
+            and stored_video_count < expected_video_count
+        )
+        current = job.checkpoint.get("channelDiscovery")
+        resumable = bool(
+            isinstance(current, dict)
+            and current.get("version") == _CHANNEL_DISCOVERY_VERSION
+            and current.get("channelId") == channel_id
+            and current.get("provider") == provider
+            and not current.get("complete")
+        )
+
+        if resumable:
+            state = dict(current)
+            collection_ids = [
+                str(value) for value in state.get("collectionIds", []) if value
+            ]
+            seen_ids = {
+                str(value) for value in state.get("seenIds", []) if value
+            }
+            next_page_token = str(state.get("nextPageToken") or "") or None
+            backfill_pages = as_int(state.get("backfillPages"))
+            backfill_required = bool(state.get("backfillRequired"))
+        else:
+            head_payload = fetch_page(None)
+            head_ids = list(dict.fromkeys(page_ids_from(head_payload)))
+            if limit is not None:
+                head_ids = head_ids[:limit]
+            head_known_ids = self.repository.source_video_ids(
+                job.source_id, head_ids
+            )
+            collection_ids = list(head_ids)
+            seen_ids = set(head_ids)
+            next_page_token = next_token_from(head_payload)
+            head_next_page_token = next_page_token
+            if backfill_required:
+                prior_coverage = self.repository.get_source(job.source_id).coverage
+                saved_token = str(
+                    prior_coverage.get("channelReconciliationNextPageToken") or ""
+                ) or None
+                next_page_token = saved_token or next_page_token
+            backfill_pages = 0
+            state = {
+                "version": _CHANNEL_DISCOVERY_VERSION,
+                "provider": provider,
+                "channelId": channel_id,
+                "expectedVideoCount": expected_video_count,
+                "storedVideoCount": stored_video_count,
+                "backfillRequired": backfill_required,
+                "headIds": head_ids,
+                "headKnownIds": sorted(head_known_ids),
+                "collectionIds": collection_ids,
+                "seenIds": sorted(seen_ids),
+                "nextPageToken": next_page_token,
+                "headNextPageToken": head_next_page_token,
+                "backfillPages": backfill_pages,
+                "newVideoCount": len(set(head_ids) - head_known_ids),
+                "complete": False,
+            }
+            self._active_checkpoint["channelDiscovery"] = state
+            self._checkpoint(
+                job,
+                stage=stage,
+                scope_key=channel_id,
+                page_token=next_page_token,
+                batch_cursor=1,
+            )
+
+        while (
+            backfill_required
+            and next_page_token
+            and backfill_pages < _CHANNEL_BACKFILL_PAGES_PER_RUN
+            and (limit is None or len(collection_ids) < limit)
+        ):
+            try:
+                payload = fetch_page(next_page_token)
+            except SearchApiError as exc:
+                head_next_page_token = str(
+                    state.get("headNextPageToken") or ""
+                ) or None
+                can_restart_from_head = bool(
+                    provider == "searchapi"
+                    and exc.status_code in {400, 404, 413, 414}
+                    and head_next_page_token
+                    and next_page_token != head_next_page_token
+                    and not state.get("expiredTokenRestarted")
+                )
+                if not can_restart_from_head:
+                    raise
+                next_page_token = head_next_page_token
+                state["expiredTokenRestarted"] = True
+                state["nextPageToken"] = next_page_token
+                self._active_checkpoint["channelDiscovery"] = state
+                self._checkpoint(
+                    job,
+                    stage=stage,
+                    scope_key=channel_id,
+                    page_token=next_page_token,
+                    batch_cursor=1 + backfill_pages,
+                )
+                continue
+            page_ids = list(dict.fromkeys(page_ids_from(payload)))
+            if not page_ids:
+                next_page_token = None
+            else:
+                known_ids = self.repository.source_video_ids(job.source_id, page_ids)
+                new_ids = [
+                    video_id
+                    for video_id in page_ids
+                    if video_id not in known_ids and video_id not in seen_ids
+                ]
+                if limit is not None:
+                    new_ids = new_ids[: max(0, limit - len(collection_ids))]
+                collection_ids.extend(new_ids)
+                seen_ids.update(page_ids)
+                state["newVideoCount"] = as_int(state.get("newVideoCount")) + len(
+                    new_ids
+                )
+                next_page_token = next_token_from(payload)
+            backfill_pages += 1
+            state.update(
+                {
+                    "collectionIds": collection_ids,
+                    "seenIds": sorted(seen_ids),
+                    "nextPageToken": next_page_token,
+                    "backfillPages": backfill_pages,
+                }
+            )
+            self._active_checkpoint["channelDiscovery"] = state
+            self._checkpoint(
+                job,
+                stage=stage,
+                scope_key=channel_id,
+                page_token=next_page_token,
+                batch_cursor=1 + backfill_pages,
+            )
+
+        reconciliation_complete = bool(not backfill_required or not next_page_token)
+        state.update(
+            {
+                "collectionIds": collection_ids,
+                "seenIds": sorted(seen_ids),
+                "nextPageToken": next_page_token,
+                "backfillPages": backfill_pages,
+                "complete": True,
+                "reconciliationComplete": reconciliation_complete,
+            }
+        )
+        self._active_checkpoint.update(
+            {
+                "channelDiscovery": state,
+                "channelReconciliationNextPageToken": (
+                    next_page_token if backfill_required else None
+                ),
+                "channelReconciliationComplete": reconciliation_complete,
+                "channelReportedVideoCount": expected_video_count,
+                "channelStoredVideoCount": stored_video_count,
+            }
+        )
+        self._checkpoint(
+            job,
+            stage=stage,
+            scope_key=channel_id,
+            page_token=next_page_token,
+            batch_cursor=1 + backfill_pages,
+        )
+        known_videos = self.repository.get_videos_by_youtube_ids(collection_ids)
+        return collection_ids, known_videos, backfill_required
+
     def _resolve_channel(self, job: JobRecord, input_value: str) -> Mapping[str, Any]:
         if getattr(self, "discovery_provider", "youtube") == "searchapi":
             return self._resolve_channel_searchapi(job, input_value)
@@ -168,53 +360,37 @@ class DiscoveryCollectionMixin:
         collect_all = bool(source_config.get("collectAllVideos"))
         limit = None if collect_all else job.max_videos or as_int(source_config.get("maxVideos")) or 50
         expected_video_count = as_int((channel.get("statistics") or {}).get("videoCount"))
-        stored_video_count = self.repository.count_videos_by_channel(str(channel["id"]))
-        # The uploads playlist is newest-first.  A target marked complete can still
-        # be incomplete when an earlier quota pause meant we never reached its tail.
-        # In that case do not stop at the first known page: traverse the playlist and
-        # then process the returned IDs oldest-first to fill the historical gap.
-        backfill_required = bool(collect_all and expected_video_count > stored_video_count)
-        ids: list[str] = []
-        known_videos: dict[str, VideoRecord] = {}
-        # Discovery pages are idempotently replayed after a quota pause. The page
-        # checkpoint alone cannot reconstruct IDs from earlier pages, so resuming its
-        # cursor would silently omit them before they are linked to this source.
-        page_token: str | None = None
-        page_count = 0
-        while limit is None or len(ids) < limit:
-            payload = self._call(
+
+        def fetch_page(page_token: str | None) -> Mapping[str, Any]:
+            return self._call(
                 job,
                 "playlistItems",
                 part="snippet,contentDetails",
                 playlistId=playlist_id,
-                maxResults=50 if limit is None else min(50, limit - len(ids)),
+                maxResults=50 if limit is None else min(50, limit),
                 pageToken=page_token,
             )
-            page_count += 1
+
+        def page_ids_from(payload: Mapping[str, Any]) -> list[str]:
             page_ids: list[str] = []
             for item in payload.get("items", []):
                 video_id = (item.get("contentDetails") or {}).get("videoId") or (item.get("snippet") or {}).get("resourceId", {}).get("videoId")
                 if video_id and video_id not in page_ids:
-                    page_ids.append(video_id)
-                if video_id and video_id not in ids:
-                    ids.append(video_id)
-                    if limit is not None and len(ids) >= limit:
-                        break
-            existing_on_page = self.repository.get_videos_by_youtube_ids(page_ids)
-            known_videos.update(existing_on_page)
-            page_token = payload.get("nextPageToken")
-            self._checkpoint(job, stage="channel_playlist", scope_key=str(playlist_id), page_token=page_token, batch_cursor=page_count)
-            # Upload playlists are newest-first. On a healthy incremental refresh,
-            # an all-known page proves older pages cannot introduce an upload. A
-            # count deficit disables this shortcut until historical coverage catches
-            # up with the channel's public video count.
-            if incremental_refresh and not backfill_required and collect_all and page_ids and len(existing_on_page) == len(page_ids):
-                break
-            if not page_token:
-                break
-        if backfill_required:
-            ids.reverse()
-        return ids, known_videos, backfill_required
+                    page_ids.append(str(video_id))
+            return page_ids
+
+        return self._channel_discovery_pages(
+            job,
+            channel_id=str(channel["id"]),
+            expected_video_count=expected_video_count,
+            collect_all=collect_all,
+            limit=limit,
+            provider="youtube",
+            stage="channel_playlist",
+            fetch_page=fetch_page,
+            page_ids_from=page_ids_from,
+            next_token_from=lambda payload: str(payload.get("nextPageToken") or "") or None,
+        )
 
     def _channel_video_ids_searchapi(
         self,
@@ -233,55 +409,37 @@ class DiscoveryCollectionMixin:
         collect_all = bool(source_config.get("collectAllVideos"))
         limit = None if collect_all else job.max_videos or as_int(source_config.get("maxVideos")) or 50
         expected_video_count = as_int((channel.get("statistics") or {}).get("videoCount"))
-        stored_video_count = self.repository.count_videos_by_channel(channel_id)
-        backfill_required = bool(collect_all and expected_video_count > stored_video_count)
-        ids: list[str] = []
-        known_videos: dict[str, VideoRecord] = {}
-        page_token: str | None = None
-        page_count = 0
-        while limit is None or len(ids) < limit:
-            payload = self._searchapi_call(
+
+        def fetch_page(page_token: str | None) -> Mapping[str, Any]:
+            return self._searchapi_call(
                 job,
                 "youtube_channel_videos",
                 client.channel_videos,
                 channel_id=channel_id,
                 next_page_token=page_token,
             )
-            page_count += 1
-            page_ids = [
+
+        def page_ids_from(payload: Mapping[str, Any]) -> list[str]:
+            return list(dict.fromkeys(
                 str(item["id"])
                 for item in payload.get("videos") or []
                 if item.get("id")
-            ]
-            page_ids = list(dict.fromkeys(page_ids))
-            for video_id in page_ids:
-                if video_id not in ids:
-                    ids.append(video_id)
-                    if limit is not None and len(ids) >= limit:
-                        break
-            existing = self.repository.get_videos_by_youtube_ids(page_ids)
-            known_videos.update(existing)
-            page_token = (payload.get("pagination") or {}).get("next_page_token")
-            self._checkpoint(
-                job,
-                stage="searchapi_channel_videos",
-                scope_key=channel_id,
-                page_token=page_token,
-                batch_cursor=page_count,
-            )
-            if (
-                incremental_refresh
-                and not backfill_required
-                and collect_all
-                and page_ids
-                and len(existing) == len(page_ids)
-            ):
-                break
-            if not page_ids or not page_token:
-                break
-        if backfill_required:
-            ids.reverse()
-        return ids, known_videos, backfill_required
+            ))
+
+        return self._channel_discovery_pages(
+            job,
+            channel_id=channel_id,
+            expected_video_count=expected_video_count,
+            collect_all=collect_all,
+            limit=limit,
+            provider="searchapi",
+            stage="searchapi_channel_videos",
+            fetch_page=fetch_page,
+            page_ids_from=page_ids_from,
+            next_token_from=lambda payload: str(
+                (payload.get("pagination") or {}).get("next_page_token") or ""
+            ) or None,
+        )
 
     @staticmethod
     def _searchapi_keyword_page_ids(payload: Mapping[str, Any]) -> list[str]:
@@ -312,31 +470,109 @@ class DiscoveryCollectionMixin:
                 "SearchAPI.io discovery is enabled but SEARCH_API_KEY is not configured"
             )
         max_pages = max(1, as_int(source_config.get("maxPagesPerRun")) or 1)
-        ids: list[str] = []
-        page_token: str | None = None
-        for page in range(1, max_pages + 1):
-            payload = self._searchapi_call(
-                job,
-                "youtube",
-                client.youtube,
-                query=str(source_config["query"]),
-                page_token=page_token,
-            )
+        query = str(source_config["query"])
+        existing = job.checkpoint.get("keywordSearchRun")
+        resumable = bool(
+            isinstance(existing, dict)
+            and existing.get("version") == _KEYWORD_SEARCH_RUN_VERSION
+            and existing.get("query") == query
+            and not existing.get("complete")
+        )
+        if resumable:
+            state = dict(existing)
+            ids = [str(value) for value in state.get("discoveredIds", []) if value]
+            seen_ids = {str(value) for value in state.get("seenIds", []) if value}
+            page_token = str(state.get("nextPageToken") or "") or None
+            completed_pages = as_int(state.get("page"))
+        else:
+            ids = []
+            seen_ids: set[str] = set()
+            page_token = None
+            completed_pages = 0
+            state = {
+                "version": _KEYWORD_SEARCH_RUN_VERSION,
+                "query": query,
+                "page": 0,
+                "nextPageToken": None,
+                "discoveredIds": [],
+                "seenIds": [],
+                "newVideoCount": 0,
+                "complete": False,
+            }
+        while completed_pages < max_pages:
+            try:
+                payload = self._searchapi_call(
+                    job,
+                    "youtube",
+                    client.youtube,
+                    query=query,
+                    page_token=page_token,
+                )
+            except SearchApiError as exc:
+                if (
+                    exc.status_code not in {400, 404}
+                    or not page_token
+                    or state.get("expiredTokenRestarted")
+                ):
+                    raise
+                page_token = None
+                completed_pages = 0
+                state.update(
+                    {
+                        "page": 0,
+                        "nextPageToken": None,
+                        "expiredTokenRestarted": True,
+                    }
+                )
+                self._active_checkpoint["keywordSearchRun"] = state
+                self._checkpoint(
+                    job,
+                    stage="searchapi_keyword",
+                    scope_key=query,
+                    page_token=None,
+                    batch_cursor=0,
+                )
+                continue
             page_ids = self._searchapi_keyword_page_ids(payload)
+            known_ids = self.repository.source_video_ids(job.source_id, page_ids)
+            previous_seen_ids = set(seen_ids)
             ids.extend(video_id for video_id in page_ids if video_id not in ids)
+            seen_ids.update(page_ids)
             page_token = (payload.get("pagination") or {}).get("next_page_token")
+            completed_pages += 1
+            state.update(
+                {
+                    "page": completed_pages,
+                    "nextPageToken": page_token,
+                    "discoveredIds": ids,
+                    "seenIds": sorted(seen_ids),
+                    "newVideoCount": as_int(state.get("newVideoCount"))
+                    + len(set(page_ids) - known_ids - previous_seen_ids),
+                }
+            )
+            self._active_checkpoint["keywordSearchRun"] = state
             self._checkpoint(
                 job,
                 stage="searchapi_keyword",
-                scope_key=str(source_config["query"]),
+                scope_key=query,
                 page_token=page_token,
-                batch_cursor=page,
+                batch_cursor=completed_pages,
             )
             if not page_ids or not page_token:
                 break
+        state["complete"] = True
+        state["nextPageToken"] = page_token
+        self._active_checkpoint["keywordSearchRun"] = state
         self._active_checkpoint["keywordHistoricalBackfillComplete"] = True
         if page_token:
             self._active_checkpoint["keywordCoverage"] = "limited"
+        self._checkpoint(
+            job,
+            stage="searchapi_keyword",
+            scope_key=query,
+            page_token=page_token,
+            batch_cursor=completed_pages,
+        )
         return ids
 
     def _keyword_video_ids_incremental(self, job: JobRecord, source_config: Mapping[str, Any]) -> list[str]:

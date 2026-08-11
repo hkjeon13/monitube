@@ -18,6 +18,12 @@ DURABLE_CHECKPOINT_KEYS = (
     "keywordExpectedTotal",
     "keywordBackfill",
     "keywordHistoricalBackfillComplete",
+    "keywordSearchRun",
+    "channelDiscovery",
+    "channelReconciliationNextPageToken",
+    "channelReconciliationComplete",
+    "channelReportedVideoCount",
+    "channelStoredVideoCount",
     "transcriptVideoId",
 )
 

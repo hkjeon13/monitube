@@ -153,6 +153,11 @@ class InMemoryRepository(
                 for comment in self._comments.values()
                 if comment.youtube_video_id in visible_ids
             ),
+            reported_comment_count=sum(
+                int(self._videos[video_id].statistics.get("commentCount") or 0)
+                for video_id in visible_ids
+                if video_id in self._videos
+            ),
         )
         if not record.target_id or record.target_id not in self._targets:
             return source
@@ -200,6 +205,11 @@ class InMemoryRepository(
                 1
                 for comment in self._comments.values()
                 if comment.youtube_video_id in visible_ids
+            ),
+            reported_comment_count=sum(
+                int(self._videos[video_id].statistics.get("commentCount") or 0)
+                for video_id in visible_ids
+                if video_id in self._videos
             ),
         )
 

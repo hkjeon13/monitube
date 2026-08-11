@@ -203,6 +203,7 @@ class CollectionSourceBase(ApiModel):
     latestJob: JobStatus | None = None
     storedVideoCount: int = Field(default=0, ge=0)
     storedCommentCount: int = Field(default=0, ge=0)
+    reportedCommentCount: int = Field(default=0, ge=0)
 
 
 class TargetPinUpdate(ApiModel):

@@ -125,7 +125,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
   const [jobSourceId, setJobSourceId] = useState<string | null>(null);
   const [sources, setSources] = useState<SourceSummary[]>([]);
   const [activeSourceId, setActiveSourceId] = useState("");
-  const [isSourcesLoading, setIsSourcesLoading] = useState(false);
+  const [isSourcesLoading, setIsSourcesLoading] = useState(true);
   const [sourceResults, setSourceResults] = useState<SourceResults | null>(null);
   const [isResultsLoading, setIsResultsLoading] = useState(false);
   const [resultsError, setResultsError] = useState<string | null>(null);
@@ -346,7 +346,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
 
   const clearRecentFailures = useCallback(() => {
     if (!authUser || recentFailures.length === 0) return;
-    if (!window.confirm("현재 표시된 과거 수집 실패 기록을 숨길까요? 이후 발생한 실패는 다시 표시됩니다.")) return;
+    if (!window.confirm("현재 표시된 수집 기록을 삭제할까요? 이후 발생한 기록은 다시 표시됩니다.")) return;
     const dismissedBefore = new Date().toISOString();
     recentFailuresDismissedBeforeRef.current = dismissedBefore;
     setRecentFailures([]);
@@ -355,7 +355,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     } catch {
       // Keep the current session cleared even when browser storage is unavailable.
     }
-    setNotice("과거 수집 실패 기록을 숨겼습니다.");
+    setNotice("수집 기록이 삭제되었습니다.");
   }, [authUser, recentFailures.length]);
 
   const openSourceWorkspace = useCallback((sourceId: string) => {
@@ -1046,7 +1046,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
               disabled={isSourcesLoading || isResultsLoading}
               aria-label="수집 대상과 분석 결과 새로고침"
             >
-              <ArrowPathIcon aria-hidden="true" />
+              <ArrowPathIcon className={isSourcesLoading || isResultsLoading ? "icon-spinning" : undefined} aria-hidden="true" />
             </button>
             <button className="primary-action" type="button" onClick={openCollectionDrawer}>
               <PlusIcon aria-hidden="true" />
@@ -1078,6 +1078,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
           page={page}
           sources={sources}
           explore={explore}
+          loading={isSourcesLoading}
           activeSourceId={activeSourceId}
           openMenuId={openSourceMenuId}
           updatingSourceId={updatingSourceId}
