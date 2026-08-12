@@ -499,9 +499,9 @@ else
   log "No existing database was found; the new instance will be initialized from committed migrations."
 fi
 
-set_env_setting MONITUBE_WEB_API_PROXY_TARGET_DOCKER http://api-rust:8001
 log "Building immutable Python rollback, tokenizer, Rust, maintenance, and web images before pausing writes."
-compose build api worker tokenizer api-rust-shadow api-rust nlp-worker-rust collection-worker-rust analysis-worker-rust maintenance-rust web
+MONITUBE_WEB_API_PROXY_TARGET_DOCKER=http://api-rust:8001 \
+  compose build api worker tokenizer api-rust-shadow api-rust nlp-worker-rust collection-worker-rust analysis-worker-rust maintenance-rust web
 ensure_disk_headroom "$TARGET_DIR"
 
 if [[ "$RUN_DEPLOY_CHECKS" == "true" ]]; then
@@ -514,8 +514,16 @@ if [[ "$RUN_DEPLOY_CHECKS" == "true" ]]; then
   compose run --rm --no-deps -e PYTHONPYCACHEPREFIX=/tmp/monitube-pycache \
     worker python -m compileall -q /workspace/apps/api /workspace/apps/worker
   for rust_service in api-rust nlp-worker-rust collection-worker-rust analysis-worker-rust maintenance-rust; do
-    rust_image="$(compose images -q "$rust_service")"
-    [[ -n "$rust_image" ]] || die "${rust_service} image was not built."
+    case "$rust_service" in
+      api-rust) rust_repository=monitube-api-rust ;;
+      nlp-worker-rust) rust_repository=monitube-nlp-worker-rust ;;
+      collection-worker-rust) rust_repository=monitube-collection-worker-rust ;;
+      analysis-worker-rust) rust_repository=monitube-analysis-worker-rust ;;
+      maintenance-rust) rust_repository=monitube-maintenance-rust ;;
+      *) die "no immutable image mapping exists for ${rust_service}." ;;
+    esac
+    rust_image="${rust_repository}:${CURRENT_SHA}"
+    docker image inspect "$rust_image" >/dev/null 2>&1 || die "${rust_service} image was not built as ${rust_image}."
     rust_user="$(docker image inspect --format '{{.Config.User}}' "$rust_image")"
     [[ -n "$rust_user" && "$rust_user" != "0" && "$rust_user" != "root" ]] || die "${rust_service} image must run as a non-root user."
   done
@@ -851,6 +859,7 @@ compose stop api api-rust
 compose up --detach --force-recreate --no-deps api-rust
 wait_for_rust_api_path api-rust /health || die "Rust production API liveness check failed."
 wait_for_rust_api_path api-rust /ready || die "Rust production API readiness check failed."
+set_env_setting MONITUBE_WEB_API_PROXY_TARGET_DOCKER http://api-rust:8001
 compose up --detach --force-recreate --no-deps web
 wait_for_web || die "web root smoke check failed."
 wait_for_web_api || die "web-to-Rust-API proxy smoke check failed."
