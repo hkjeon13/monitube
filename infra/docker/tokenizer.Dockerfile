@@ -48,4 +48,4 @@ RUN uv sync --directory /workspace/apps/tokenizer --frozen --no-dev \
 USER nobody
 EXPOSE 8010
 
-CMD ["uv", "run", "--no-sync", "--directory", "apps/tokenizer", "uvicorn", "monitube_tokenizer.main:app", "--host", "0.0.0.0", "--port", "8010", "--workers", "1"]
+CMD ["uvicorn", "monitube_tokenizer.main:app", "--app-dir", "/workspace/apps/tokenizer", "--host", "0.0.0.0", "--port", "8010", "--workers", "1"]
