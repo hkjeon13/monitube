@@ -143,6 +143,16 @@ export function ExploreSection({
 
   return (
     <section className="explore-section" id="explore" aria-label="Explore" tabIndex={-1}>
+      <div className="explore-heading">
+        <div>
+          <h2>Explore</h2>
+          <p>수집된 영상과 댓글을 한 곳에서 찾고, 채널별 흐름을 빠르게 살펴봅니다.</p>
+        </div>
+        <div className="explore-heading-actions" aria-label="라이브러리 요약">
+          <span>채널 {formatCount(data.channels.length)}</span>
+          <span>영상 {formatCount(data.videos.length)}</span>
+        </div>
+      </div>
       {error && <p className="inline-error" role="status">{error}</p>}
       <form className="explore-search" role="search" onSubmit={onSubmit}>
         <label className="visually-hidden" htmlFor="collected-search-scope">검색 대상</label>
@@ -176,7 +186,7 @@ export function ExploreSection({
         <ChannelStrip channels={data.channels} videos={data.videos} selectedChannelId={selectedChannelId} emptyMessage="아직 수집된 채널이 없습니다. 첫 수집을 시작하면 이곳에 자동으로 모입니다." onSelect={onSelectChannel} />
         {selectedChannel && <ChannelOverview channel={selectedChannel} subscriberHistory={subscriberHistory} />}
         <div className="explore-video-grid" aria-label="수집된 동영상">
-          {visibleVideos.map((video, index) => <button className={index === 0 ? "explore-video-card explore-video-card-featured" : "explore-video-card"} type="button" key={video.id} onClick={(event) => onOpenVideo(video, event.currentTarget)}><img src={youtubeThumbnail(video.youtubeVideoId)} alt="" loading={index < 6 ? "eager" : "lazy"} /><span className="explore-video-shade" aria-hidden="true" /><span className="explore-video-date">{formatShortDate(video.publishedAt)}</span><strong>{video.title ?? video.youtubeVideoId}</strong><footer><span>조회 {formatCount(video.viewCount)}</span><span>댓글 {formatCount(video.commentCount)}</span></footer></button>)}
+          {visibleVideos.map((video, index) => <button className="explore-video-card" type="button" key={video.id} onClick={(event) => onOpenVideo(video, event.currentTarget)}><img src={youtubeThumbnail(video.youtubeVideoId)} alt="" loading={index < 6 ? "eager" : "lazy"} /><span className="explore-video-shade" aria-hidden="true" /><span className="explore-video-date">{formatShortDate(video.publishedAt)}</span><strong>{video.title ?? video.youtubeVideoId}</strong><footer><span>조회 {formatCount(video.viewCount)}</span><span>댓글 {formatCount(video.commentCount)}</span></footer></button>)}
           {scopedVideos.length === 0 && <div className="explore-empty">조건에 맞는 저장 동영상이 없습니다.</div>}
         </div>
         {(scopedVideos.length > visibleVideos.length || data.nextOffset !== undefined || loadingMore) && <div className="explore-load-more" ref={loadMoreRef} aria-live="polite">

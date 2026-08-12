@@ -8,16 +8,11 @@ import {
   DocumentChartBarIcon,
   ExclamationTriangleIcon,
   FolderIcon,
-  HomeIcon,
   InformationCircleIcon,
-  PlayIcon,
   PlusIcon,
   QueueListIcon,
-  Cog6ToothIcon,
   SparklesIcon,
-  Squares2X2Icon,
 } from "@heroicons/react/24/outline";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { CollectionSourceType, JobStatus } from "@monitube/contracts";
 import type { FormEvent, MouseEvent } from "react";
@@ -101,6 +96,7 @@ import {
   type ViewMetric,
   type WorkspacePage,
 } from "../features/collection/workbench-model";
+import { AppShell } from "./app-shell";
 
 function recentFailuresDismissedStorageKey(username: string) {
   return `monitube.recent-failures-dismissed-before:${username}`;
@@ -953,62 +949,12 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
     }
   }, [closeCollectionDrawer, requestBody, validationError]);
 
-  const navigation = [
-    { id: "explore" as const, label: "Explore", href: "/", Icon: Squares2X2Icon },
-    { id: "overview" as const, label: "Channels", href: "/channels", Icon: HomeIcon },
-    { id: "sources" as const, label: "Sources", href: "/sources", Icon: FolderIcon },
-    { id: "jobs" as const, label: "Status", href: "/jobs", Icon: QueueListIcon },
-    { id: "analysis" as const, label: "Analysis", href: "/analysis", Icon: DocumentChartBarIcon },
-  ];
-  const breadcrumbPage = page === "overview" ? "Channels" : page === "explore" ? "Explore" : page === "sources" ? "Sources" : page === "keywords" ? "Keywords" : page === "jobs" ? "Status" : "Analysis";
-  const breadcrumbDetail = page === "overview" && selectedExploreChannel
-    ? selectedExploreChannel.title ?? selectedExploreChannel.handle ?? selectedExploreChannel.youtubeChannelId
-    : null;
   if (authUser === undefined) return <main className="login-page"><p className="explore-loading">세션을 확인하는 중입니다…</p></main>;
   if (!authUser) return <LoginScreen onAuthenticated={changeAuthUser} />;
 
   return (
-    <div className={`app-shell page-${page}`}>
-      <aside className="sidebar" aria-label="Monitube 탐색">
-        <div className="brand-lockup">
-          <span className="brand-mark" aria-hidden="true"><PlayIcon /></span>
-          <span>monitube</span>
-        </div>
-
-        <nav className="sidebar-nav" aria-label="주요 메뉴">
-          {navigation.map(({ id, label, href, Icon }) => (
-            <Link
-              key={id}
-              className={page === id ? "nav-item nav-item-active" : "nav-item"}
-              aria-label={label}
-              aria-current={page === id ? "page" : undefined}
-              href={href}
-            >
-              <Icon aria-hidden="true" />
-              <span>{label}</span>
-            </Link>
-          ))}
-        </nav>
-
-      </aside>
-
-      <main className="dashboard-main">
-        <div className="dashboard-utilitybar">
-          <nav className="dashboard-breadcrumb" aria-label="현재 위치">
-            <Link href="/" aria-label="Monitube 홈">Monitube</Link>
-            <ChevronRightIcon aria-hidden="true" />
-            {breadcrumbDetail ? <Link href="/channels">{breadcrumbPage}</Link> : <span aria-current="page">{breadcrumbPage}</span>}
-            {breadcrumbDetail && <>
-              <ChevronRightIcon aria-hidden="true" />
-              <span aria-current="page" title={breadcrumbDetail}>{breadcrumbDetail}</span>
-            </>}
-          </nav>
-          <div className="utility-actions">
-            <button className="settings-button" type="button" onClick={openSettingsDrawer} aria-label="기본 설정 열기" aria-haspopup="dialog" aria-expanded={isSettingsOpen}>
-              <Cog6ToothIcon aria-hidden="true" />
-            </button>
-          </div>
-        </div>
+    <>
+      <AppShell page={page} settingsOpen={isSettingsOpen} onOpenSettings={openSettingsDrawer}>
         {page !== "explore" && page !== "sources" && page !== "keywords" && page !== "analysis" && <header className="dashboard-topbar" id="source-selector" tabIndex={-1}>
           <label className="source-select">
             <span className="visually-hidden">수집 대상 선택</span>
@@ -1074,7 +1020,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
           />
         )}
 
-        <SourcesPage
+        {(page === "sources" || page === "keywords") && <SourcesPage
           page={page}
           sources={sources}
           explore={explore}
@@ -1090,9 +1036,9 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
           onToggleRefresh={(source) => { void toggleSubscriptionRefresh(source); }}
           onRefreshNow={(source) => { void refreshSourceNow(source); }}
           onRemove={(source) => { void removeSource(source); }}
-        />
+        />}
 
-        <ChannelDetails
+        {page === "overview" && <ChannelDetails
           channels={sourceRegisteredChannels}
           videos={explore.videos}
           selectedChannel={selectedExploreChannel}
@@ -1105,9 +1051,9 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
               if (source) setActiveSourceId(source.id);
             }
           }}
-        />
+        />}
 
-        <section className="overview-intro" id="overview" aria-labelledby="overview-title" tabIndex={-1}>
+        {page === "overview" && <section className="overview-intro" id="overview" aria-labelledby="overview-title" tabIndex={-1}>
           <div>
             <p className="section-kicker">MONITUBE / ANALYSIS WORKSPACE</p>
             <h1 id="overview-title">Channels</h1>
@@ -1119,9 +1065,9 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
               <span>{activeSource.enabled ? "수집 활성" : "수집 일시 중지"}</span>
             </div>
           )}
-        </section>
+        </section>}
 
-        <ExploreSection
+        {page === "explore" && <ExploreSection
           data={explore}
           error={exploreError}
           loading={isExploreLoading}
@@ -1147,11 +1093,11 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
           }}
           onOpenVideo={openVideoDrawer}
           onOpenComment={openCommentDetail}
-        />
+        />}
 
         {resultsError && <p className="inline-error" role="status">{resultsError}</p>}
 
-        {!activeSourceId && !isSourcesLoading && (
+        {page === "overview" && !activeSourceId && !isSourcesLoading && (
           <section className="empty-overview" aria-labelledby="empty-overview-title">
             <DocumentChartBarIcon aria-hidden="true" />
             <div>
@@ -1166,14 +1112,14 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
           </section>
         )}
 
-        {activeSourceId && isResultsLoading && !sourceResults && (
+        {page === "overview" && activeSourceId && isResultsLoading && !sourceResults && (
           <section className="empty-overview loading-overview" aria-live="polite">
             <ArrowPathIcon aria-hidden="true" />
             <div><h2>저장된 분석을 불러오는 중입니다.</h2><p>선택한 수집 대상의 최신 결과를 준비하고 있습니다.</p></div>
           </section>
         )}
 
-        {sourceResults && sourceResults.source.id === activeSourceId && (
+        {page === "overview" && sourceResults && sourceResults.source.id === activeSourceId && (
           <div className="dashboard-content">
             <section className="kpi-grid" aria-label="선택 수집 대상의 핵심 지표">
               <MetricCard
@@ -1408,7 +1354,7 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
           <p>공개 YouTube 메타데이터와 공개 댓글을 수집 대상별로 공유·분석합니다.</p>
           <p>운영 credential은 브라우저에 노출되지 않습니다.</p>
         </footer>
-      </main>
+      </AppShell>
 
       {isSettingsOpen && (
         <SettingsDrawer
@@ -1457,6 +1403,6 @@ export function CollectionWorkbench({ page = "overview" }: { page?: WorkspacePag
       )}
 
       {(notice || error) && <div className={error ? "toast toast-error" : "toast"} role="status"><span aria-hidden="true">{error ? <ExclamationTriangleIcon /> : <CheckCircleIcon />}</span><p>{error ?? notice}</p></div>}
-    </div>
+    </>
   );
 }

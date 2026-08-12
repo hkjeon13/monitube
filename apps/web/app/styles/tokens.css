@@ -1,0 +1,92 @@
+:root {
+  --color-paper: oklch(0.968 0.009 84.6);
+  --color-surface: oklch(0.994 0.006 84.6);
+  --color-surface-muted: oklch(0.956 0.008 114.2);
+  --color-ink: oklch(0.252 0.013 160.3);
+  --color-ink-soft: oklch(0.448 0.014 153.3);
+  --color-muted: oklch(0.531 0.01 121.8);
+  --color-rule: oklch(0.923 0.013 86.8);
+  --color-rule-strong: oklch(0.883 0.017 88);
+  --color-accent: oklch(0.689 0.177 41.9);
+  --color-accent-hover: oklch(0.605 0.161 41.2);
+  --color-accent-soft: oklch(0.965 0.02 53.3);
+  --color-accent-ink: var(--color-ink);
+  --color-selection: oklch(0.354 0.058 167);
+  --color-selection-soft: oklch(0.948 0.012 145.5);
+  --color-selection-ink: var(--color-paper);
+  --color-success: oklch(0.522 0.096 158.2);
+  --color-success-soft: oklch(0.96 0.016 154.5);
+  --color-warning: oklch(0.551 0.121 51.3);
+  --color-warning-soft: oklch(0.973 0.02 70);
+  --color-danger: oklch(0.522 0.138 23.2);
+  --color-danger-soft: oklch(0.969 0.015 22.4);
+  --color-focus: var(--color-selection);
+
+  --font-pretendard: "Pretendard Variable";
+  --font-display: var(--font-archivo), var(--font-pretendard), sans-serif;
+  --font-body: var(--font-pretendard), system-ui, sans-serif;
+  --font-data: var(--font-ibm-plex-mono), "IBM Plex Mono", monospace;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-md: 1rem;
+  --text-lg: 1.25rem;
+  --text-xl: 1.625rem;
+  --text-2xl: 2.25rem;
+  --text-display: clamp(2.75rem, 5vw, 4.5rem);
+  --leading-tight: 1.08;
+  --leading-heading: 1.18;
+  --leading-body: 1.55;
+  --leading-relaxed: 1.7;
+
+  --space-3xs: 0.25rem;
+  --space-2xs: 0.5rem;
+  --space-xs: 0.75rem;
+  --space-sm: 1rem;
+  --space-md: 1.5rem;
+  --space-lg: 2rem;
+  --space-xl: 3rem;
+  --space-2xl: 4.5rem;
+  --space-3xl: 7rem;
+
+  --size-touch: 2.75rem;
+  --size-rail: 13.5rem;
+  --size-rail-compact: 4.5rem;
+  --radius-control: 0.5rem;
+  --radius-panel: 0.75rem;
+  --radius-media: 0.625rem;
+  --radius-pill: 999rem;
+
+  --duration-instant: 120ms;
+  --duration-short: 180ms;
+  --duration-medium: 260ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --shadow-menu: 0 0.75rem 1.75rem oklch(0.252 0.013 160.3 / 0.14);
+  --shadow-overlay: 0 1.75rem 5rem oklch(0.252 0.013 160.3 / 0.22);
+
+  /* Compatibility aliases while legacy route styles are migrated. */
+  --font-sans: var(--font-body);
+  --font-mono: var(--font-data);
+  --canvas: var(--color-paper);
+  --surface: var(--color-surface);
+  --surface-muted: var(--color-surface-muted);
+  --ink: var(--color-ink);
+  --ink-soft: var(--color-ink-soft);
+  --muted: var(--color-muted);
+  --line: var(--color-rule);
+  --line-strong: var(--color-rule-strong);
+  --moss: var(--color-selection);
+  --moss-soft: var(--color-selection-soft);
+  --orange: var(--color-accent);
+  --orange-deep: var(--color-accent-hover);
+  --orange-soft: var(--color-accent-soft);
+  --warning: var(--color-warning);
+  --warning-soft: var(--color-warning-soft);
+  --danger: var(--color-danger);
+  --danger-soft: var(--color-danger-soft);
+  --success: var(--color-success);
+  --success-soft: var(--color-success-soft);
+  --touch-target: var(--size-touch);
+  --shadow: none;
+}
