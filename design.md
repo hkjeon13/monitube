@@ -299,7 +299,7 @@ The shell may be 12 columns internally, but page components own their grid. Do n
 - Summary metrics form one band.
 - Primary trend/performance area is 8 columns; secondary explanation/coverage is 4.
 - Comparison table and ranking are full width.
-- TF-IDF and comment signals use secondary sections with quieter headings.
+- Frequency-ranked terms and comment signals use secondary sections with quieter headings.
 - Data basis, snapshot time, and coverage appear as report footnotes, not badges on every panel.
 
 ## 9. Component contract

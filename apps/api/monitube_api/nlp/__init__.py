@@ -1,4 +1,4 @@
-"""Fail-fast MeCab+NLTK noun analysis and TF-IDF helpers."""
+"""Fail-fast MeCab+NLTK noun analysis and frequency helpers."""
 
 from .analyzer import (
     ANALYZER_VERSION,
@@ -6,12 +6,12 @@ from .analyzer import (
     analyzer_health,
     get_noun_analyzer,
 )
-from .tfidf import keyword_scores
+from .frequency import keyword_frequencies
 
 __all__ = [
     "ANALYZER_VERSION",
     "MecabNltkNounAnalyzer",
     "analyzer_health",
     "get_noun_analyzer",
-    "keyword_scores",
+    "keyword_frequencies",
 ]

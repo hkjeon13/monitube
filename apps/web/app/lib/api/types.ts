@@ -318,9 +318,8 @@ export interface AnalysisCommentSignals {
   questionSampleSize: number;
 }
 
-export interface TfidfKeyword {
+export interface FrequencyKeyword {
   term: string;
-  score: number;
   termCount: number;
   documentCount: number;
   documentRate: number;
@@ -341,8 +340,8 @@ export interface AnalysisOverview {
   topVideos: AnalysisVideo[];
   topComments: AnalysisComment[];
   topWords: TopWord[];
-  videoKeywords: TfidfKeyword[];
-  commentKeywords: TfidfKeyword[];
+  videoKeywords: FrequencyKeyword[];
+  commentKeywords: FrequencyKeyword[];
   keywordCoverage: AnalysisKeywordCoverage;
   commentSignals: AnalysisCommentSignals;
   coverage: AnalysisCoverage;

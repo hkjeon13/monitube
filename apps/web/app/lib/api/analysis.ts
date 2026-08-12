@@ -10,7 +10,7 @@ import type {
   AnalysisTrendPoint,
   AnalysisVideo,
   WorkspaceAnalysisSummary,
-  TfidfKeyword,
+  FrequencyKeyword,
 } from "./types";
 import {
   asArray,
@@ -99,14 +99,13 @@ function normalizeAnalysisComment(value: unknown): AnalysisComment | null {
   };
 }
 
-function normalizeTfidfKeywords(value: unknown): TfidfKeyword[] {
+function normalizeFrequencyKeywords(value: unknown): FrequencyKeyword[] {
   return asArray(value).flatMap((item) => {
     const record = asRecord(item);
     const term = asText(record?.term);
     if (!record || !term) return [];
     return [{
       term,
-      score: requiredNumber(record, "score"),
       termCount: requiredNumber(record, "termCount"),
       documentCount: requiredNumber(record, "documentCount"),
       documentRate: requiredNumber(record, "documentRate"),
@@ -168,8 +167,8 @@ export async function getAnalysisOverview(query: AnalysisQuery = {}): Promise<An
       return comment ? [comment] : [];
     }),
     topWords: normalizeTopWords(record.topWords),
-    videoKeywords: normalizeTfidfKeywords(record.videoKeywords),
-    commentKeywords: normalizeTfidfKeywords(record.commentKeywords),
+    videoKeywords: normalizeFrequencyKeywords(record.videoKeywords),
+    commentKeywords: normalizeFrequencyKeywords(record.commentKeywords),
     keywordCoverage: {
       indexedVideoDocuments: requiredNumber(rawKeywordCoverage ?? {}, "indexedVideoDocuments"),
       indexedCommentDocuments: requiredNumber(rawKeywordCoverage ?? {}, "indexedCommentDocuments"),

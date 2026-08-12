@@ -9,12 +9,12 @@ from ..analysis import question_signals_from_texts
 from ..analysis_insights import build_video_insights
 from ..domain import utcnow
 from ..nlp import ANALYZER_VERSION
-from ..nlp.tfidf import keyword_scores
+from ..nlp.frequency import keyword_frequencies
 
 
 class PostgresAnalysisMixin:
     @staticmethod
-    def _analysis_tfidf_keywords(
+    def _analysis_frequency_keywords(
         *,
         cursor: Any,
         params: dict[str, Any],
@@ -88,7 +88,6 @@ class PostgresAnalysisMixin:
             )
         corpus = cursor.fetchone()
         document_count = int(corpus["document_count"] if corpus else 0)
-        score_params = {**stats_params, "nlp_document_count": document_count}
         if bounded_period:
             cursor.execute(
                 """
@@ -109,16 +108,10 @@ class PostgresAnalysisMixin:
                 )
                 SELECT term, document_frequency, total_term_frequency
                 FROM term_period
-                ORDER BY (
-                  (1 + ln(total_term_frequency::double precision))
-                  * (ln(
-                      (%(nlp_document_count)s::double precision + 1)
-                      / (document_frequency::double precision + 1)
-                    ) + 1)
-                ) DESC, term
+                ORDER BY total_term_frequency DESC, document_frequency DESC, term
                 LIMIT %(nlp_keyword_candidate_limit)s
                 """,
-                score_params,
+                stats_params,
             )
         else:
             cursor.execute(
@@ -129,20 +122,14 @@ class PostgresAnalysisMixin:
                   AND scope_id = %(nlp_scope_id)s::uuid
                   AND corpus_kind = %(nlp_corpus_kind)s
                   AND analyzer_version = %(nlp_analyzer_version)s
-                ORDER BY (
-                  (1 + ln(total_term_frequency::double precision))
-                  * (ln(
-                      (%(nlp_document_count)s::double precision + 1)
-                      / (document_frequency::double precision + 1)
-                    ) + 1)
-                ) DESC, term
+                ORDER BY total_term_frequency DESC, document_frequency DESC, term
                 LIMIT %(nlp_keyword_candidate_limit)s
                 """,
-                score_params,
+                stats_params,
             )
         rows = [dict(row) for row in cursor.fetchall()]
         return (
-            keyword_scores(rows, document_count=document_count, limit=limit),
+            keyword_frequencies(rows, document_count=document_count, limit=limit),
             document_count,
         )
 
@@ -781,7 +768,7 @@ class PostgresAnalysisMixin:
                 cursor=cursor,
                 params=params,
             )
-            video_keywords, indexed_video_documents = self._analysis_tfidf_keywords(
+            video_keywords, indexed_video_documents = self._analysis_frequency_keywords(
                 cursor=cursor,
                 params=params,
                 corpus_kind="video",
@@ -793,7 +780,7 @@ class PostgresAnalysisMixin:
                 if comment_type == "reply"
                 else "comment"
             )
-            comment_keywords, indexed_comment_documents = self._analysis_tfidf_keywords(
+            comment_keywords, indexed_comment_documents = self._analysis_frequency_keywords(
                 cursor=cursor,
                 params=params,
                 corpus_kind=comment_corpus_kind,
@@ -900,12 +887,12 @@ class PostgresAnalysisMixin:
                 cursor=cursor,
                 params=params,
             )
-            video_keywords, indexed_video_documents = self._analysis_tfidf_keywords(
+            video_keywords, indexed_video_documents = self._analysis_frequency_keywords(
                 cursor=cursor,
                 params=params,
                 corpus_kind="video",
             )
-            comment_keywords, indexed_comment_documents = self._analysis_tfidf_keywords(
+            comment_keywords, indexed_comment_documents = self._analysis_frequency_keywords(
                 cursor=cursor,
                 params=params,
                 corpus_kind=(

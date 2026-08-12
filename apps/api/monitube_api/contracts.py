@@ -416,9 +416,8 @@ class TopWord(ApiModel):
     count: int = Field(ge=1)
 
 
-class TfidfKeyword(ApiModel):
+class FrequencyKeyword(ApiModel):
     term: str
-    score: float = Field(ge=0)
     termCount: int = Field(ge=1)
     documentCount: int = Field(ge=1)
     documentRate: float = Field(ge=0, le=100)
@@ -580,8 +579,8 @@ class AnalysisOverviewResponse(ApiModel):
     topVideos: list[AnalysisVideo] = Field(default_factory=list)
     topComments: list[AnalysisComment] = Field(default_factory=list)
     topWords: list[TopWord] = Field(default_factory=list)
-    videoKeywords: list[TfidfKeyword] = Field(default_factory=list)
-    commentKeywords: list[TfidfKeyword] = Field(default_factory=list)
+    videoKeywords: list[FrequencyKeyword] = Field(default_factory=list)
+    commentKeywords: list[FrequencyKeyword] = Field(default_factory=list)
     keywordCoverage: AnalysisKeywordCoverage = Field(
         default_factory=AnalysisKeywordCoverage
     )

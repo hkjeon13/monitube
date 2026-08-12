@@ -289,7 +289,7 @@ Hallmark 레포의 핵심은 `skills/hallmark/SKILL.md` 하나이며, 아래 ref
 - Overview/Videos/Comments는 large tab card가 아니라 report section switch로 만든다.
 - KPI는 card 5개 대신 한 줄 metric band 또는 2-row definition grid로 만든다.
 - 주요 trend와 performance ranking을 full-width 또는 8/4 구조로 배치한다.
-- TF-IDF, comment signals, coverage는 marginal/secondary section으로 시각 무게를 낮춘다.
+- 빈도 기반 단어, comment signals, coverage는 marginal/secondary section으로 시각 무게를 낮춘다.
 - table은 실제 header와 row rule을 사용하고 card 안에 다시 넣지 않는다.
 - chart와 heatmap에는 항상 text/table fallback 또는 accessible summary를 제공한다.
 - 모든 panel에 kicker를 넣지 않고, 데이터 기준은 subtitle/legend/footnote로 표현한다.
