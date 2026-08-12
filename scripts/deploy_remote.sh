@@ -506,10 +506,13 @@ ensure_disk_headroom "$TARGET_DIR"
 
 if [[ "$RUN_DEPLOY_CHECKS" == "true" ]]; then
   log "Running image-level import and bytecode checks before pausing writes."
-  compose run --rm --no-deps api python -m compileall -q /workspace/apps/api
-  compose run --rm --no-deps tokenizer python -m compileall -q /workspace/apps/tokenizer
+  compose run --rm --no-deps -e PYTHONPYCACHEPREFIX=/tmp/monitube-pycache \
+    api python -m compileall -q /workspace/apps/api
+  compose run --rm --no-deps -e PYTHONPYCACHEPREFIX=/tmp/monitube-pycache \
+    tokenizer python -m compileall -q /workspace/apps/tokenizer
   compose run --rm --no-deps tokenizer python -c "from monitube_tokenizer.analyzer import MecabNltkNounAnalyzer, analyzer_health; analyzer_health(MecabNltkNounAnalyzer())"
-  compose run --rm --no-deps worker python -m compileall -q /workspace/apps/api /workspace/apps/worker
+  compose run --rm --no-deps -e PYTHONPYCACHEPREFIX=/tmp/monitube-pycache \
+    worker python -m compileall -q /workspace/apps/api /workspace/apps/worker
   for rust_service in api-rust nlp-worker-rust collection-worker-rust analysis-worker-rust maintenance-rust; do
     rust_image="$(compose images -q "$rust_service")"
     [[ -n "$rust_image" ]] || die "${rust_service} image was not built."
