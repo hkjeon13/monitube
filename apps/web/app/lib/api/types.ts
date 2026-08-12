@@ -325,6 +325,13 @@ export interface FrequencyKeyword {
   documentRate: number;
 }
 
+export type AnalysisKeywordCorpus = "video" | "comment";
+
+export interface AnalysisExcludedTerms {
+  videoTerms: string[];
+  commentTerms: string[];
+}
+
 export interface AnalysisKeywordCoverage {
   indexedVideoDocuments: number;
   indexedCommentDocuments: number;

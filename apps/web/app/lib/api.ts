@@ -45,6 +45,9 @@ export type {
   AnalysisCoverage,
   AnalysisOverview,
   AnalysisQuery,
+  AnalysisKeywordCorpus,
+  AnalysisExcludedTerms,
+  FrequencyKeyword,
 } from "./api/types";
 
 export { ApiError, apiBaseUrl } from "./api/transport";

@@ -2,11 +2,39 @@
 
 from datetime import datetime
 
-from ..contracts import AnalysisInsightsResponse, AnalysisOverviewResponse
+from ..contracts import (
+    AnalysisExcludedTermsResponse,
+    AnalysisInsightsResponse,
+    AnalysisOverviewResponse,
+)
 from .base import ApplicationService
 
 
 class AnalysisService(ApplicationService):
+    def list_analysis_excluded_terms(
+        self,
+        *,
+        owner_id: str,
+    ) -> AnalysisExcludedTermsResponse:
+        return AnalysisExcludedTermsResponse.model_validate(
+            self.repository.list_analysis_excluded_terms(owner_id=owner_id)
+        )
+
+    def replace_analysis_excluded_terms(
+        self,
+        *,
+        owner_id: str,
+        corpus_kind: str,
+        terms: list[str],
+    ) -> AnalysisExcludedTermsResponse:
+        return AnalysisExcludedTermsResponse.model_validate(
+            self.repository.replace_analysis_excluded_terms(
+                owner_id=owner_id,
+                corpus_kind=corpus_kind,
+                terms=terms,
+            )
+        )
+
     def get_analysis_insights(
         self,
         *,

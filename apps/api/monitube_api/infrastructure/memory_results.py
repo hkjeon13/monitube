@@ -36,6 +36,28 @@ from ..repositories import (
 
 
 class MemoryReadMixin:
+    def list_analysis_excluded_terms(
+        self,
+        *,
+        owner_id: str,
+    ) -> dict[str, list[str]]:
+        with self._lock:
+            return {
+                "videoTerms": sorted(self._analysis_excluded_terms.get((owner_id, "video"), set())),
+                "commentTerms": sorted(self._analysis_excluded_terms.get((owner_id, "comment"), set())),
+            }
+
+    def replace_analysis_excluded_terms(
+        self,
+        *,
+        owner_id: str,
+        corpus_kind: str,
+        terms: list[str],
+    ) -> dict[str, list[str]]:
+        with self._lock:
+            self._analysis_excluded_terms[(owner_id, corpus_kind)] = set(terms)
+        return self.list_analysis_excluded_terms(owner_id=owner_id)
+
     def set_target_pin(self, *, target_id: str, enabled: bool, interval_minutes: int) -> dict[str, Any]:
         with self._lock:
             if target_id not in self._targets:

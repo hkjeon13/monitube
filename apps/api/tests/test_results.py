@@ -206,6 +206,49 @@ def test_analysis_overview_combines_video_and_comment_metrics() -> None:
     assert insight_body["publishingHeatmap"][0]["hourBucket"] == 6
 
 
+def test_analysis_excluded_terms_are_normalized_and_managed_per_corpus() -> None:
+    repository = InMemoryRepository()
+    client = TestClient(create_app(repository=repository))
+
+    initial = client.get("/v1/analysis/excluded-terms")
+    video = client.put(
+        "/v1/analysis/excluded-terms/video",
+        json={"terms": [" 분석 ", "AI", "분석"]},
+    )
+    comment = client.put(
+        "/v1/analysis/excluded-terms/comment",
+        json={"terms": ["좋아요", "  반복  "]},
+    )
+    restored = client.put(
+        "/v1/analysis/excluded-terms/video",
+        json={"terms": ["ai"]},
+    )
+
+    assert initial.status_code == 200
+    assert initial.json() == {"videoTerms": [], "commentTerms": []}
+    assert video.status_code == 200
+    assert video.json() == {"videoTerms": ["ai", "분석"], "commentTerms": []}
+    assert comment.status_code == 200
+    assert comment.json() == {
+        "videoTerms": ["ai", "분석"],
+        "commentTerms": ["반복", "좋아요"],
+    }
+    assert restored.status_code == 200
+    assert restored.json() == {
+        "videoTerms": ["ai"],
+        "commentTerms": ["반복", "좋아요"],
+    }
+
+    assert client.put(
+        "/v1/analysis/excluded-terms/video",
+        json={"terms": ["x" * 65]},
+    ).status_code == 422
+    assert client.put(
+        "/v1/analysis/excluded-terms/unknown",
+        json={"terms": []},
+    ).status_code == 422
+
+
 def test_additive_source_routes_can_be_rolled_back_with_flags() -> None:
     repository = InMemoryRepository()
     source = repository.create_source(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Annotated, Any, Literal, TypeAlias
+import unicodedata
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -421,6 +422,27 @@ class FrequencyKeyword(ApiModel):
     termCount: int = Field(ge=1)
     documentCount: int = Field(ge=1)
     documentRate: float = Field(ge=0, le=100)
+
+
+class AnalysisExcludedTermsUpdate(ApiModel):
+    terms: list[str] = Field(default_factory=list, max_length=250)
+
+    @model_validator(mode="after")
+    def normalize_terms(self) -> "AnalysisExcludedTermsUpdate":
+        normalized: list[str] = []
+        for raw_term in self.terms:
+            term = unicodedata.normalize("NFC", raw_term).strip().casefold()
+            if not term or len(term) > 64 or any(ord(character) < 32 for character in term):
+                raise ValueError("Excluded terms must contain 1 to 64 visible characters")
+            if term not in normalized:
+                normalized.append(term)
+        self.terms = normalized
+        return self
+
+
+class AnalysisExcludedTermsResponse(ApiModel):
+    videoTerms: list[str] = Field(default_factory=list)
+    commentTerms: list[str] = Field(default_factory=list)
 
 
 class AnalysisKeywordCoverage(ApiModel):

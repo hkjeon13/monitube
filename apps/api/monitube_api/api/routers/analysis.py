@@ -6,11 +6,43 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
 
-from ...contracts import AnalysisInsightsResponse, AnalysisOverviewResponse
+from ...contracts import (
+    AnalysisExcludedTermsResponse,
+    AnalysisExcludedTermsUpdate,
+    AnalysisInsightsResponse,
+    AnalysisOverviewResponse,
+)
 from ..dependencies import Service, User, get_current_user
 
 
 router = APIRouter(prefix="/v1", dependencies=[Depends(get_current_user)])
+
+
+@router.get(
+    "/analysis/excluded-terms",
+    response_model=AnalysisExcludedTermsResponse,
+    tags=["analysis"],
+)
+def analysis_excluded_terms(service: Service, user: User) -> AnalysisExcludedTermsResponse:
+    return service.list_analysis_excluded_terms(owner_id=user.id)
+
+
+@router.put(
+    "/analysis/excluded-terms/{corpus_kind}",
+    response_model=AnalysisExcludedTermsResponse,
+    tags=["analysis"],
+)
+def replace_analysis_excluded_terms(
+    corpus_kind: Literal["video", "comment"],
+    payload: AnalysisExcludedTermsUpdate,
+    service: Service,
+    user: User,
+) -> AnalysisExcludedTermsResponse:
+    return service.replace_analysis_excluded_terms(
+        owner_id=user.id,
+        corpus_kind=corpus_kind,
+        terms=payload.terms,
+    )
 
 
 @router.get(

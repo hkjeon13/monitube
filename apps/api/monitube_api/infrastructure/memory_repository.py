@@ -99,6 +99,7 @@ class InMemoryRepository(
         self._source_video_first_seen: dict[tuple[str, str], datetime] = {}
         self._analysis: dict[str, dict[str, Any]] = {}
         self._analysis_metadata: dict[str, dict[str, Any]] = {}
+        self._analysis_excluded_terms: dict[tuple[str, str], set[str]] = {}
         self._request_logs: list[dict[str, Any]] = []
 
     @staticmethod

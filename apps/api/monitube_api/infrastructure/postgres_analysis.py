@@ -13,6 +13,52 @@ from ..nlp.frequency import keyword_frequencies
 
 
 class PostgresAnalysisMixin:
+    def list_analysis_excluded_terms(
+        self,
+        *,
+        owner_id: str,
+    ) -> dict[str, list[str]]:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT corpus_kind, term
+                FROM analysis_excluded_terms
+                WHERE user_id = %s::uuid
+                ORDER BY corpus_kind, term
+                """,
+                (owner_id,),
+            )
+            rows = cursor.fetchall()
+        return {
+            "videoTerms": [str(row["term"]) for row in rows if row["corpus_kind"] == "video"],
+            "commentTerms": [str(row["term"]) for row in rows if row["corpus_kind"] == "comment"],
+        }
+
+    def replace_analysis_excluded_terms(
+        self,
+        *,
+        owner_id: str,
+        corpus_kind: str,
+        terms: list[str],
+    ) -> dict[str, list[str]]:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                DELETE FROM analysis_excluded_terms
+                WHERE user_id = %s::uuid AND corpus_kind = %s
+                """,
+                (owner_id, corpus_kind),
+            )
+            if terms:
+                cursor.executemany(
+                    """
+                    INSERT INTO analysis_excluded_terms (user_id, corpus_kind, term)
+                    VALUES (%s::uuid, %s, %s)
+                    """,
+                    [(owner_id, corpus_kind, term) for term in terms],
+                )
+        return self.list_analysis_excluded_terms(owner_id=owner_id)
+
     @staticmethod
     def _analysis_frequency_keywords(
         *,
@@ -49,10 +95,12 @@ class PostgresAnalysisMixin:
                 scope_id = target["id"]
 
         stats_params = {
+            "owner_id": params["owner_id"],
             "nlp_scope_kind": scope_kind,
             "nlp_scope_id": scope_id,
             "nlp_corpus_kind": corpus_kind,
             "nlp_analyzer_version": ANALYZER_VERSION,
+            "nlp_exclusion_corpus": "video" if corpus_kind == "video" else "comment",
             "from_at": params["from_at"],
             "to_at": params["to_at"],
             "nlp_keyword_candidate_limit": max(50, limit * 4),
@@ -100,6 +148,13 @@ class PostgresAnalysisMixin:
                     AND scope_id = %(nlp_scope_id)s::uuid
                     AND corpus_kind = %(nlp_corpus_kind)s
                     AND analyzer_version = %(nlp_analyzer_version)s
+                    AND NOT EXISTS (
+                      SELECT 1
+                      FROM analysis_excluded_terms excluded
+                      WHERE excluded.user_id = %(owner_id)s::uuid
+                        AND excluded.corpus_kind = %(nlp_exclusion_corpus)s
+                        AND excluded.term = nlp_daily_term_stats.term
+                    )
                     AND (%(from_at)s::timestamptz IS NULL
                          OR document_date >= %(from_at)s::date)
                     AND (%(to_at)s::timestamptz IS NULL
@@ -122,6 +177,13 @@ class PostgresAnalysisMixin:
                   AND scope_id = %(nlp_scope_id)s::uuid
                   AND corpus_kind = %(nlp_corpus_kind)s
                   AND analyzer_version = %(nlp_analyzer_version)s
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM analysis_excluded_terms excluded
+                    WHERE excluded.user_id = %(owner_id)s::uuid
+                      AND excluded.corpus_kind = %(nlp_exclusion_corpus)s
+                      AND excluded.term = nlp_term_stats.term
+                  )
                 ORDER BY total_term_frequency DESC, document_frequency DESC, term
                 LIMIT %(nlp_keyword_candidate_limit)s
                 """,

@@ -11,6 +11,8 @@ import type {
   AnalysisVideo,
   WorkspaceAnalysisSummary,
   FrequencyKeyword,
+  AnalysisExcludedTerms,
+  AnalysisKeywordCorpus,
 } from "./types";
 import {
   asArray,
@@ -111,6 +113,35 @@ function normalizeFrequencyKeywords(value: unknown): FrequencyKeyword[] {
       documentRate: requiredNumber(record, "documentRate"),
     }];
   });
+}
+
+function normalizeExcludedTerms(value: unknown): AnalysisExcludedTerms {
+  const record = asRecord(value);
+  if (!record) throw new ApiError("제외 키워드 목록을 해석하지 못했습니다.", 502);
+  return {
+    videoTerms: asArray(record.videoTerms).flatMap((term) => {
+      const normalized = asText(term);
+      return normalized ? [normalized] : [];
+    }),
+    commentTerms: asArray(record.commentTerms).flatMap((term) => {
+      const normalized = asText(term);
+      return normalized ? [normalized] : [];
+    }),
+  };
+}
+
+export async function getAnalysisExcludedTerms(): Promise<AnalysisExcludedTerms> {
+  return normalizeExcludedTerms(await request<unknown>("/v1/analysis/excluded-terms", { method: "GET" }));
+}
+
+export async function updateAnalysisExcludedTerms(
+  corpus: AnalysisKeywordCorpus,
+  terms: string[],
+): Promise<AnalysisExcludedTerms> {
+  return normalizeExcludedTerms(await request<unknown>(`/v1/analysis/excluded-terms/${corpus}`, {
+    method: "PUT",
+    body: JSON.stringify({ terms }),
+  }));
 }
 
 export async function getAnalysisOverview(query: AnalysisQuery = {}): Promise<AnalysisOverview> {

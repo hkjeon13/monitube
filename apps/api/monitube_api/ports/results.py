@@ -67,6 +67,20 @@ class ResultReadRepository(Protocol):
 
 
 class ExploreReadRepository(Protocol):
+    def list_analysis_excluded_terms(
+        self,
+        *,
+        owner_id: str,
+    ) -> dict[str, list[str]]: ...
+
+    def replace_analysis_excluded_terms(
+        self,
+        *,
+        owner_id: str,
+        corpus_kind: str,
+        terms: list[str],
+    ) -> dict[str, list[str]]: ...
+
     def get_analysis_insights(
         self,
         *,
