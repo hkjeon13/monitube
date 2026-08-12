@@ -1,0 +1,18 @@
+[
+  {
+    "text": "영상 분석 OpenAI market",
+    "tokens": ["분석", "openai", "market"]
+  },
+  {
+    "text": "데이터 분석과 시청자 반응을 확인합니다.",
+    "tokens": ["데이터", "분석", "시청자", "반응", "확인"]
+  },
+  {
+    "text": "Monitube creators analyze audience comments and videos",
+    "tokens": ["monitube", "creators", "audience", "comments", "videos"]
+  },
+  {
+    "text": "한국어 Korean mixed 데이터 pipeline",
+    "tokens": ["한국어", "데이터", "pipeline"]
+  }
+]

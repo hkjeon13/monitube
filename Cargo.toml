@@ -1,0 +1,58 @@
+[workspace]
+members = [
+    "apps/api-rust",
+    "apps/nlp-worker-rust",
+    "apps/collection-worker-rust",
+    "apps/analysis-worker-rust",
+    "apps/maintenance-rust",
+    "crates/monitube-analysis",
+    "crates/monitube-contracts",
+    "crates/monitube-domain",
+    "crates/monitube-observability",
+    "crates/monitube-nlp-store",
+    "crates/monitube-collection-store",
+    "crates/monitube-postgres",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "UNLICENSED"
+publish = false
+
+[workspace.dependencies]
+axum = "0.8.9"
+base64 = "0.22.1"
+chrono = { version = "0.4.45", features = ["serde"] }
+getrandom = "0.4.3"
+hex = "0.4.3"
+pbkdf2 = "0.13.0"
+percent-encoding = "2.3.2"
+reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.11.0"
+sqlx = { version = "0.8.6", default-features = false, features = ["chrono", "json", "macros", "postgres", "runtime-tokio-rustls", "uuid"] }
+subtle = "2.6.1"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+tower-http = { version = "0.7.0", features = ["catch-panic", "cors", "limit", "request-id", "timeout", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+unicode-casefold = "0.2.0"
+unicode-general-category = "1.1.0"
+unicode-normalization = "0.1.25"
+url = "2.5.8"
+uuid = { version = "1.24.0", features = ["serde", "v4"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"

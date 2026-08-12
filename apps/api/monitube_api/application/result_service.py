@@ -35,6 +35,14 @@ class ResultService(ApplicationService):
     ) -> SourceResultsResponse:
         result = self.repository.get_source_results(source_id, owner_id=owner_id)
         summary = result["analysis"]
+        analysis = AnalysisSummary(
+            videoCount=summary.get("videoCount", 0),
+            commentCount=summary.get("commentCount", 0),
+            latestVideoPublishedAt=summary.get("latestVideoPublishedAt"),
+            latestCommentPublishedAt=summary.get("latestCommentPublishedAt"),
+            topWords=summary.get("topWords", []),
+            generatedAt=summary["generatedAt"],
+        )
         return SourceResultsResponse(
             source=source_contract(result["source"]),
             latestJob=(
@@ -44,7 +52,7 @@ class ResultService(ApplicationService):
             ),
             videos=[video_contract(video) for video in result["videos"]],
             commentSummary=comment_summary(summary),
-            analysis=AnalysisSummary.model_validate(summary),
+            analysis=analysis,
         )
 
     @staticmethod

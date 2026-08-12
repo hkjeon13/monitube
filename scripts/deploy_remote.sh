@@ -11,11 +11,13 @@ readonly YOUTUBE_SECRET_ENV_FILE="${MONITUBE_YOUTUBE_SECRET_ENV_FILE:-/data/psyc
 readonly BACKUP_DIR="${MONITUBE_BACKUP_DIR:-/data/psyche/backups/monitube}"
 readonly BRANCH="${MONITUBE_BRANCH:-main}"
 WORKER_REPLICAS="${MONITUBE_WORKER_REPLICAS:-}"
+NLP_WORKER_REPLICAS="${MONITUBE_NLP_WORKER_REPLICAS:-}"
 ANALYSIS_WORKER_REPLICAS="${MONITUBE_ANALYSIS_WORKER_REPLICAS:-}"
 readonly RUN_DEPLOY_CHECKS="${MONITUBE_RUN_DEPLOY_CHECKS:-true}"
 readonly PROMOTE_SAFE_FLAGS="${MONITUBE_PROMOTE_SAFE_FLAGS:-true}"
 readonly RESET_QUERY_STATS="${MONITUBE_RESET_PG_STAT_STATEMENTS:-false}"
 readonly MIN_FREE_DISK_GB="${MONITUBE_MIN_FREE_DISK_GB:-10}"
+readonly CUTOVER_SOAK_SECONDS="${MONITUBE_CUTOVER_SOAK_SECONDS:-60}"
 
 log() {
   printf '[monitube deploy] %s\n' "$*"
@@ -39,6 +41,7 @@ validate_boolean() {
 
 [[ "$BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || die "MONITUBE_BRANCH contains unsupported characters."
 [[ "$MIN_FREE_DISK_GB" =~ ^[1-9][0-9]*$ ]] || die "MONITUBE_MIN_FREE_DISK_GB must be a positive integer."
+[[ "$CUTOVER_SOAK_SECONDS" =~ ^[0-9]+$ ]] || die "MONITUBE_CUTOVER_SOAK_SECONDS must be a non-negative integer."
 validate_boolean MONITUBE_RUN_DEPLOY_CHECKS "$RUN_DEPLOY_CHECKS"
 validate_boolean MONITUBE_PROMOTE_SAFE_FLAGS "$PROMOTE_SAFE_FLAGS"
 validate_boolean MONITUBE_RESET_PG_STAT_STATEMENTS "$RESET_QUERY_STATS"
@@ -124,6 +127,21 @@ chmod 600 "$YOUTUBE_SECRET_ENV_FILE"
 invalid_secret_lines="$(grep -cvE '^[[:space:]]*(#|$)|^YOUTUBE_API_KEY=[^[:space:]]*$|^YOUTUBE_API_KEYS=[^[:space:]]*$|^YOUTUBE_API_KEY_ENCRYPTION_KEY=[^[:space:]]*$|^YOUTUBE_KEY_REGISTRATION_TOKEN=[^[:space:]]*$|^SEARCH_API_KEY=[^[:space:]]*$' "$YOUTUBE_SECRET_ENV_FILE" || true)"
 [[ "$invalid_secret_lines" == "0" ]] || die "server secret env file contains an unsupported entry."
 
+secret_value() {
+  awk -F= -v key="$1" '$1 == key { sub(/^[^=]*=/, ""); value=$0 } END { print value }' "$YOUTUBE_SECRET_ENV_FILE"
+}
+
+youtube_key_secret="$(secret_value YOUTUBE_API_KEY)"
+youtube_keys_secret="$(secret_value YOUTUBE_API_KEYS)"
+encryption_key_secret="$(secret_value YOUTUBE_API_KEY_ENCRYPTION_KEY)"
+registration_token_secret="$(secret_value YOUTUBE_KEY_REGISTRATION_TOKEN)"
+search_api_key_secret="$(secret_value SEARCH_API_KEY)"
+[[ -n "$youtube_key_secret" || -n "$youtube_keys_secret" ]] || die "server secret env file must provide YOUTUBE_API_KEY or YOUTUBE_API_KEYS."
+[[ -n "$encryption_key_secret" ]] || die "server secret env file must provide YOUTUBE_API_KEY_ENCRYPTION_KEY."
+[[ -n "$registration_token_secret" ]] || die "server secret env file must provide YOUTUBE_KEY_REGISTRATION_TOKEN."
+[[ -n "$search_api_key_secret" ]] || die "server secret env file must provide SEARCH_API_KEY."
+unset youtube_key_secret youtube_keys_secret encryption_key_secret registration_token_secret search_api_key_secret
+
 dotenv_has_key() {
   grep -qE "^$1=" "$ENV_FILE"
 }
@@ -140,9 +158,14 @@ if [[ -z "$ANALYSIS_WORKER_REPLICAS" ]]; then
   ANALYSIS_WORKER_REPLICAS="$(dotenv_value MONITUBE_ANALYSIS_WORKER_REPLICAS)"
   ANALYSIS_WORKER_REPLICAS="${ANALYSIS_WORKER_REPLICAS:-1}"
 fi
+if [[ -z "$NLP_WORKER_REPLICAS" ]]; then
+  NLP_WORKER_REPLICAS="$(dotenv_value MONITUBE_NLP_WORKER_REPLICAS)"
+  NLP_WORKER_REPLICAS="${NLP_WORKER_REPLICAS:-1}"
+fi
 [[ "$WORKER_REPLICAS" =~ ^[1-9][0-9]*$ ]] || die "MONITUBE_WORKER_REPLICAS must be a positive integer."
+[[ "$NLP_WORKER_REPLICAS" =~ ^[1-9][0-9]*$ ]] || die "MONITUBE_NLP_WORKER_REPLICAS must be a positive integer."
 [[ "$ANALYSIS_WORKER_REPLICAS" =~ ^[1-9][0-9]*$ ]] || die "MONITUBE_ANALYSIS_WORKER_REPLICAS must be a positive integer."
-readonly WORKER_REPLICAS ANALYSIS_WORKER_REPLICAS
+readonly WORKER_REPLICAS NLP_WORKER_REPLICAS ANALYSIS_WORKER_REPLICAS
 
 ensure_env_setting() {
   local key="$1"
@@ -211,6 +234,7 @@ ensure_env_setting TRANSCRIPT_PRIMARY_LANGUAGE ko
 ensure_env_setting TRANSCRIPT_FALLBACK_LANGUAGE en
 ensure_env_setting TRANSCRIPT_TYPE_PREFERENCE manual
 ensure_env_setting TRANSCRIPT_MAX_SEGMENTS 100000
+ensure_env_setting MONITUBE_WEB_API_PROXY_TARGET_DOCKER http://api:8000
 
 performance_flags=(
   ENABLE_SOURCE_OVERVIEW_V2
@@ -242,17 +266,24 @@ require_loopback_binding POSTGRES_BIND_ADDRESS 127.0.0.1
 require_loopback_binding REDIS_BIND_ADDRESS 127.0.0.1
 require_loopback_binding MINIO_BIND_ADDRESS 127.0.0.1
 require_loopback_binding MINIO_CONSOLE_BIND_ADDRESS 127.0.0.1
+require_loopback_binding API_BIND_ADDRESS 127.0.0.1
+require_loopback_binding RUST_API_BIND_ADDRESS 127.0.0.1
+require_loopback_binding WEB_BIND_ADDRESS 127.0.0.1
 
 export MONITUBE_YOUTUBE_SECRET_ENV_FILE="$YOUTUBE_SECRET_ENV_FILE"
 export MONITUBE_IMAGE_TAG="$CURRENT_SHA"
 export APP_ENV=production
 
 compose() {
-  docker compose --project-directory "$TARGET_DIR" --env-file "$ENV_FILE" -f "$TARGET_DIR/docker-compose.yml" "$@"
+  docker compose --project-directory "$TARGET_DIR" --env-file "$ENV_FILE" \
+    --profile rust-migration --profile rust-production --profile rust-maintenance \
+    -f "$TARGET_DIR/docker-compose.yml" "$@"
 }
 
 previous_compose() {
-  docker compose --project-directory "$TARGET_DIR" --env-file "$ENV_FILE" -f "$RELEASE_STATE_DIR/docker-compose.previous.yml" "$@"
+  docker compose --project-directory "$TARGET_DIR" --env-file "$ENV_FILE" \
+    --profile rust-migration --profile rust-production --profile rust-maintenance \
+    -f "$RELEASE_STATE_DIR/docker-compose.previous.yml" "$@"
 }
 
 previous_postgres_compose() {
@@ -266,6 +297,10 @@ for feature_flag in "${performance_flags[@]}"; do
   printf '%s=%s\n' "$feature_flag" "$(dotenv_value "$feature_flag")" >> "$RELEASE_STATE_DIR/feature-flags.previous.env"
 done
 chmod 600 "$RELEASE_STATE_DIR/feature-flags.previous.env"
+printf 'MONITUBE_WEB_API_PROXY_TARGET_DOCKER=%s\n' \
+  "$(dotenv_value MONITUBE_WEB_API_PROXY_TARGET_DOCKER)" \
+  > "$RELEASE_STATE_DIR/runtime-settings.previous.env"
+chmod 600 "$RELEASE_STATE_DIR/runtime-settings.previous.env"
 
 ensure_disk_headroom() {
   local path="$1"
@@ -329,8 +364,13 @@ count_running_replicas() {
 
 previous_api_running="$(count_running_replicas api)"
 previous_web_running="$(count_running_replicas web)"
+previous_tokenizer_running="$(count_running_replicas tokenizer)"
 previous_worker_replicas="$(count_running_replicas worker)"
 previous_analysis_replicas="$(count_running_replicas analysis-worker)"
+previous_rust_api_replicas="$(count_running_replicas api-rust)"
+previous_rust_nlp_replicas="$(count_running_replicas nlp-worker-rust)"
+previous_rust_collection_replicas="$(count_running_replicas collection-worker-rust)"
+previous_rust_analysis_replicas="$(count_running_replicas analysis-worker-rust)"
 
 if [[ -n "$PREVIOUS_SHA" ]] && git cat-file -e "${PREVIOUS_SHA}:docker-compose.yml" 2>/dev/null; then
   git show "${PREVIOUS_SHA}:docker-compose.yml" > "$RELEASE_STATE_DIR/docker-compose.previous.yml"
@@ -354,6 +394,11 @@ tag_previous_service_image() {
 tag_previous_service_image api monitube-api
 tag_previous_service_image web monitube-web
 tag_previous_service_image worker monitube-worker
+tag_previous_service_image tokenizer monitube-tokenizer
+tag_previous_service_image api-rust monitube-api-rust
+tag_previous_service_image nlp-worker-rust monitube-nlp-worker-rust
+tag_previous_service_image collection-worker-rust monitube-collection-worker-rust
+tag_previous_service_image analysis-worker-rust monitube-analysis-worker-rust
 [[ -s "$RELEASE_STATE_DIR/application-images.previous" ]] || : > "$RELEASE_STATE_DIR/application-images.previous"
 chmod 600 "$RELEASE_STATE_DIR/application-images.previous"
 
@@ -445,23 +490,32 @@ if [[ "$database_preexisting" != "true" || "$migration_pending" == "true" || "$p
   database_change_required=true
 fi
 
-if [[ "$database_preexisting" == "true" && "$database_change_required" == "true" ]]; then
+if [[ "$database_preexisting" == "true" ]]; then
   database_counts > "$RELEASE_STATE_DIR/database-counts.before"
   chmod 600 "$RELEASE_STATE_DIR/database-counts.before"
-  log "A migration or PostgreSQL runtime change is pending; taking a verified backup before build or recreation."
+  log "Taking a verified database backup before the Rust ownership cutover."
   backup_database
 else
-  log "No migration or PostgreSQL runtime change detected; using the app-only deployment path."
+  log "No existing database was found; the new instance will be initialized from committed migrations."
 fi
 
-log "Building immutable application images before pausing writes."
-compose build api worker web
+set_env_setting MONITUBE_WEB_API_PROXY_TARGET_DOCKER http://api-rust:8001
+log "Building immutable Python rollback, tokenizer, Rust, maintenance, and web images before pausing writes."
+compose build api worker tokenizer api-rust-shadow api-rust nlp-worker-rust collection-worker-rust analysis-worker-rust maintenance-rust web
 ensure_disk_headroom "$TARGET_DIR"
 
 if [[ "$RUN_DEPLOY_CHECKS" == "true" ]]; then
   log "Running image-level import and bytecode checks before pausing writes."
   compose run --rm --no-deps api python -m compileall -q /workspace/apps/api
+  compose run --rm --no-deps tokenizer python -m compileall -q /workspace/apps/tokenizer
+  compose run --rm --no-deps tokenizer python -c "from monitube_tokenizer.analyzer import MecabNltkNounAnalyzer, analyzer_health; analyzer_health(MecabNltkNounAnalyzer())"
   compose run --rm --no-deps worker python -m compileall -q /workspace/apps/api /workspace/apps/worker
+  for rust_service in api-rust nlp-worker-rust collection-worker-rust analysis-worker-rust maintenance-rust; do
+    rust_image="$(compose images -q "$rust_service")"
+    [[ -n "$rust_image" ]] || die "${rust_service} image was not built."
+    rust_user="$(docker image inspect --format '{{.Config.User}}' "$rust_image")"
+    [[ -n "$rust_user" && "$rust_user" != "0" && "$rust_user" != "root" ]] || die "${rust_service} image must run as a non-root user."
+  done
 fi
 
 ROLLBACK_ARMED=false
@@ -480,11 +534,30 @@ restore_performance_flags() {
   done
 }
 
-wait_for_api_path() {
+restore_runtime_settings() {
+  local previous_proxy_target
+  previous_proxy_target="$(awk -F= '$1 == "MONITUBE_WEB_API_PROXY_TARGET_DOCKER" { sub(/^[^=]*=/, ""); print; exit }' "$RELEASE_STATE_DIR/runtime-settings.previous.env")"
+  set_env_setting MONITUBE_WEB_API_PROXY_TARGET_DOCKER "${previous_proxy_target:-http://api:8000}"
+}
+
+wait_for_python_api_path() {
   local path="$1"
   local attempt
   for attempt in $(seq 1 45); do
     if compose exec -T api python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000${path}', timeout=3)" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+wait_for_rust_api_path() {
+  local service="$1"
+  local path="$2"
+  local attempt
+  for attempt in $(seq 1 45); do
+    if compose exec -T "$service" curl --fail --silent "http://127.0.0.1:8001${path}" >/dev/null 2>&1; then
       return 0
     fi
     sleep 2
@@ -503,10 +576,43 @@ wait_for_previous_api_health() {
   return 1
 }
 
+wait_for_previous_rust_api_health() {
+  local attempt
+  for attempt in $(seq 1 30); do
+    if previous_compose exec -T api-rust curl --fail --silent http://127.0.0.1:8001/ready >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
 wait_for_web() {
   local attempt
   for attempt in $(seq 1 30); do
     if compose exec -T web node -e "fetch('http://127.0.0.1:3000').then((response) => { if (!response.ok) process.exit(1) })" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+wait_for_web_api() {
+  local attempt
+  for attempt in $(seq 1 30); do
+    if compose exec -T web node -e "fetch('http://127.0.0.1:3000/api/ready').then((response) => { if (!response.ok) process.exit(1) })" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+wait_for_tokenizer() {
+  local attempt
+  for attempt in $(seq 1 30); do
+    if compose exec -T tokenizer python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/ready', timeout=3)" >/dev/null 2>&1; then
       return 0
     fi
     sleep 2
@@ -519,25 +625,46 @@ rollback_deployment() {
   set +e
   warn "Deployment failed after cutover began; attempting application and PostgreSQL-config rollback."
   restore_performance_flags
+  restore_runtime_settings
   export MONITUBE_IMAGE_TAG="$ROLLBACK_IMAGE_TAG"
+
+  compose stop api-rust api-rust-shadow nlp-worker-rust collection-worker-rust analysis-worker-rust
 
   if [[ "$POSTGRES_CONFIG_APPLIED" == "true" && "$database_preexisting" == "true" ]]; then
     warn "Restoring the previous PostgreSQL command and shared-memory configuration."
     previous_postgres_compose up --detach --force-recreate --no-deps postgres
     wait_for_postgres || rollback_failed=true
   fi
-  if (( previous_api_running > 0 )); then
+  if (( previous_rust_api_replicas > 0 )); then
+    previous_compose up --detach --force-recreate --no-deps api-rust
+    wait_for_previous_rust_api_health || rollback_failed=true
+  elif (( previous_api_running > 0 )); then
     previous_compose up --detach --force-recreate --no-deps api
     wait_for_previous_api_health || rollback_failed=true
   fi
   if (( previous_web_running > 0 )); then
     previous_compose up --detach --force-recreate --no-deps web
   fi
+  if (( previous_tokenizer_running > 0 )); then
+    previous_compose up --detach --force-recreate --no-deps tokenizer
+  fi
   if (( previous_worker_replicas > 0 )); then
     previous_compose up --detach --force-recreate --no-deps --scale "worker=${previous_worker_replicas}" worker
   fi
   if (( previous_analysis_replicas > 0 )); then
     previous_compose up --detach --force-recreate --no-deps --scale "analysis-worker=${previous_analysis_replicas}" analysis-worker
+  fi
+  if (( previous_rust_nlp_replicas > 0 )); then
+    previous_compose up --detach --force-recreate --no-deps --scale "nlp-worker-rust=${previous_rust_nlp_replicas}" nlp-worker-rust
+  fi
+  if (( previous_rust_collection_replicas > 0 )); then
+    previous_compose up --detach --force-recreate --no-deps --scale "collection-worker-rust=${previous_rust_collection_replicas}" collection-worker-rust
+  fi
+  if (( previous_rust_analysis_replicas > 0 )); then
+    previous_compose up --detach --force-recreate --no-deps --scale "analysis-worker-rust=${previous_rust_analysis_replicas}" analysis-worker-rust
+  fi
+  if (( previous_tokenizer_running == 0 )); then
+    compose stop tokenizer
   fi
 
   if [[ "$rollback_failed" == "true" ]]; then
@@ -566,7 +693,8 @@ if [[ "$database_preexisting" != "true" ]]; then
 elif [[ "$database_change_required" == "true" ]]; then
   ROLLBACK_ARMED=true
   log "Gracefully pausing API and workers before migration or configuration cutover."
-  compose stop api worker analysis-worker
+  compose stop api worker analysis-worker api-rust api-rust-shadow \
+    nlp-worker-rust collection-worker-rust analysis-worker-rust
 
   if [[ "$postgres_runtime_change" == "true" ]]; then
     log "Recreating PostgreSQL with the reviewed command and shm_size."
@@ -607,7 +735,7 @@ database_boolean() {
   compose exec -T postgres sh -ceu 'psql -X -U "$POSTGRES_USER" -d "$POSTGRES_DB" -At' <<< "$1"
 }
 
-foundation_schema_ready="$(database_boolean 'SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='"'"'public'"'"' AND table_name='"'"'collection_targets'"'"' AND column_name='"'"'data_version'"'"') AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='"'"'public'"'"' AND table_name='"'"'analysis_runs'"'"' AND column_name='"'"'target_id'"'"') AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='"'"'public'"'"' AND table_name='"'"'analysis_runs'"'"' AND column_name='"'"'data_version'"'"') AND to_regclass('"'"'public.video_comment_rollups'"'"') IS NOT NULL AND to_regclass('"'"'public.maintenance_backfills'"'"') IS NOT NULL AND to_regclass('"'"'public.video_search_documents'"'"') IS NOT NULL;')"
+foundation_schema_ready="$(database_boolean 'SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='"'"'public'"'"' AND table_name='"'"'collection_targets'"'"' AND column_name='"'"'data_version'"'"') AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='"'"'public'"'"' AND table_name='"'"'analysis_runs'"'"' AND column_name='"'"'target_id'"'"') AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='"'"'public'"'"' AND table_name='"'"'analysis_runs'"'"' AND column_name='"'"'data_version'"'"') AND EXISTS (SELECT 1 FROM monitube_schema_migrations WHERE filename='"'"'023_pure_frequency_ranking.sql'"'"') AND to_regclass('"'"'public.nlp_term_stats_frequency_rank_idx'"'"') IS NOT NULL AND to_regclass('"'"'public.video_comment_rollups'"'"') IS NOT NULL AND to_regclass('"'"'public.maintenance_backfills'"'"') IS NOT NULL AND to_regclass('"'"'public.video_search_documents'"'"') IS NOT NULL;')"
 
 if [[ "$database_preexisting" == "true" ]]; then
   ROLLBACK_ARMED=true
@@ -655,28 +783,112 @@ compose up --detach --no-deps redis minio
 compose run --rm --no-deps minio-init
 
 ROLLBACK_ARMED=true
-log "Starting the backward-compatible API image."
-compose up --detach --force-recreate --no-deps api
-wait_for_api_path /health || die "API liveness check failed."
-wait_for_api_path /ready || die "API readiness check failed."
+log "Starting the isolated tokenizer and Rust shadow API while current traffic remains authoritative."
+compose up --detach --force-recreate --no-deps tokenizer
+wait_for_tokenizer || die "tokenizer readiness check failed."
+compose up --detach --force-recreate --no-deps api-rust-shadow
+wait_for_rust_api_path api-rust-shadow /health || die "Rust shadow API liveness check failed."
+wait_for_rust_api_path api-rust-shadow /ready || die "Rust shadow API readiness check failed."
+shadow_auth_status="$(compose exec -T api-rust-shadow sh -ceu "curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:8001/v1/auth/me")"
+[[ "$shadow_auth_status" == "401" ]] || die "Rust shadow API authentication boundary returned ${shadow_auth_status}, expected 401."
 
-log "Starting web, collection workers, and the analysis worker."
-compose up --detach --force-recreate --no-deps web
-wait_for_web || die "web smoke check failed."
-compose up --detach --force-recreate --no-deps --scale "worker=${WORKER_REPLICAS}" --scale "analysis-worker=${ANALYSIS_WORKER_REPLICAS}" worker analysis-worker
+log "Stopping every queue consumer before transferring lease ownership to Rust."
+compose stop worker analysis-worker nlp-worker-rust collection-worker-rust analysis-worker-rust
+[[ "$(count_running_replicas worker)" == "0" ]] || die "Python collection workers did not stop."
+[[ "$(count_running_replicas analysis-worker)" == "0" ]] || die "Python analysis workers did not stop."
+[[ "$(count_running_replicas nlp-worker-rust)" == "0" ]] || die "previous Rust NLP workers did not stop."
+[[ "$(count_running_replicas collection-worker-rust)" == "0" ]] || die "previous Rust collection workers did not stop."
+[[ "$(count_running_replicas analysis-worker-rust)" == "0" ]] || die "previous Rust analysis workers did not stop."
 
-for attempt in $(seq 1 30); do
-  running_workers="$(count_running_replicas worker)"
-  running_analysis_workers="$(count_running_replicas analysis-worker)"
-  if [[ "$running_workers" == "$WORKER_REPLICAS" && "$running_analysis_workers" == "$ANALYSIS_WORKER_REPLICAS" ]]; then
+log "Requeueing leases left by stopped processes at idempotent checkpoints."
+compose exec -T postgres sh -ceu 'psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
+BEGIN;
+UPDATE sync_jobs
+SET state = 'queued', current_stage = 'queued_after_runtime_cutover',
+    lease_owner = NULL, lease_expires_at = NULL,
+    retry_at = NULL, resume_at = NULL, updated_at = now()
+WHERE state = 'running';
+UPDATE analysis_runs
+SET state = 'queued', lease_owner = NULL, lease_expires_at = NULL,
+    resume_at = now(), last_error = 'requeued_after_runtime_cutover'
+WHERE state = 'running';
+UPDATE nlp_documents
+SET state = 'pending', lease_owner = NULL, lease_expires_at = NULL,
+    updated_at = now(), error_code = NULL
+WHERE state = 'running';
+COMMIT;
+SQL
+
+set_env_setting ENABLE_COMMENT_ROLLUP_DUAL_WRITE true
+log "Running resumable Rust rollup maintenance against the quiescent write path."
+compose run --rm --no-deps maintenance-rust rollup-backfill
+rollup_ready="$(database_boolean 'SELECT EXISTS (SELECT 1 FROM maintenance_backfills WHERE name='"'"'video_comment_rollups'"'"' AND state='"'"'ready'"'"' AND processed = total);')"
+[[ "$rollup_ready" == "t" ]] || die "Rust rollup maintenance did not reach a reconciled ready state."
+
+log "Starting Rust NLP, collection, and analysis workers with exclusive queue ownership."
+compose up --detach --force-recreate --no-deps \
+  --scale "nlp-worker-rust=${NLP_WORKER_REPLICAS}" \
+  --scale "collection-worker-rust=${WORKER_REPLICAS}" \
+  --scale "analysis-worker-rust=${ANALYSIS_WORKER_REPLICAS}" \
+  nlp-worker-rust collection-worker-rust analysis-worker-rust
+for attempt in $(seq 1 45); do
+  if [[ "$(count_running_replicas nlp-worker-rust)" == "$NLP_WORKER_REPLICAS" \
+     && "$(count_running_replicas collection-worker-rust)" == "$WORKER_REPLICAS" \
+     && "$(count_running_replicas analysis-worker-rust)" == "$ANALYSIS_WORKER_REPLICAS" ]]; then
     break
   fi
   sleep 2
 done
-[[ "$(count_running_replicas worker)" == "$WORKER_REPLICAS" ]] || die "collection worker replica count did not reach ${WORKER_REPLICAS}."
-[[ "$(count_running_replicas analysis-worker)" == "$ANALYSIS_WORKER_REPLICAS" ]] || die "analysis worker replica count did not reach ${ANALYSIS_WORKER_REPLICAS}."
+[[ "$(count_running_replicas nlp-worker-rust)" == "$NLP_WORKER_REPLICAS" ]] || die "Rust NLP worker replica count did not reach ${NLP_WORKER_REPLICAS}."
+[[ "$(count_running_replicas collection-worker-rust)" == "$WORKER_REPLICAS" ]] || die "Rust collection worker replica count did not reach ${WORKER_REPLICAS}."
+[[ "$(count_running_replicas analysis-worker-rust)" == "$ANALYSIS_WORKER_REPLICAS" ]] || die "Rust analysis worker replica count did not reach ${ANALYSIS_WORKER_REPLICAS}."
+
+log "Switching the public API port and web proxy from Python to Rust."
+compose stop api api-rust
+compose up --detach --force-recreate --no-deps api-rust
+wait_for_rust_api_path api-rust /health || die "Rust production API liveness check failed."
+wait_for_rust_api_path api-rust /ready || die "Rust production API readiness check failed."
+compose up --detach --force-recreate --no-deps web
+wait_for_web || die "web root smoke check failed."
+wait_for_web_api || die "web-to-Rust-API proxy smoke check failed."
+compose stop api-rust-shadow
+
+[[ "$(count_running_replicas api)" == "0" ]] || die "Python API is still running after cutover."
+[[ "$(count_running_replicas worker)" == "0" ]] || die "Python collection worker is still running after cutover."
+[[ "$(count_running_replicas analysis-worker)" == "0" ]] || die "Python analysis worker is still running after cutover."
+
+runtime_invariants="$(database_boolean 'SELECT
+  NOT EXISTS (SELECT 1 FROM nlp_corpus_stats WHERE document_count < 0 OR total_token_count < 0)
+  AND NOT EXISTS (SELECT 1 FROM nlp_term_stats WHERE document_frequency < 0 OR total_term_frequency < 0)
+  AND NOT EXISTS (SELECT 1 FROM sync_jobs WHERE state='"'"'running'"'"' AND (lease_owner IS NULL OR lease_expires_at IS NULL))
+  AND NOT EXISTS (SELECT 1 FROM nlp_documents WHERE state='"'"'running'"'"' AND (lease_owner IS NULL OR lease_expires_at IS NULL))
+  AND NOT EXISTS (SELECT 1 FROM analysis_runs WHERE state='"'"'running'"'"' AND (lease_owner IS NULL OR lease_expires_at IS NULL));')"
+[[ "$runtime_invariants" == "t" ]] || die "post-cutover lease or BoW counter invariants failed."
+
+log "Soaking the Rust cutover for ${CUTOVER_SOAK_SECONDS}s while checking health and restarts."
+soak_elapsed=0
+while (( soak_elapsed < CUTOVER_SOAK_SECONDS )); do
+  wait_for_rust_api_path api-rust /ready || die "Rust API failed during cutover soak."
+  wait_for_web_api || die "web API proxy failed during cutover soak."
+  for service in api-rust nlp-worker-rust collection-worker-rust analysis-worker-rust tokenizer web; do
+    for container_id in $(compose ps -q "$service"); do
+      restart_count="$(docker inspect --format '{{.RestartCount}}' "$container_id")"
+      [[ "$restart_count" == "0" ]] || die "${service} restarted during cutover soak."
+    done
+  done
+  remaining=$((CUTOVER_SOAK_SECONDS - soak_elapsed))
+  interval=5
+  (( remaining < interval )) && interval="$remaining"
+  (( interval > 0 )) && sleep "$interval"
+  soak_elapsed=$((soak_elapsed + interval))
+done
+
+docker stats --no-stream --format '{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}|{{.MemPerc}}' \
+  $(compose ps -q api-rust nlp-worker-rust collection-worker-rust analysis-worker-rust tokenizer web) \
+  > "$RELEASE_STATE_DIR/container-stats.after.txt"
+chmod 600 "$RELEASE_STATE_DIR/container-stats.after.txt"
 
 compose ps
 DEPLOY_SUCCEEDED=true
 ROLLBACK_ARMED=false
-log "Deployment completed. Release state and rollback metadata: $RELEASE_STATE_DIR"
+log "Rust conversion deployment completed. Only the isolated tokenizer remains Python. Release state: $RELEASE_STATE_DIR"

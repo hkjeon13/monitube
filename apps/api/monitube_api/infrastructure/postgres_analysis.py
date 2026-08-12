@@ -163,7 +163,7 @@ class PostgresAnalysisMixin:
                 )
                 SELECT term, document_frequency, total_term_frequency
                 FROM term_period
-                ORDER BY total_term_frequency DESC, document_frequency DESC, term
+                ORDER BY total_term_frequency DESC, term
                 LIMIT %(nlp_keyword_candidate_limit)s
                 """,
                 stats_params,
@@ -184,7 +184,7 @@ class PostgresAnalysisMixin:
                       AND excluded.corpus_kind = %(nlp_exclusion_corpus)s
                       AND excluded.term = nlp_term_stats.term
                   )
-                ORDER BY total_term_frequency DESC, document_frequency DESC, term
+                ORDER BY total_term_frequency DESC, term
                 LIMIT %(nlp_keyword_candidate_limit)s
                 """,
                 stats_params,

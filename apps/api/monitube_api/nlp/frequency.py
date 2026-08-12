@@ -37,7 +37,6 @@ def keyword_frequencies(
     ranked.sort(
         key=lambda item: (
             -int(item["termCount"]),
-            -int(item["documentCount"]),
             str(item["term"]),
         )
     )

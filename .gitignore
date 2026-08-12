@@ -32,3 +32,6 @@ logs/
 tmp/
 uploads/
 minio-data/
+
+# Rust
+target/

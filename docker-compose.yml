@@ -26,6 +26,7 @@ x-app-environment: &app-environment
   ENABLE_NLP_INDEXING: ${ENABLE_NLP_INDEXING:-true}
   NLP_INDEX_BATCH_SIZE: ${NLP_INDEX_BATCH_SIZE:-10}
   NLP_INDEX_LEASE_SECONDS: ${NLP_INDEX_LEASE_SECONDS:-300}
+  TOKENIZER_BASE_URL: ${TOKENIZER_BASE_URL:-http://tokenizer:8010}
   ENABLE_REDIS_DERIVED_CACHE: ${ENABLE_REDIS_DERIVED_CACHE:-false}
   DISCOVERY_PROVIDER: ${DISCOVERY_PROVIDER:-searchapi}
   SEARCHAPI_BASE_URL: ${SEARCHAPI_BASE_URL:-https://www.searchapi.io/api/v1/search}
@@ -45,6 +46,41 @@ x-youtube-runtime-secret: &youtube-runtime-secret
   # It is deliberately scoped to the services that need a YouTube credential.
   env_file:
     - ${MONITUBE_YOUTUBE_SECRET_ENV_FILE:-.env}
+
+x-rust-api: &rust-api
+  <<: *youtube-runtime-secret
+  build:
+    context: .
+    dockerfile: infra/docker/api-rust.Dockerfile
+  image: monitube-api-rust:${MONITUBE_IMAGE_TAG:-local}
+  restart: unless-stopped
+  stop_grace_period: ${API_STOP_GRACE_PERIOD:-30s}
+  environment:
+    APP_ENV: ${APP_ENV:-development}
+    RUST_LOG: ${RUST_LOG:-info,sqlx=warn,tower_http=info}
+    DATABASE_URL: ${DATABASE_URL_DOCKER:-postgresql://monitube:change-me-local-only@postgres:5432/monitube}
+    RUST_API_HOST: 0.0.0.0
+    RUST_API_PORT: 8001
+    DB_POOL_MIN_SIZE: ${API_DB_POOL_MIN_SIZE:-1}
+    DB_POOL_MAX_SIZE: ${API_DB_POOL_MAX_SIZE:-8}
+    DB_POOL_TIMEOUT_MILLIS: ${API_DB_POOL_TIMEOUT_MILLIS:-5000}
+    RUST_API_REQUEST_TIMEOUT_SECONDS: ${RUST_API_REQUEST_TIMEOUT_SECONDS:-30}
+    TOKENIZER_BASE_URL: ${TOKENIZER_BASE_URL:-http://tokenizer:8010}
+    ENABLE_TRANSCRIPT_SEARCH: ${ENABLE_TRANSCRIPT_SEARCH:-true}
+    CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+  depends_on:
+    postgres:
+      condition: service_healthy
+    migrate:
+      condition: service_completed_successfully
+    tokenizer:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8001/ready"]
+    interval: 10s
+    timeout: 5s
+    retries: 12
+    start_period: 10s
 
 services:
   postgres:
@@ -178,6 +214,25 @@ services:
       postgres:
         condition: service_healthy
 
+  tokenizer:
+    build:
+      context: .
+      dockerfile: infra/docker/tokenizer.Dockerfile
+    image: monitube-tokenizer:${MONITUBE_IMAGE_TAG:-local}
+    restart: unless-stopped
+    stop_grace_period: ${TOKENIZER_STOP_GRACE_PERIOD:-30s}
+    mem_limit: ${TOKENIZER_MEMORY_LIMIT:-1g}
+    cpus: ${TOKENIZER_CPU_LIMIT:-1.0}
+    environment:
+      TOKENIZER_MAX_CONCURRENCY: ${TOKENIZER_MAX_CONCURRENCY:-2}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8010/ready', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
   api:
     <<: *youtube-runtime-secret
     build:
@@ -214,6 +269,18 @@ services:
       timeout: 5s
       retries: 12
       start_period: 20s
+
+  api-rust-shadow:
+    <<: *rust-api
+    profiles: ["rust-migration"]
+    ports:
+      - "${RUST_API_BIND_ADDRESS:-127.0.0.1}:${RUST_API_SHADOW_PORT:-18001}:8001"
+
+  api-rust:
+    <<: *rust-api
+    profiles: ["rust-production"]
+    ports:
+      - "${API_BIND_ADDRESS:-127.0.0.1}:${API_PORT:-8000}:8001"
 
   worker:
     <<: *youtube-runtime-secret
@@ -261,6 +328,8 @@ services:
       DB_POOL_TIMEOUT_SECONDS: ${ANALYSIS_DB_POOL_TIMEOUT_SECONDS:-10}
     command: ["python", "-m", "monitube_worker.analysis_worker"]
     depends_on:
+      tokenizer:
+        condition: service_healthy
       postgres:
         condition: service_healthy
       migrate:
@@ -271,6 +340,137 @@ services:
         condition: service_completed_successfully
       api:
         condition: service_healthy
+
+  nlp-worker-rust:
+    profiles: ["rust-production"]
+    build:
+      context: .
+      dockerfile: infra/docker/nlp-worker-rust.Dockerfile
+    image: monitube-nlp-worker-rust:${MONITUBE_IMAGE_TAG:-local}
+    restart: unless-stopped
+    stop_grace_period: ${ANALYSIS_WORKER_STOP_GRACE_PERIOD:-180s}
+    mem_limit: ${NLP_WORKER_MEMORY_LIMIT:-512m}
+    cpus: ${NLP_WORKER_CPU_LIMIT:-1.0}
+    environment:
+      DATABASE_URL: ${DATABASE_URL_DOCKER:-postgresql://monitube:change-me-local-only@postgres:5432/monitube}
+      TOKENIZER_BASE_URL: ${TOKENIZER_BASE_URL:-http://tokenizer:8010}
+      TOKENIZER_TIMEOUT_SECONDS: ${TOKENIZER_TIMEOUT_SECONDS:-30}
+      ENABLE_NLP_INDEXING: ${ENABLE_NLP_INDEXING:-true}
+      NLP_INDEX_BATCH_SIZE: ${NLP_INDEX_BATCH_SIZE:-10}
+      NLP_INDEX_LEASE_SECONDS: ${NLP_INDEX_LEASE_SECONDS:-300}
+      NLP_WORKER_POLL_MILLIS: ${NLP_WORKER_POLL_MILLIS:-1000}
+      DB_POOL_MIN_SIZE: ${ANALYSIS_DB_POOL_MIN_SIZE:-1}
+      DB_POOL_MAX_SIZE: ${ANALYSIS_DB_POOL_MAX_SIZE:-2}
+      DB_POOL_TIMEOUT_MILLIS: ${ANALYSIS_DB_POOL_TIMEOUT_MILLIS:-10000}
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      tokenizer:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+
+  collection-worker-rust:
+    <<: *youtube-runtime-secret
+    profiles: ["rust-production"]
+    build:
+      context: .
+      dockerfile: infra/docker/collection-worker-rust.Dockerfile
+    image: monitube-collection-worker-rust:${MONITUBE_IMAGE_TAG:-local}
+    restart: unless-stopped
+    stop_grace_period: ${WORKER_STOP_GRACE_PERIOD:-180s}
+    mem_limit: ${RUST_COLLECTION_WORKER_MEMORY_LIMIT:-512m}
+    cpus: ${RUST_COLLECTION_WORKER_CPU_LIMIT:-1.0}
+    environment:
+      DATABASE_URL: ${DATABASE_URL_DOCKER:-postgresql://monitube:change-me-local-only@postgres:5432/monitube}
+      YOUTUBE_API_BASE_URL: ${YOUTUBE_API_BASE_URL:-https://www.googleapis.com/youtube/v3}
+      YOUTUBE_API_TIMEOUT_SECONDS: ${YOUTUBE_API_TIMEOUT_SECONDS:-20}
+      DISCOVERY_PROVIDER: ${DISCOVERY_PROVIDER:-searchapi}
+      SEARCHAPI_BASE_URL: ${SEARCHAPI_BASE_URL:-https://www.searchapi.io/api/v1/search}
+      SEARCHAPI_TIMEOUT_SECONDS: ${SEARCHAPI_TIMEOUT_SECONDS:-20}
+      SEARCHAPI_GL: ${SEARCHAPI_GL:-kr}
+      SEARCHAPI_HL: ${SEARCHAPI_HL:-ko}
+      SEARCHAPI_ZERO_RETENTION: ${SEARCHAPI_ZERO_RETENTION:-false}
+      SEARCHAPI_CHANNEL_TOKEN_POST_THRESHOLD_BYTES: ${SEARCHAPI_CHANNEL_TOKEN_POST_THRESHOLD_BYTES:-1800}
+      TRANSCRIPT_COLLECTION_ENABLED: ${TRANSCRIPT_COLLECTION_ENABLED:-true}
+      TRANSCRIPT_PRIMARY_LANGUAGE: ${TRANSCRIPT_PRIMARY_LANGUAGE:-ko}
+      TRANSCRIPT_FALLBACK_LANGUAGE: ${TRANSCRIPT_FALLBACK_LANGUAGE:-en}
+      TRANSCRIPT_TYPE_PREFERENCE: ${TRANSCRIPT_TYPE_PREFERENCE:-manual}
+      TRANSCRIPT_MAX_SEGMENTS: ${TRANSCRIPT_MAX_SEGMENTS:-100000}
+      WORKER_LEASE_SECONDS: ${WORKER_LEASE_SECONDS:-180}
+      WORKER_POLL_MILLIS: ${WORKER_POLL_MILLIS:-1000}
+      DB_POOL_MAX_SIZE: ${WORKER_DB_POOL_MAX_SIZE:-2}
+      DB_POOL_TIMEOUT_MILLIS: ${WORKER_DB_POOL_TIMEOUT_MILLIS:-10000}
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+
+  analysis-worker-rust:
+    profiles: ["rust-production"]
+    build:
+      context: .
+      dockerfile: infra/docker/analysis-worker-rust.Dockerfile
+    image: monitube-analysis-worker-rust:${MONITUBE_IMAGE_TAG:-local}
+    restart: unless-stopped
+    stop_grace_period: ${ANALYSIS_WORKER_STOP_GRACE_PERIOD:-180s}
+    mem_limit: ${RUST_ANALYSIS_WORKER_MEMORY_LIMIT:-512m}
+    cpus: ${RUST_ANALYSIS_WORKER_CPU_LIMIT:-1.0}
+    environment:
+      DATABASE_URL: ${DATABASE_URL_DOCKER:-postgresql://monitube:change-me-local-only@postgres:5432/monitube}
+      ANALYSIS_WORKER_LEASE_SECONDS: ${ANALYSIS_WORKER_LEASE_SECONDS:-900}
+      ANALYSIS_WORKER_POLL_MILLIS: ${ANALYSIS_WORKER_POLL_MILLIS:-1000}
+      ANALYSIS_DB_POOL_MAX_SIZE: ${ANALYSIS_DB_POOL_MAX_SIZE:-2}
+      ANALYSIS_DB_POOL_TIMEOUT_MILLIS: ${ANALYSIS_DB_POOL_TIMEOUT_MILLIS:-10000}
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      nlp-worker-rust:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+
+  maintenance-rust:
+    profiles: ["rust-maintenance"]
+    build:
+      context: .
+      dockerfile: infra/docker/maintenance-rust.Dockerfile
+    image: monitube-maintenance-rust:${MONITUBE_IMAGE_TAG:-local}
+    restart: "no"
+    mem_limit: ${RUST_MAINTENANCE_MEMORY_LIMIT:-512m}
+    cpus: ${RUST_MAINTENANCE_CPU_LIMIT:-1.0}
+    environment:
+      DATABASE_URL: ${DATABASE_URL_DOCKER:-postgresql://monitube:change-me-local-only@postgres:5432/monitube}
+      ENABLE_COMMENT_ROLLUP_DUAL_WRITE: ${ENABLE_COMMENT_ROLLUP_DUAL_WRITE:-false}
+      ROLLUP_BACKFILL_BATCH_SIZE: ${ROLLUP_BACKFILL_BATCH_SIZE:-100}
+      ROLLUP_BACKFILL_SLEEP_MILLIS: ${ROLLUP_BACKFILL_SLEEP_MILLIS:-100}
+      ROLLUP_BACKFILL_LOCK_TIMEOUT_MS: ${ROLLUP_BACKFILL_LOCK_TIMEOUT_MS:-1000}
+      ROLLUP_BACKFILL_MAX_RECONCILE_PASSES: ${ROLLUP_BACKFILL_MAX_RECONCILE_PASSES:-3}
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
   web:
     build:
@@ -290,9 +490,6 @@ services:
     command: ["npm", "run", "start", "--", "--hostname", "0.0.0.0", "--port", "3000"]
     ports:
       - "${WEB_BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-3000}:3000"
-    depends_on:
-      api:
-        condition: service_healthy
 
 volumes:
   postgres_data:

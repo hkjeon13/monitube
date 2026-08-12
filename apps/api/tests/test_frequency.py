@@ -31,11 +31,11 @@ def test_keyword_frequencies_keep_single_document_terms() -> None:
     ]
 
 
-def test_keyword_frequencies_use_document_count_and_term_as_tiebreakers() -> None:
+def test_keyword_frequencies_ignore_document_count_when_frequency_ties() -> None:
     result = keyword_frequencies(
         [
-            {"term": "다", "total_term_frequency": 3, "document_frequency": 1},
-            {"term": "가", "total_term_frequency": 3, "document_frequency": 2},
+            {"term": "다", "total_term_frequency": 3, "document_frequency": 3},
+            {"term": "가", "total_term_frequency": 3, "document_frequency": 1},
             {"term": "나", "total_term_frequency": 3, "document_frequency": 2},
         ],
         document_count=3,
