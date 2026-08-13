@@ -117,6 +117,11 @@ struct SummaryRow {
     top_level_count: i64,
     reply_count: i64,
     average_comment_like_count: f64,
+    transcript_document_count: i64,
+    transcript_whitespace_token_count: i64,
+    transcript_counted_document_count: i64,
+    comment_whitespace_token_count: i64,
+    comment_counted_document_count: i64,
     latest_video_published_at: Option<DateTime<Utc>>,
     latest_comment_published_at: Option<DateTime<Utc>>,
     statistics_fetched_at: Option<DateTime<Utc>>,
@@ -220,6 +225,16 @@ pub async fn overview(
             "questionRate": percentage(question.0, question.1),
             "questionCount": question.0,
             "questionSampleSize": question.1,
+        },
+        "storageMetrics": {
+            "transcriptDocumentCount": summary.transcript_document_count.max(0),
+            "transcriptWhitespaceTokenCount":
+                summary.transcript_whitespace_token_count.max(0),
+            "transcriptCountedDocumentCount":
+                summary.transcript_counted_document_count.max(0),
+            "commentDocumentCount": comments,
+            "commentWhitespaceTokenCount": summary.comment_whitespace_token_count.max(0),
+            "commentCountedDocumentCount": summary.comment_counted_document_count.max(0),
         },
         "coverage": {
             "visibleTargetCount": summary.visible_target_count.max(0),
@@ -614,7 +629,17 @@ async fn load_summary(
     let sql = format!(
         "{SCOPE_CTE}\n{}",
         r"
-        , video_summary AS (
+        , transcript_period AS MATERIALIZED (
+          SELECT DISTINCT ON (transcript.video_id)
+                 transcript.video_id, transcript.whitespace_token_count
+          FROM video_transcripts AS transcript
+          JOIN video_period AS video ON video.id = transcript.video_id
+          WHERE transcript.state = 'available'
+            AND transcript.full_text IS NOT NULL
+            AND btrim(transcript.full_text) <> ''
+          ORDER BY transcript.video_id, transcript.fetched_at DESC NULLS LAST,
+                   transcript.updated_at DESC, transcript.id DESC
+        ), video_summary AS (
           SELECT count(*)::bigint AS video_count,
                  COALESCE(sum(COALESCE(view_count, 0)), 0)::bigint AS total_view_count,
                  COALESCE(percentile_disc(0.5) WITHIN GROUP
@@ -638,14 +663,26 @@ async fn load_summary(
                    AS reply_count,
                  COALESCE(avg(GREATEST(like_count, 0)), 0)::double precision
                    AS average_comment_like_count,
+                 COALESCE(sum(whitespace_token_count), 0)::bigint
+                   AS comment_whitespace_token_count,
+                 count(*) FILTER (WHERE whitespace_token_count IS NOT NULL)::bigint
+                   AS comment_counted_document_count,
                  max(published_at) AS latest_comment_published_at
           FROM comment_period
+        ), transcript_summary AS (
+          SELECT count(*)::bigint AS transcript_document_count,
+                 COALESCE(sum(whitespace_token_count), 0)::bigint
+                   AS transcript_whitespace_token_count,
+                 count(*) FILTER (WHERE whitespace_token_count IS NOT NULL)::bigint
+                   AS transcript_counted_document_count
+          FROM transcript_period
         ), target_summary AS (
           SELECT count(DISTINCT target_id)::bigint AS visible_target_count
           FROM visible_membership
         )
-        SELECT video.*, comment.*, target.visible_target_count
+        SELECT video.*, comment.*, transcript.*, target.visible_target_count
         FROM video_summary AS video CROSS JOIN comment_summary AS comment
+        CROSS JOIN transcript_summary AS transcript
         CROSS JOIN target_summary AS target
         "
     );

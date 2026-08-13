@@ -592,6 +592,15 @@ class AnalysisCommentSignals(ApiModel):
     questionSampleSize: int = Field(default=0, ge=0)
 
 
+class AnalysisStorageMetrics(ApiModel):
+    transcriptDocumentCount: int = Field(default=0, ge=0)
+    transcriptWhitespaceTokenCount: int = Field(default=0, ge=0)
+    transcriptCountedDocumentCount: int = Field(default=0, ge=0)
+    commentDocumentCount: int = Field(default=0, ge=0)
+    commentWhitespaceTokenCount: int = Field(default=0, ge=0)
+    commentCountedDocumentCount: int = Field(default=0, ge=0)
+
+
 class AnalysisOverviewResponse(ApiModel):
     summary: WorkspaceAnalysisSummary
     videoTrend: list[AnalysisTrendPoint] = Field(default_factory=list)
@@ -608,6 +617,9 @@ class AnalysisOverviewResponse(ApiModel):
     )
     commentSignals: AnalysisCommentSignals = Field(
         default_factory=AnalysisCommentSignals
+    )
+    storageMetrics: AnalysisStorageMetrics = Field(
+        default_factory=AnalysisStorageMetrics
     )
     coverage: AnalysisCoverage
 

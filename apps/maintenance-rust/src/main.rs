@@ -16,6 +16,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 const BACKFILL_NAME: &str = "video_comment_rollups";
+const WHITESPACE_BACKFILL_LOCK: &str = "whitespace_token_metrics";
 
 #[derive(Debug, Clone)]
 struct Config {
@@ -24,6 +25,26 @@ struct Config {
     lock_timeout_ms: i64,
     max_reconcile_passes: u32,
     dual_write_enabled: bool,
+}
+
+#[derive(Debug, Clone)]
+struct WhitespaceBackfillConfig {
+    batch_size: i64,
+    sleep: Duration,
+}
+
+impl WhitespaceBackfillConfig {
+    fn from_environment() -> Result<Self, ConfigError> {
+        Ok(Self {
+            batch_size: parse_i64("WHITESPACE_TOKEN_BACKFILL_BATCH_SIZE", 20_000, 100, 100_000)?,
+            sleep: Duration::from_millis(parse_u64(
+                "WHITESPACE_TOKEN_BACKFILL_SLEEP_MILLIS",
+                25,
+                0,
+                60_000,
+            )?),
+        })
+    }
 }
 
 impl Config {
@@ -75,7 +96,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     monitube_observability::init("monitube-maintenance-rust")?;
     let arguments = env::args().collect::<Vec<_>>();
     let command = arguments.get(1).map_or("rollup-backfill", String::as_str);
-    if !matches!(command, "rollup-backfill" | "collection-retry") {
+    if !matches!(
+        command,
+        "rollup-backfill" | "collection-retry" | "whitespace-token-backfill"
+    ) {
         return Err(ConfigError::UnknownCommand(command.to_owned()).into());
     }
     let database_url = required("DATABASE_URL")?;
@@ -94,7 +118,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         run_collection_retry(&pool, &request).await?;
         return Ok(());
     }
-    let config = Config::from_environment()?;
     let stopping = Arc::new(AtomicBool::new(false));
     let signal_flag = Arc::clone(&stopping);
     tokio::spawn(async move {
@@ -102,6 +125,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
             signal_flag.store(true, Ordering::Release);
         }
     });
+    if command == "whitespace-token-backfill" {
+        let config = WhitespaceBackfillConfig::from_environment()?;
+        run_whitespace_token_backfill(&pool, &config, stopping).await?;
+        return Ok(());
+    }
+    let config = Config::from_environment()?;
     let mut maintenance = RollupBackfill::new(pool, config, stopping);
     let started = Instant::now();
     let progress = maintenance.run().await?;
@@ -118,6 +147,157 @@ async fn main() -> Result<(), Box<dyn Error>> {
     ) {
         return Err(MaintenanceError::UnexpectedState(progress.state).into());
     }
+    Ok(())
+}
+
+async fn run_whitespace_token_backfill(
+    pool: &PgPool,
+    config: &WhitespaceBackfillConfig,
+    stopping: Arc<AtomicBool>,
+) -> Result<(), MaintenanceError> {
+    let mut connection = pool.acquire().await?;
+    let acquired =
+        sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock(hashtextextended($1, 0))")
+            .bind(WHITESPACE_BACKFILL_LOCK)
+            .fetch_one(&mut *connection)
+            .await?;
+    if !acquired {
+        return Err(MaintenanceError::ConcurrentWhitespaceBackfill);
+    }
+
+    let result = run_whitespace_token_backfill_locked(&mut connection, config, &stopping).await;
+    if let Err(error) = sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+        .bind(WHITESPACE_BACKFILL_LOCK)
+        .execute(&mut *connection)
+        .await
+    {
+        tracing::warn!(%error, "could not explicitly release whitespace maintenance lock");
+    }
+    result
+}
+
+#[allow(clippy::too_many_lines)]
+async fn run_whitespace_token_backfill_locked(
+    connection: &mut PgConnection,
+    config: &WhitespaceBackfillConfig,
+    stopping: &AtomicBool,
+) -> Result<(), MaintenanceError> {
+    let schema_ready = sqlx::query_scalar::<_, bool>(
+        r"
+        SELECT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema = 'public' AND table_name = 'comments'
+            AND column_name = 'whitespace_token_count'
+        ) AND EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema = 'public' AND table_name = 'video_transcripts'
+            AND column_name = 'whitespace_token_count'
+        )
+        ",
+    )
+    .fetch_one(&mut *connection)
+    .await?;
+    if !schema_ready {
+        return Err(MaintenanceError::MissingWhitespaceSchema);
+    }
+
+    let started = Instant::now();
+    let (transcript_total, comment_total) = sqlx::query_as::<_, (i64, i64)>(
+        r"
+        SELECT
+          (SELECT count(*) FROM video_transcripts
+           WHERE whitespace_token_count IS NULL)::bigint,
+          (SELECT count(*) FROM comments
+           WHERE whitespace_token_count IS NULL)::bigint
+        ",
+    )
+    .fetch_one(&mut *connection)
+    .await?;
+    let mut transcript_processed = 0_u64;
+    let mut comment_processed = 0_u64;
+
+    loop {
+        if stopping.load(Ordering::Acquire) {
+            tracing::info!(
+                transcript_processed,
+                comment_processed,
+                "whitespace token backfill stopped at a resumable NULL-row boundary"
+            );
+            return Ok(());
+        }
+        let transcript_batch = sqlx::query(
+            r"
+            WITH batch AS (
+              SELECT id FROM video_transcripts
+              WHERE whitespace_token_count IS NULL
+              ORDER BY id
+              LIMIT $1
+              FOR UPDATE SKIP LOCKED
+            )
+            UPDATE video_transcripts AS transcript
+            SET whitespace_token_count =
+              monitube_whitespace_token_count(transcript.full_text)
+            FROM batch
+            WHERE transcript.id = batch.id
+            ",
+        )
+        .bind(config.batch_size)
+        .execute(&mut *connection)
+        .await?
+        .rows_affected();
+        transcript_processed = transcript_processed.saturating_add(transcript_batch);
+
+        let comment_batch = sqlx::query(
+            r"
+            WITH batch AS (
+              SELECT id FROM comments
+              WHERE whitespace_token_count IS NULL
+              ORDER BY id
+              LIMIT $1
+              FOR UPDATE SKIP LOCKED
+            )
+            UPDATE comments AS comment
+            SET whitespace_token_count =
+              monitube_whitespace_token_count(comment.text_display)
+            FROM batch
+            WHERE comment.id = batch.id
+            ",
+        )
+        .bind(config.batch_size)
+        .execute(&mut *connection)
+        .await?
+        .rows_affected();
+        comment_processed = comment_processed.saturating_add(comment_batch);
+
+        tracing::info!(
+            transcript_processed,
+            transcript_total,
+            comment_processed,
+            comment_total,
+            "whitespace token batch committed"
+        );
+        if transcript_batch == 0 && comment_batch == 0 {
+            break;
+        }
+        if !config.sleep.is_zero() {
+            tokio::time::sleep(config.sleep).await;
+        }
+    }
+
+    sqlx::query("ANALYZE video_transcripts (whitespace_token_count)")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query("ANALYZE comments (whitespace_token_count)")
+        .execute(&mut *connection)
+        .await?;
+    tracing::info!(
+        transcript_processed,
+        transcript_total,
+        comment_processed,
+        comment_total,
+        elapsed_seconds = started.elapsed().as_secs_f64(),
+        "whitespace token backfill completed"
+    );
     Ok(())
 }
 
@@ -869,8 +1049,12 @@ enum MaintenanceError {
     Database(#[from] sqlx::Error),
     #[error("another rollup backfill owns the advisory lock")]
     Concurrent,
+    #[error("another whitespace token backfill owns the advisory lock")]
+    ConcurrentWhitespaceBackfill,
     #[error("migration 015 must be applied before rollup maintenance")]
     MissingSchema,
+    #[error("migration 025 must be applied before whitespace token maintenance")]
+    MissingWhitespaceSchema,
     #[error("rollup maintenance progress row is missing")]
     MissingProgress,
     #[error("ENABLE_COMMENT_ROLLUP_DUAL_WRITE must be enabled")]

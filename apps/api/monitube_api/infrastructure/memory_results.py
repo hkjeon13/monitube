@@ -308,6 +308,15 @@ class MemoryReadMixin:
                 for comment in period_comments
                 if comment.published_at is not None
             ]
+            transcript_texts = [
+                transcript.full_text
+                for video in period_videos
+                if (
+                    (transcript := self._transcripts.get(video.youtube_video_id))
+                    and transcript.state == "available"
+                    and transcript.full_text
+                )
+            ]
 
             video_trend_counts: dict[datetime, int] = defaultdict(int)
             for video in period_videos:
@@ -598,6 +607,19 @@ class MemoryReadMixin:
                     **question_signals_from_texts(
                         comment.text_display for comment in sample
                     ),
+                },
+                "storageMetrics": {
+                    "transcriptDocumentCount": len(transcript_texts),
+                    "transcriptWhitespaceTokenCount": sum(
+                        len(text.split()) for text in transcript_texts
+                    ),
+                    "transcriptCountedDocumentCount": len(transcript_texts),
+                    "commentDocumentCount": len(period_comments),
+                    "commentWhitespaceTokenCount": sum(
+                        len((comment.text_display or "").split())
+                        for comment in period_comments
+                    ),
+                    "commentCountedDocumentCount": len(period_comments),
                 },
                 "coverage": {
                     "visibleTargetCount": len(scoped_target_ids),

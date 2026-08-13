@@ -7,6 +7,7 @@ import {
   ChatBubbleLeftRightIcon,
   ChevronRightIcon,
   ClockIcon,
+  DocumentTextIcon,
   EyeIcon,
   FilmIcon,
   HandThumbUpIcon,
@@ -54,6 +55,38 @@ function periodRange(period: Period) {
     from: from.toISOString().slice(0, 10),
     to: to.toISOString().slice(0, 10),
   };
+}
+
+function StorageMetric({
+  kind,
+  documents,
+  tokens,
+  countedDocuments,
+}: {
+  kind: "transcript" | "comment";
+  documents: number;
+  tokens: number;
+  countedDocuments: number;
+}) {
+  const complete = countedDocuments >= documents;
+  return (
+    <article className="analysis-storage-metric">
+      <div className="analysis-storage-icon">
+        {kind === "transcript" ? <DocumentTextIcon /> : <ChatBubbleLeftRightIcon />}
+      </div>
+      <div className="analysis-storage-documents">
+        <span>{kind === "transcript" ? "영상 대본" : "댓글"}</span>
+        <strong>{formatCount(documents)}개</strong>
+      </div>
+      <div className="analysis-storage-tokens">
+        <span>공백 토큰</span>
+        <strong>{formatCount(tokens)}</strong>
+      </div>
+      <small className={complete ? "analysis-storage-complete" : "analysis-storage-progress"}>
+        {complete ? "집계 완료" : `집계 중 · ${formatCount(countedDocuments)} / ${formatCount(documents)}개 반영`}
+      </small>
+    </article>
+  );
 }
 
 function completeDailyTrend(points: AnalysisTrendPoint[], period: Period) {
@@ -606,6 +639,33 @@ export function AnalysisDashboard({
         </div>
 
         <div className="analysis-layout">
+          <section className="analysis-panel analysis-panel-wide analysis-storage-panel">
+            <div className="analysis-panel-heading">
+              <div><p className="section-kicker">CORPUS STORAGE</p><h2>수집 데이터 규모</h2></div>
+              <span className="analysis-storage-heading-meta">
+                현재 분석 조건 기준
+                <span className="analysis-storage-info">
+                  <button type="button" aria-label="공백 토큰 집계 기준" aria-describedby="analysis-storage-tooltip"><InformationCircleIcon /></button>
+                  <span id="analysis-storage-tooltip" role="tooltip">앞뒤 공백을 제거한 뒤 연속된 공백·줄바꿈으로 분리한 단어 수입니다. LLM 토큰이나 형태소 분석 토큰과는 다릅니다.</span>
+                </span>
+              </span>
+            </div>
+            <div className="analysis-storage-grid">
+              <StorageMetric
+                kind="transcript"
+                documents={data.storageMetrics.transcriptDocumentCount}
+                tokens={data.storageMetrics.transcriptWhitespaceTokenCount}
+                countedDocuments={data.storageMetrics.transcriptCountedDocumentCount}
+              />
+              <StorageMetric
+                kind="comment"
+                documents={data.storageMetrics.commentDocumentCount}
+                tokens={data.storageMetrics.commentWhitespaceTokenCount}
+                countedDocuments={data.storageMetrics.commentCountedDocumentCount}
+              />
+            </div>
+          </section>
+
           {view !== "comments" && insightsError && <section className="analysis-panel analysis-panel-wide"><div className="analysis-inline-notice"><InformationCircleIcon /><span>{insightsError}</span></div></section>}
 
           {view !== "comments" && insightsData && <section className="analysis-panel analysis-panel-wide analysis-actions-panel">

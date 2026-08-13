@@ -74,7 +74,7 @@ pub async fn check_required_schema(pool: &PgPool) -> Result<bool, sqlx::Error> {
         r"
         SELECT EXISTS (
           SELECT 1 FROM monitube_schema_migrations
-          WHERE filename = '023_pure_frequency_ranking.sql'
+          WHERE filename = '025_whitespace_token_metrics.sql'
         )
         ",
     )

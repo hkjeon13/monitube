@@ -318,6 +318,15 @@ export interface AnalysisCommentSignals {
   questionSampleSize: number;
 }
 
+export interface AnalysisStorageMetrics {
+  transcriptDocumentCount: number;
+  transcriptWhitespaceTokenCount: number;
+  transcriptCountedDocumentCount: number;
+  commentDocumentCount: number;
+  commentWhitespaceTokenCount: number;
+  commentCountedDocumentCount: number;
+}
+
 export interface FrequencyKeyword {
   term: string;
   termCount: number;
@@ -351,6 +360,7 @@ export interface AnalysisOverview {
   commentKeywords: FrequencyKeyword[];
   keywordCoverage: AnalysisKeywordCoverage;
   commentSignals: AnalysisCommentSignals;
+  storageMetrics: AnalysisStorageMetrics;
   coverage: AnalysisCoverage;
 }
 

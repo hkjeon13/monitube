@@ -536,7 +536,20 @@ class PostgresAnalysisMixin:
             cursor.execute(
                 cte
                 + """
-                , video_summary AS (
+                , transcript_period AS MATERIALIZED (
+                  SELECT DISTINCT ON (transcript.video_id)
+                         transcript.video_id,
+                         transcript.whitespace_token_count
+                  FROM video_transcripts transcript
+                  JOIN video_period video ON video.id = transcript.video_id
+                  WHERE transcript.state = 'available'
+                    AND transcript.full_text IS NOT NULL
+                    AND btrim(transcript.full_text) <> ''
+                  ORDER BY transcript.video_id,
+                           transcript.fetched_at DESC NULLS LAST,
+                           transcript.updated_at DESC,
+                           transcript.id DESC
+                ), video_summary AS (
                   SELECT count(*)::bigint AS video_count,
                          COALESCE(
                            sum(COALESCE(view_count, 0)),
@@ -578,12 +591,26 @@ class PostgresAnalysisMixin:
                          )::bigint AS reply_count,
                          COALESCE(avg(like_count), 0)::double precision
                            AS average_comment_like_count,
+                         COALESCE(sum(whitespace_token_count), 0)::bigint
+                           AS comment_whitespace_token_count,
+                         count(*) FILTER (
+                           WHERE whitespace_token_count IS NOT NULL
+                         )::bigint AS comment_counted_document_count,
                          max(published_at) AS latest_comment_published_at
                   FROM comment_period
+                ), transcript_summary AS (
+                  SELECT count(*)::bigint AS transcript_document_count,
+                         COALESCE(sum(whitespace_token_count), 0)::bigint
+                           AS transcript_whitespace_token_count,
+                         count(*) FILTER (
+                           WHERE whitespace_token_count IS NOT NULL
+                         )::bigint AS transcript_counted_document_count
+                  FROM transcript_period
                 )
-                SELECT video.*, comment.*
+                SELECT video.*, comment.*, transcript.*
                 FROM video_summary video
                 CROSS JOIN comment_summary comment
+                CROSS JOIN transcript_summary transcript
                 """,
                 params,
             )
@@ -917,6 +944,26 @@ class PostgresAnalysisMixin:
                     else 0
                 ),
                 **question_signals_from_texts(sampled_texts),
+            },
+            "storageMetrics": {
+                "transcriptDocumentCount": int(
+                    summary_row.get("transcript_document_count") or 0
+                ),
+                "transcriptWhitespaceTokenCount": int(
+                    summary_row.get("transcript_whitespace_token_count") or 0
+                ),
+                "transcriptCountedDocumentCount": int(
+                    summary_row.get("transcript_counted_document_count") or 0
+                ),
+                "commentDocumentCount": int(
+                    summary_row.get("collected_comment_count") or 0
+                ),
+                "commentWhitespaceTokenCount": int(
+                    summary_row.get("comment_whitespace_token_count") or 0
+                ),
+                "commentCountedDocumentCount": int(
+                    summary_row.get("comment_counted_document_count") or 0
+                ),
             },
             "coverage": {
                 "visibleTargetCount": int(coverage_row.get("target_count") or 0),

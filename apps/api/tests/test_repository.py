@@ -152,11 +152,26 @@ def test_summary_reads_and_cutover_gate_reject_legacy_analysis_runs() -> None:
     )
 
 
-def test_readiness_requires_latest_search_statistics_migration() -> None:
+def test_readiness_requires_latest_whitespace_metrics_migration() -> None:
     readiness_sql = getsource(PostgresRepository.check_readiness)
 
-    assert "023_pure_frequency_ranking.sql" in readiness_sql
+    assert "025_whitespace_token_metrics.sql" in readiness_sql
     assert "015_database_performance_foundation.sql" not in readiness_sql
+
+
+def test_whitespace_token_migration_is_online_and_resumable() -> None:
+    migration = (
+        Path(__file__).resolve().parents[3]
+        / "database"
+        / "migrations"
+        / "025_whitespace_token_metrics.sql"
+    ).read_text()
+
+    assert "whitespace_token_count INTEGER" in migration
+    assert "DEFAULT" not in migration
+    assert "UPDATE comments" not in migration
+    assert "monitube_whitespace_token_count" in migration
+    assert "comments_whitespace_token_count_write" in migration
 
 
 def test_postgres_recent_failures_query_enforces_owner_parent_and_failed_scope() -> None:

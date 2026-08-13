@@ -160,6 +160,7 @@ export async function getAnalysisOverview(query: AnalysisQuery = {}): Promise<An
   const rawSummary = asRecord(record?.summary);
   const rawCoverage = asRecord(record?.coverage);
   const rawKeywordCoverage = asRecord(record?.keywordCoverage);
+  const rawStorageMetrics = asRecord(record?.storageMetrics);
   if (!record || !rawSummary || !rawCoverage) {
     throw new ApiError("분석 결과를 해석하지 못했습니다.", 502);
   }
@@ -226,6 +227,14 @@ export async function getAnalysisOverview(query: AnalysisQuery = {}): Promise<An
         asRecord(record.commentSignals) ?? {},
         "questionSampleSize",
       ),
+    },
+    storageMetrics: {
+      transcriptDocumentCount: requiredNumber(rawStorageMetrics ?? {}, "transcriptDocumentCount"),
+      transcriptWhitespaceTokenCount: requiredNumber(rawStorageMetrics ?? {}, "transcriptWhitespaceTokenCount"),
+      transcriptCountedDocumentCount: requiredNumber(rawStorageMetrics ?? {}, "transcriptCountedDocumentCount"),
+      commentDocumentCount: requiredNumber(rawStorageMetrics ?? {}, "commentDocumentCount"),
+      commentWhitespaceTokenCount: requiredNumber(rawStorageMetrics ?? {}, "commentWhitespaceTokenCount"),
+      commentCountedDocumentCount: requiredNumber(rawStorageMetrics ?? {}, "commentCountedDocumentCount"),
     },
     coverage: {
       visibleTargetCount: requiredNumber(rawCoverage, "visibleTargetCount"),
