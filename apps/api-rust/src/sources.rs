@@ -825,6 +825,31 @@ fn job_contract_with_public_source(job: &Value, public_source_id: Option<Uuid>) 
         );
     }
     output.insert("pauseReason".to_owned(), value_or_null(job, "pause_reason"));
+    output.insert("retryCount".to_owned(), value_or_null(job, "retry_count"));
+    output.insert(
+        "lastErrorCode".to_owned(),
+        value_or_null(job, "last_error_code"),
+    );
+    output.insert(
+        "lastErrorProvider".to_owned(),
+        value_or_null(job, "last_error_provider"),
+    );
+    output.insert(
+        "lastErrorOperation".to_owned(),
+        value_or_null(job, "last_error_operation"),
+    );
+    output.insert(
+        "lastErrorRetryable".to_owned(),
+        value_or_null(job, "last_error_retryable"),
+    );
+    output.insert(
+        "lastErrorHttpStatus".to_owned(),
+        value_or_null(job, "last_error_http_status"),
+    );
+    output.insert(
+        "lastErrorAt".to_owned(),
+        value_or_null(job, "last_error_at"),
+    );
     output.insert("quotaBucket".to_owned(), value_or_null(job, "quota_bucket"));
     output.insert("resumeAt".to_owned(), value_or_null(job, "resume_at"));
     output.insert(

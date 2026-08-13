@@ -1282,6 +1282,7 @@ impl Collector {
             let Some(text) = optional_text(item, "text").map(str::trim) else {
                 continue;
             };
+            let text = crate::sanitize::strip_nul(text);
             if text.is_empty() {
                 continue;
             }
@@ -1296,7 +1297,7 @@ impl Collector {
                     .map_err(|_| CollectorError::TooManyTranscriptSegments)?,
                 start_ms,
                 duration_ms,
-                text: text.to_owned(),
+                text: text.into_owned(),
             });
         }
         if segments.is_empty() {
@@ -1924,19 +1925,21 @@ fn comment_input(
             .map_err(|_| CollectorError::InvalidPayload)
     };
     Ok(CommentInput {
-        id: required_text(item, "id")?.to_owned(),
-        parent_id: optional_text(snippet, "parentId")
-            .or(fallback_parent_id)
-            .map(str::to_owned),
-        thread_id: thread_id.to_owned(),
+        id: crate::sanitize::required(required_text(item, "id")?)
+            .ok_or(CollectorError::InvalidPayload)?,
+        parent_id: crate::sanitize::optional(
+            optional_text(snippet, "parentId").or(fallback_parent_id),
+        ),
+        thread_id: crate::sanitize::required(thread_id).ok_or(CollectorError::InvalidPayload)?,
         author_channel_id: snippet
             .pointer("/authorChannelId/value")
             .and_then(Value::as_str)
-            .map(str::to_owned),
-        author_name: optional_text(snippet, "authorDisplayName").map(str::to_owned),
-        text: optional_text(snippet, "textDisplay")
-            .or_else(|| optional_text(snippet, "textOriginal"))
-            .map(str::to_owned),
+            .and_then(crate::sanitize::required),
+        author_name: crate::sanitize::optional(optional_text(snippet, "authorDisplayName")),
+        text: crate::sanitize::optional(
+            optional_text(snippet, "textDisplay")
+                .or_else(|| optional_text(snippet, "textOriginal")),
+        ),
         like_count: snippet
             .get("likeCount")
             .and_then(Value::as_i64)
@@ -1994,15 +1997,17 @@ mod tests {
         let payload = json!({"items": [{
             "id": "thread-1",
             "snippet": {"topLevelComment": {"id": "top-1", "snippet": {
-                "textDisplay": "top", "likeCount": 2, "publishedAt": "2026-01-01T00:00:00Z"
+                "textDisplay": "to\u{0000}p", "likeCount": 2, "publishedAt": "2026-01-01T00:00:00Z"
             }}},
             "replies": {"comments": [{"id": "reply-1", "snippet": {
-                "parentId": "top-1", "textDisplay": "reply", "likeCount": 0
+                "parentId": "top-1", "textDisplay": "re\u{0000}ply", "likeCount": 0
             }}]}
         }]});
         let comments = parse_comment_threads(&payload)?;
         assert_eq!(comments.len(), 2);
         assert_eq!(comments[1].parent_id.as_deref(), Some("top-1"));
+        assert_eq!(comments[0].text.as_deref(), Some("top"));
+        assert_eq!(comments[1].text.as_deref(), Some("reply"));
         Ok(())
     }
 }

@@ -478,6 +478,7 @@ export function sourceCollectionState(source: SourceSummary) {
 export function jobFailureReason(job?: JobStatus | null) {
   if (!job || job.state !== "failed") return null;
   return job.pauseReason
+    ?? job.lastErrorCode
     ?? job.partialErrors.find((error) => error.message)?.message
     ?? job.partialErrors[0]?.code
     ?? "실패 사유가 기록되지 않았습니다.";

@@ -166,6 +166,27 @@ export function normalizeJob(value: unknown): JobStatus | undefined {
     ...(asText(record.pauseReason ?? record.pause_reason)
       ? { pauseReason: asText(record.pauseReason ?? record.pause_reason) }
       : {}),
+    ...(asNumber(record.retryCount ?? record.retry_count) !== undefined
+      ? { retryCount: asNumber(record.retryCount ?? record.retry_count) }
+      : {}),
+    ...(asText(record.lastErrorCode ?? record.last_error_code)
+      ? { lastErrorCode: asText(record.lastErrorCode ?? record.last_error_code) }
+      : {}),
+    ...(asText(record.lastErrorProvider ?? record.last_error_provider)
+      ? { lastErrorProvider: asText(record.lastErrorProvider ?? record.last_error_provider) }
+      : {}),
+    ...(asText(record.lastErrorOperation ?? record.last_error_operation)
+      ? { lastErrorOperation: asText(record.lastErrorOperation ?? record.last_error_operation) }
+      : {}),
+    ...(typeof (record.lastErrorRetryable ?? record.last_error_retryable) === "boolean"
+      ? { lastErrorRetryable: (record.lastErrorRetryable ?? record.last_error_retryable) as boolean }
+      : {}),
+    ...(asNumber(record.lastErrorHttpStatus ?? record.last_error_http_status) !== undefined
+      ? { lastErrorHttpStatus: asNumber(record.lastErrorHttpStatus ?? record.last_error_http_status) }
+      : {}),
+    ...(asText(record.lastErrorAt ?? record.last_error_at)
+      ? { lastErrorAt: asText(record.lastErrorAt ?? record.last_error_at) }
+      : {}),
     ...(asText(record.quotaBucket ?? record.quota_bucket)
       ? { quotaBucket: asText(record.quotaBucket ?? record.quota_bucket) as JobStatus["quotaBucket"] }
       : {}),

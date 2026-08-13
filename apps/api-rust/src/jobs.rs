@@ -42,6 +42,8 @@ struct RecentFailureRow {
     failed_child_count: i64,
     representative_child_pause_reason: Option<String>,
     representative_child_partial_errors: Value,
+    representative_child_error_code: Option<String>,
+    representative_child_error_retryable: Option<bool>,
 }
 
 pub async fn get_job(
@@ -268,6 +270,8 @@ pub async fn list_recent_failures(
           SELECT child.parent_job_id,
                  child.pause_reason AS representative_child_pause_reason,
                  child.partial_errors AS representative_child_partial_errors,
+                 child.last_error_code AS representative_child_error_code,
+                 child.last_error_retryable AS representative_child_error_retryable,
                  count(*) OVER (PARTITION BY child.parent_job_id)::bigint
                    AS failed_child_count,
                  row_number() OVER (
@@ -296,7 +300,9 @@ pub async fn list_recent_failures(
                COALESCE(child.failed_child_count, 0)::bigint AS failed_child_count,
                child.representative_child_pause_reason,
                COALESCE(child.representative_child_partial_errors, '[]'::jsonb)
-                 AS representative_child_partial_errors
+                 AS representative_child_partial_errors,
+               child.representative_child_error_code,
+               child.representative_child_error_retryable
         FROM bounded_parent_failures AS parent
         JOIN sync_jobs AS job ON job.id = parent.job_id
         LEFT JOIN ranked_failed_children AS child
@@ -415,6 +421,14 @@ fn source_label(row: &RecentFailureRow) -> &str {
 }
 
 fn failure_details(row: &RecentFailureRow) -> (String, Option<String>, Option<bool>) {
+    if let Some(code) = safe_text(row.representative_child_error_code.as_deref()) {
+        let reason = safe_text(row.representative_child_pause_reason.as_deref()).unwrap_or(code);
+        return (
+            reason.to_owned(),
+            Some(code.to_owned()),
+            row.representative_child_error_retryable,
+        );
+    }
     if let Some(reason) = safe_text(row.representative_child_pause_reason.as_deref()) {
         return (reason.to_owned(), None, None);
     }
@@ -426,6 +440,24 @@ fn failure_details(row: &RecentFailureRow) -> (String, Option<String>, Option<bo
             .or_else(|| child.1.clone())
             .unwrap_or_else(|| "Collection child failed.".to_owned());
         return (reason, child.1, child.2);
+    }
+    if let Some(code) = row
+        .job
+        .get("last_error_code")
+        .and_then(Value::as_str)
+        .and_then(|value| safe_text(Some(value)))
+    {
+        let reason = row
+            .job
+            .get("pause_reason")
+            .and_then(Value::as_str)
+            .and_then(|value| safe_text(Some(value)))
+            .unwrap_or(code);
+        return (
+            reason.to_owned(),
+            Some(code.to_owned()),
+            row.job.get("last_error_retryable").and_then(Value::as_bool),
+        );
     }
     if let Some(reason) = row
         .job
@@ -576,6 +608,8 @@ mod tests {
                 "code": "child_error",
                 "retryable": false
             }]),
+            representative_child_error_code: None,
+            representative_child_error_retryable: None,
         }
     }
 
@@ -593,5 +627,18 @@ mod tests {
             row.public_source_id.to_string()
         );
         assert!(!contract.to_string().contains("private-source-id"));
+    }
+
+    #[test]
+    fn recent_failure_prefers_typed_child_metadata() {
+        let mut row = failure_row();
+        row.representative_child_pause_reason =
+            Some("SearchAPI returned an invalid payload".to_owned());
+        row.representative_child_error_code = Some("provider_invalid_payload".to_owned());
+        row.representative_child_error_retryable = Some(true);
+        let (reason, code, retryable) = failure_details(&row);
+        assert_eq!(reason, "SearchAPI returned an invalid payload");
+        assert_eq!(code.as_deref(), Some("provider_invalid_payload"));
+        assert_eq!(retryable, Some(true));
     }
 }

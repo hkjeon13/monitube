@@ -26,7 +26,8 @@ impl SearchApiClient {
             .timeout(config.timeout)
             .connect_timeout(config.timeout.min(Duration::from_secs(10)))
             .pool_max_idle_per_host(2)
-            .build()?;
+            .build()
+            .map_err(SearchApiError::ClientBuild)?;
         Ok(Self {
             client,
             base_url: config.base_url.trim_end_matches('?').to_owned(),
@@ -39,13 +40,20 @@ impl SearchApiClient {
     }
 
     pub async fn channel(&self, channel_id: &str) -> Result<Value, SearchApiError> {
-        self.request(
-            "youtube_channel",
-            json!({"engine": "youtube_channel", "channel_id": channel_id,
-                   "gl": self.gl, "hl": self.hl}),
-            false,
-        )
-        .await
+        let payload = self
+            .request(
+                "youtube_channel",
+                json!({"engine": "youtube_channel", "channel_id": channel_id,
+                       "gl": self.gl, "hl": self.hl}),
+                false,
+            )
+            .await?;
+        require_payload("youtube_channel", payload, |value| {
+            value
+                .pointer("/channel/id")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty())
+        })
     }
 
     pub async fn channel_videos(
@@ -54,13 +62,18 @@ impl SearchApiClient {
         page_token: Option<&str>,
     ) -> Result<Value, SearchApiError> {
         let post = page_token.is_some_and(|token| token.len() >= self.channel_post_threshold);
-        self.request(
-            "youtube_channel_videos",
-            json!({"engine": "youtube_channel_videos", "channel_id": channel_id,
-                   "next_page_token": page_token, "gl": self.gl, "hl": self.hl}),
-            post,
-        )
-        .await
+        let payload = self
+            .request(
+                "youtube_channel_videos",
+                json!({"engine": "youtube_channel_videos", "channel_id": channel_id,
+                       "next_page_token": page_token, "gl": self.gl, "hl": self.hl}),
+                post,
+            )
+            .await?;
+        require_payload("youtube_channel_videos", payload, |value| {
+            value.get("videos").and_then(Value::as_array).is_some()
+                || value.get("sections").and_then(Value::as_array).is_some()
+        })
     }
 
     pub async fn youtube(
@@ -68,13 +81,19 @@ impl SearchApiClient {
         query: &str,
         page_token: Option<&str>,
     ) -> Result<Value, SearchApiError> {
-        self.request(
-            "youtube",
-            json!({"engine": "youtube", "q": query, "sp": page_token,
-                   "gl": self.gl, "hl": self.hl}),
-            false,
-        )
-        .await
+        let payload = self
+            .request(
+                "youtube",
+                json!({"engine": "youtube", "q": query, "sp": page_token,
+                       "gl": self.gl, "hl": self.hl}),
+                false,
+            )
+            .await?;
+        require_payload("youtube", payload, |value| {
+            ["videos", "channels", "sections"]
+                .iter()
+                .any(|key| value.get(key).and_then(Value::as_array).is_some())
+        })
     }
 
     pub async fn transcripts(
@@ -92,6 +111,13 @@ impl SearchApiClient {
             )
             .await
         {
+            Ok(payload) => require_payload("youtube_transcripts", payload, |value| {
+                value.get("transcripts").and_then(Value::as_array).is_some()
+                    || value
+                        .get("available_languages")
+                        .and_then(Value::as_array)
+                        .is_some()
+            }),
             Err(SearchApiError::Upstream {
                 available_languages,
                 ..
@@ -132,7 +158,10 @@ impl SearchApiClient {
         } else {
             builder.query(object)
         };
-        let mut response = builder.send().await?;
+        let mut response = builder
+            .send()
+            .await
+            .map_err(|source| SearchApiError::Transport { operation, source })?;
         if response
             .content_length()
             .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
@@ -141,22 +170,39 @@ impl SearchApiClient {
         }
         let status = response.status();
         let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await? {
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|source| SearchApiError::Transport { operation, source })?
+        {
             if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
                 return Err(SearchApiError::ResponseTooLarge);
             }
             bytes.extend_from_slice(&chunk);
         }
-        let payload = serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null);
         if status.is_success() {
-            return Ok(payload);
+            return serde_json::from_slice::<Value>(&bytes)
+                .map_err(|_| SearchApiError::InvalidJson { operation });
         }
+        let payload = serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null);
         Err(SearchApiError::Upstream {
             operation,
             status,
             error_code: safe_error_code(&payload),
             available_languages: language_options(&payload),
         })
+    }
+}
+
+fn require_payload(
+    operation: &'static str,
+    payload: Value,
+    validator: impl FnOnce(&Value) -> bool,
+) -> Result<Value, SearchApiError> {
+    if validator(&payload) {
+        Ok(payload)
+    } else {
+        Err(SearchApiError::InvalidPayload { operation })
     }
 }
 
@@ -211,10 +257,20 @@ fn language_options(payload: &Value) -> Vec<Value> {
 pub enum SearchApiError {
     #[error("SearchAPI configuration is invalid")]
     InvalidConfig,
+    #[error("SearchAPI HTTP client configuration failed")]
+    ClientBuild(#[source] reqwest::Error),
     #[error("SearchAPI transport failed")]
-    Transport(#[from] reqwest::Error),
+    Transport {
+        operation: &'static str,
+        #[source]
+        source: reqwest::Error,
+    },
     #[error("SearchAPI response exceeded the configured bound")]
     ResponseTooLarge,
+    #[error("SearchAPI returned invalid JSON for {operation}")]
+    InvalidJson { operation: &'static str },
+    #[error("SearchAPI returned an invalid payload for {operation}")]
+    InvalidPayload { operation: &'static str },
     #[error("SearchAPI {operation} failed with HTTP {status} ({error_code})")]
     Upstream {
         operation: &'static str,
@@ -229,8 +285,11 @@ impl SearchApiError {
     pub fn code(&self) -> &str {
         match self {
             Self::InvalidConfig => "invalid_config",
-            Self::Transport(_) => "network_error",
+            Self::ClientBuild(_) => "client_build_failed",
+            Self::Transport { .. } => "network_error",
             Self::ResponseTooLarge => "response_too_large",
+            Self::InvalidJson { .. } => "provider_invalid_json",
+            Self::InvalidPayload { .. } => "provider_invalid_payload",
             Self::Upstream { error_code, .. } => error_code,
         }
     }
@@ -239,16 +298,33 @@ impl SearchApiError {
     pub fn status_code(&self) -> u16 {
         match self {
             Self::Upstream { status, .. } => status.as_u16(),
-            Self::InvalidConfig => 500,
-            Self::Transport(_) => 503,
-            Self::ResponseTooLarge => 502,
+            Self::InvalidConfig | Self::ClientBuild(_) => 500,
+            Self::Transport { .. } => 503,
+            Self::ResponseTooLarge | Self::InvalidJson { .. } | Self::InvalidPayload { .. } => 502,
         }
     }
 
     #[must_use]
     pub fn is_retryable(&self) -> bool {
-        let status = self.status_code();
-        matches!(self, Self::Transport(_)) || status == 429 || status >= 500
+        match self {
+            Self::Transport { .. }
+            | Self::ResponseTooLarge
+            | Self::InvalidJson { .. }
+            | Self::InvalidPayload { .. } => true,
+            Self::Upstream { status, .. } => status.as_u16() == 429 || status.is_server_error(),
+            Self::InvalidConfig | Self::ClientBuild(_) => false,
+        }
+    }
+
+    #[must_use]
+    pub fn operation(&self) -> Option<&'static str> {
+        match self {
+            Self::Transport { operation, .. }
+            | Self::InvalidJson { operation }
+            | Self::InvalidPayload { operation }
+            | Self::Upstream { operation, .. } => Some(*operation),
+            _ => None,
+        }
     }
 }
 
@@ -270,5 +346,21 @@ mod tests {
             {"lang": "ko", "name": "Korean", "request_url": "secret"}
         ]}));
         assert_eq!(options, vec![json!({"lang": "ko", "name": "Korean"})]);
+    }
+
+    #[test]
+    fn malformed_success_payload_is_retryable_and_structured() {
+        assert!(matches!(
+            require_payload("youtube_channel", json!({"channel": {}}), |_| false),
+            Err(SearchApiError::InvalidPayload {
+                operation: "youtube_channel"
+            })
+        ));
+        let error = SearchApiError::InvalidPayload {
+            operation: "youtube_channel",
+        };
+        assert_eq!(error.code(), "provider_invalid_payload");
+        assert_eq!(error.operation(), Some("youtube_channel"));
+        assert!(error.is_retryable());
     }
 }

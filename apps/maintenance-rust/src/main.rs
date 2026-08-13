@@ -3,6 +3,7 @@
 use monitube_postgres::PoolConfig;
 use sqlx::{Acquire, FromRow, PgConnection, PgPool};
 use std::{
+    collections::HashSet,
     env,
     error::Error,
     sync::{
@@ -72,14 +73,12 @@ impl Counts {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     monitube_observability::init("monitube-maintenance-rust")?;
-    let command = env::args()
-        .nth(1)
-        .unwrap_or_else(|| "rollup-backfill".to_owned());
-    if command != "rollup-backfill" {
-        return Err(ConfigError::UnknownCommand(command).into());
+    let arguments = env::args().collect::<Vec<_>>();
+    let command = arguments.get(1).map_or("rollup-backfill", String::as_str);
+    if !matches!(command, "rollup-backfill" | "collection-retry") {
+        return Err(ConfigError::UnknownCommand(command.to_owned()).into());
     }
     let database_url = required("DATABASE_URL")?;
-    let config = Config::from_environment()?;
     let pool = monitube_postgres::connect(
         &database_url,
         PoolConfig {
@@ -90,6 +89,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         },
     )
     .await?;
+    if command == "collection-retry" {
+        let request = RecoveryRequest::parse(&arguments[2..])?;
+        run_collection_retry(&pool, &request).await?;
+        return Ok(());
+    }
+    let config = Config::from_environment()?;
     let stopping = Arc::new(AtomicBool::new(false));
     let signal_flag = Arc::clone(&stopping);
     tokio::spawn(async move {
@@ -113,6 +118,191 @@ async fn main() -> Result<(), Box<dyn Error>> {
     ) {
         return Err(MaintenanceError::UnexpectedState(progress.state).into());
     }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct RecoveryRequest {
+    apply: bool,
+    job_ids: Vec<Uuid>,
+}
+
+impl RecoveryRequest {
+    fn parse(arguments: &[String]) -> Result<Self, ConfigError> {
+        let mut apply = false;
+        let mut job_ids = Vec::new();
+        for argument in arguments {
+            if argument == "--apply" {
+                apply = true;
+            } else {
+                job_ids.push(
+                    Uuid::parse_str(argument)
+                        .map_err(|_| ConfigError::InvalidArgument(argument.clone()))?,
+                );
+            }
+        }
+        let unique = job_ids.iter().copied().collect::<HashSet<_>>();
+        if job_ids.is_empty() || job_ids.len() > 100 || unique.len() != job_ids.len() {
+            return Err(ConfigError::InvalidRecoverySet);
+        }
+        job_ids.sort_unstable();
+        Ok(Self { apply, job_ids })
+    }
+}
+
+#[derive(Debug, FromRow)]
+struct RecoveryCandidate {
+    id: Uuid,
+    parent_job_id: Option<Uuid>,
+    state: String,
+    pause_reason: Option<String>,
+    error_code: Option<String>,
+    youtube_video_id: Option<String>,
+}
+
+#[allow(clippy::too_many_lines)]
+async fn run_collection_retry(
+    pool: &PgPool,
+    request: &RecoveryRequest,
+) -> Result<(), MaintenanceError> {
+    let mut transaction = pool.begin().await?;
+    let candidates = sqlx::query_as::<_, RecoveryCandidate>(
+        r"
+        SELECT id, parent_job_id, state::text AS state, pause_reason,
+               last_error_code AS error_code,
+               checkpoint ->> 'youtubeVideoId' AS youtube_video_id
+        FROM sync_jobs
+        WHERE id = ANY($1::uuid[])
+        ORDER BY id
+        FOR UPDATE
+        ",
+    )
+    .bind(&request.job_ids)
+    .fetch_all(&mut *transaction)
+    .await?;
+    if candidates.len() != request.job_ids.len() {
+        return Err(MaintenanceError::RecoverySetMismatch {
+            requested: request.job_ids.len(),
+            found: candidates.len(),
+        });
+    }
+    for candidate in &candidates {
+        let known_database_failure = candidate.error_code.as_deref()
+            == Some("database_operation_failed")
+            || candidate.pause_reason.as_deref() == Some("collection database operation failed");
+        if candidate.state != "failed"
+            || candidate.parent_job_id.is_none()
+            || candidate
+                .youtube_video_id
+                .as_deref()
+                .is_none_or(str::is_empty)
+            || !known_database_failure
+        {
+            return Err(MaintenanceError::UnsafeRecoveryCandidate(candidate.id));
+        }
+    }
+    let parent_ids = candidates
+        .iter()
+        .filter_map(|candidate| candidate.parent_job_id)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let (parent_count, eligible_parent_count) = sqlx::query_as::<_, (i64, i64)>(
+        r"
+        SELECT count(*)::bigint,
+               count(*) FILTER (WHERE state IN (
+                 'failed', 'waiting_retry', 'waiting_quota', 'queued', 'running'
+               ))::bigint
+        FROM sync_jobs
+        WHERE id = ANY($1::uuid[])
+        ",
+    )
+    .bind(&parent_ids)
+    .fetch_one(&mut *transaction)
+    .await?;
+    let expected_parent_count = i64::try_from(parent_ids.len())
+        .map_err(|_| MaintenanceError::UnsafeRecoveryParents)?;
+    if parent_count != expected_parent_count || eligible_parent_count != expected_parent_count {
+        return Err(MaintenanceError::UnsafeRecoveryParents);
+    }
+    let unselected_failure_count = sqlx::query_scalar::<_, i64>(
+        r"
+        SELECT count(*)::bigint
+        FROM sync_jobs
+        WHERE parent_job_id = ANY($1::uuid[])
+          AND state = 'failed'
+          AND NOT (id = ANY($2::uuid[]))
+        ",
+    )
+    .bind(&parent_ids)
+    .bind(&request.job_ids)
+    .fetch_one(&mut *transaction)
+    .await?;
+    if unselected_failure_count != 0 {
+        return Err(MaintenanceError::UnselectedFailedChildren(
+            unselected_failure_count,
+        ));
+    }
+
+    for candidate in &candidates {
+        tracing::info!(
+            mode = if request.apply { "apply" } else { "dry-run" },
+            job_id = %candidate.id,
+            parent_job_id = ?candidate.parent_job_id,
+            youtube_video_id = ?candidate.youtube_video_id,
+            "validated collection recovery candidate"
+        );
+    }
+    if !request.apply {
+        transaction.rollback().await?;
+        tracing::info!(
+            count = candidates.len(),
+            "collection recovery dry-run completed"
+        );
+        return Ok(());
+    }
+
+    let updated_children = sqlx::query(
+        r"
+        UPDATE sync_jobs
+        SET state = 'queued', current_stage = 'queued_recovery', pause_reason = NULL,
+            quota_bucket = NULL, resume_at = NULL, resume_is_automatic = FALSE,
+            retry_count = 0, lease_owner = NULL, lease_expires_at = NULL,
+            updated_at = now()
+        WHERE id = ANY($1::uuid[]) AND state = 'failed'
+        ",
+    )
+    .bind(&request.job_ids)
+    .execute(&mut *transaction)
+    .await?;
+    if usize::try_from(updated_children.rows_affected()).ok() != Some(candidates.len()) {
+        return Err(MaintenanceError::RecoveryStateChanged);
+    }
+    sqlx::query(
+        r"
+        UPDATE sync_jobs
+        SET state = 'waiting_retry', current_stage = 'waiting_for_video_jobs',
+            pause_reason = 'Waiting for recovered video collection jobs',
+            resume_at = now(), resume_is_automatic = TRUE, retry_count = 0,
+            lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
+        WHERE id = ANY($1::uuid[]) AND state = 'failed'
+        ",
+    )
+    .bind(&parent_ids)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r"
+        UPDATE collection_requests
+        SET status = 'waiting_retry', updated_at = now()
+        WHERE job_id = ANY($1::uuid[]) AND status = 'failed'
+        ",
+    )
+    .bind(&parent_ids)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    tracing::info!(count = candidates.len(), "collection recovery applied");
     Ok(())
 }
 
@@ -668,6 +858,16 @@ enum MaintenanceError {
     },
     #[error("unsupported rollup maintenance state: {0}")]
     UnexpectedState(String),
+    #[error("collection recovery set mismatch: requested={requested}, found={found}")]
+    RecoverySetMismatch { requested: usize, found: usize },
+    #[error("collection recovery candidate {0} is not a known failed child database job")]
+    UnsafeRecoveryCandidate(Uuid),
+    #[error("collection recovery omitted {0} failed children for the selected parents")]
+    UnselectedFailedChildren(i64),
+    #[error("collection recovery parent set is missing or already terminal")]
+    UnsafeRecoveryParents,
+    #[error("collection recovery state changed while applying")]
+    RecoveryStateChanged,
 }
 
 #[derive(Debug, Error)]
@@ -678,6 +878,10 @@ enum ConfigError {
     Invalid(&'static str),
     #[error("unknown maintenance command {0}")]
     UnknownCommand(String),
+    #[error("invalid maintenance argument {0}")]
+    InvalidArgument(String),
+    #[error("collection-retry requires 1 to 100 unique child job UUIDs")]
+    InvalidRecoverySet,
 }
 
 #[cfg(test)]
@@ -693,5 +897,20 @@ mod tests {
     #[test]
     fn boolean_flags_are_fail_closed() {
         assert!(!matches!("TRUE-ish".to_ascii_lowercase().as_str(), "true"));
+    }
+
+    #[test]
+    fn collection_retry_is_dry_run_by_default() -> Result<(), ConfigError> {
+        let id = Uuid::new_v4();
+        let request = RecoveryRequest::parse(&[id.to_string()])?;
+        assert!(!request.apply);
+        assert_eq!(request.job_ids, vec![id]);
+        Ok(())
+    }
+
+    #[test]
+    fn collection_retry_rejects_duplicate_ids() {
+        let id = Uuid::new_v4().to_string();
+        assert!(RecoveryRequest::parse(&[id.clone(), id]).is_err());
     }
 }

@@ -219,6 +219,25 @@ impl YouTubeError {
             _ => None,
         }
     }
+
+    #[must_use]
+    pub fn endpoint(&self) -> Option<&'static str> {
+        match self {
+            Self::Upstream { endpoint, .. } | Self::AllKeysUnavailable { endpoint } => {
+                Some(*endpoint)
+            }
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Transport(_) => true,
+            Self::Upstream { status, .. } => status.as_u16() == 429 || status.is_server_error(),
+            Self::MissingKeys | Self::AllKeysUnavailable { .. } => false,
+        }
+    }
 }
 
 #[cfg(test)]

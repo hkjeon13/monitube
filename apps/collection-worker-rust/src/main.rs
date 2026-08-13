@@ -1,9 +1,10 @@
 mod collector;
+mod sanitize;
 mod searchapi;
 mod youtube;
 
 use collector::{Collector, CollectorConfig, CollectorError};
-use monitube_collection_store::{CollectionStore, StoreError};
+use monitube_collection_store::{CollectionStore, FailureMetadata, StoreError};
 use monitube_postgres::PoolConfig;
 use searchapi::{SearchApiClient, SearchApiConfig};
 use std::env;
@@ -133,6 +134,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 async fn run_once(
     store: &CollectionStore,
     collector: &mut Collector,
@@ -167,10 +169,37 @@ async fn run_once(
             store.complete(&job).await?;
         }
         Err(CollectorError::YouTube(error)) => {
-            store.wait_retry(&job, &error.to_string(), 60).await?;
+            let reason = error.to_string();
+            let code = error.reason().unwrap_or("youtube_request_failed");
+            store
+                .wait_retry_classified(
+                    &job,
+                    &reason,
+                    FailureMetadata {
+                        code,
+                        provider: Some("youtube"),
+                        operation: error.endpoint(),
+                        retryable: error.is_retryable(),
+                        http_status: Some(error.status_code()),
+                    },
+                )
+                .await?;
         }
         Err(CollectorError::SearchApi(error)) => {
-            store.wait_retry(&job, &error.to_string(), 60).await?;
+            let reason = error.to_string();
+            store
+                .wait_retry_classified(
+                    &job,
+                    &reason,
+                    FailureMetadata {
+                        code: error.code(),
+                        provider: Some("searchapi"),
+                        operation: error.operation(),
+                        retryable: error.is_retryable(),
+                        http_status: Some(error.status_code()),
+                    },
+                )
+                .await?;
         }
         Err(CollectorError::WaitingForChildren { waiting_quota }) => {
             store.wait_children(&job, waiting_quota > 0).await?;
@@ -178,9 +207,79 @@ async fn run_once(
         Err(CollectorError::Store(StoreError::LeaseLost)) => {
             tracing::warn!(job_id = %job.id, "collection lease was lost");
         }
-        Err(error) => store.fail(&job, &error.to_string()).await?,
+        Err(
+            CollectorError::Database(error) | CollectorError::Store(StoreError::Database(error)),
+        ) => {
+            let retryable = retryable_database_error(&error);
+            store
+                .wait_retry_classified(
+                    &job,
+                    "collection database operation failed",
+                    FailureMetadata {
+                        code: if retryable {
+                            "database_temporarily_unavailable"
+                        } else {
+                            "database_operation_failed"
+                        },
+                        provider: Some("postgresql"),
+                        operation: Some("collection_persistence"),
+                        retryable,
+                        http_status: None,
+                    },
+                )
+                .await?;
+        }
+        Err(CollectorError::InvalidPayload) => {
+            store
+                .wait_retry_classified(
+                    &job,
+                    "YouTube response is invalid",
+                    FailureMetadata {
+                        code: "provider_invalid_payload",
+                        provider: Some("youtube"),
+                        operation: Some("response_parse"),
+                        retryable: true,
+                        http_status: Some(502),
+                    },
+                )
+                .await?;
+        }
+        Err(error) => {
+            let reason = error.to_string();
+            store
+                .fail_classified(
+                    &job,
+                    &reason,
+                    FailureMetadata {
+                        code: "collection_failed",
+                        provider: None,
+                        operation: Some("collection"),
+                        retryable: false,
+                        http_status: None,
+                    },
+                )
+                .await?;
+        }
     }
     Ok(true)
+}
+
+fn retryable_database_error(error: &sqlx::Error) -> bool {
+    match error {
+        sqlx::Error::Io(_)
+        | sqlx::Error::Tls(_)
+        | sqlx::Error::PoolTimedOut
+        | sqlx::Error::PoolClosed
+        | sqlx::Error::WorkerCrashed => true,
+        sqlx::Error::Database(error) => error.code().is_some_and(|code| {
+            code.starts_with("08")
+                || matches!(
+                    code.as_ref(),
+                    "40001" | "40P01" | "55P03" | "57P01" | "57P02" | "57P03"
+                )
+        }),
+        _ => false,
+    }
 }
 
 fn youtube_keys() -> Vec<String> {

@@ -21,8 +21,18 @@ pub struct ClaimedJob {
     pub max_comments_per_video: Option<i32>,
     pub checkpoint: Value,
     pub partial_errors: Value,
+    pub retry_count: i32,
     pub lease_owner: String,
     pub lease_expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct FailureMetadata<'a> {
+    pub code: &'a str,
+    pub provider: Option<&'a str>,
+    pub operation: Option<&'a str>,
+    pub retryable: bool,
+    pub http_status: Option<u16>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -112,6 +122,7 @@ impl CollectionStore {
                       job.runtime_config_id,
                       job.current_stage, job.include_comments, job.max_videos,
                       job.max_comments_per_video, job.checkpoint, job.partial_errors,
+                      job.retry_count,
                       job.lease_owner, job.lease_expires_at
             ",
         )
@@ -564,7 +575,7 @@ impl CollectionStore {
             UPDATE sync_jobs
             SET current_stage = $1, checkpoint = $2,
                 progress_completed = $3, progress_total = $4,
-                progress_unit = $5, updated_at = now()
+                progress_unit = $5, retry_count = 0, updated_at = now()
             WHERE id = $6 AND state = 'running' AND lease_owner = $7
             ",
         )
@@ -595,11 +606,20 @@ impl CollectionStore {
     }
 
     pub async fn complete(&self, job: &ClaimedJob) -> Result<(), StoreError> {
-        self.finish_terminal(job, None).await
+        self.finish_terminal(job, None, None).await
     }
 
     pub async fn fail(&self, job: &ClaimedJob, reason: &str) -> Result<(), StoreError> {
-        self.finish_terminal(job, Some(reason)).await
+        self.finish_terminal(job, Some(reason), None).await
+    }
+
+    pub async fn fail_classified(
+        &self,
+        job: &ClaimedJob,
+        reason: &str,
+        failure: FailureMetadata<'_>,
+    ) -> Result<(), StoreError> {
+        self.finish_terminal(job, Some(reason), Some(failure)).await
     }
 
     pub async fn add_partial_error(
@@ -643,21 +663,49 @@ impl CollectionStore {
         fenced(result.rows_affected())
     }
 
-    pub async fn wait_retry(
+    pub async fn wait_retry_classified(
         &self,
         job: &ClaimedJob,
         reason: &str,
-        seconds: i64,
+        failure: FailureMetadata<'_>,
     ) -> Result<(), StoreError> {
-        self.finish(
-            job,
-            "waiting_retry",
-            "waiting_to_retry",
-            Some(reason),
-            Some(seconds.clamp(1, 86_400)),
-            None,
+        if !failure.retryable || job.retry_count >= 4 {
+            return self.finish_terminal(job, Some(reason), Some(failure)).await;
+        }
+        let next_retry = job.retry_count.saturating_add(1);
+        let delay_seconds = match next_retry {
+            1 => 60_i64,
+            2 => 120,
+            3 => 300,
+            _ => 600,
+        };
+        let result = sqlx::query(
+            r"
+            UPDATE sync_jobs
+            SET state = 'waiting_retry', current_stage = 'waiting_to_retry',
+                pause_reason = $1, quota_bucket = NULL,
+                resume_at = now() + ($2 * interval '1 second'),
+                resume_is_automatic = TRUE, retry_count = $3,
+                last_error_code = $4, last_error_provider = $5,
+                last_error_operation = $6, last_error_retryable = $7,
+                last_error_http_status = $8, last_error_at = now(),
+                lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
+            WHERE id = $9 AND state = 'running' AND lease_owner = $10
+            ",
         )
-        .await
+        .bind(safe_reason(reason, 1_000))
+        .bind(delay_seconds)
+        .bind(next_retry)
+        .bind(safe_reason(failure.code, 100))
+        .bind(failure.provider.map(|value| safe_reason(value, 100)))
+        .bind(failure.operation.map(|value| safe_reason(value, 100)))
+        .bind(failure.retryable)
+        .bind(failure.http_status.map(i32::from))
+        .bind(job.id)
+        .bind(&job.lease_owner)
+        .execute(&self.pool)
+        .await?;
+        fenced(result.rows_affected())
     }
 
     pub async fn wait_children(
@@ -706,6 +754,7 @@ impl CollectionStore {
         &self,
         job: &ClaimedJob,
         failure_reason: Option<&str>,
+        failure: Option<FailureMetadata<'_>>,
     ) -> Result<(), StoreError> {
         let mut transaction = self.pool.begin().await?;
 
@@ -791,13 +840,25 @@ impl CollectionStore {
             UPDATE sync_jobs
             SET state = $1::job_state, current_stage = $2, pause_reason = $3,
                 quota_bucket = NULL, resume_at = NULL, resume_is_automatic = FALSE,
+                retry_count = 0,
+                last_error_code = COALESCE($4, last_error_code),
+                last_error_provider = COALESCE($5, last_error_provider),
+                last_error_operation = COALESCE($6, last_error_operation),
+                last_error_retryable = COALESCE($7, last_error_retryable),
+                last_error_http_status = COALESCE($8, last_error_http_status),
+                last_error_at = CASE WHEN $4::text IS NULL THEN last_error_at ELSE now() END,
                 lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
-            WHERE id = $4 AND state = 'running' AND lease_owner = $5
+            WHERE id = $9 AND state = 'running' AND lease_owner = $10
             ",
         )
         .bind(terminal_state)
         .bind(transition_stage)
         .bind(failure_reason.map(|value| safe_reason(value, 1_000)))
+        .bind(failure.map(|value| safe_reason(value.code, 100)))
+        .bind(failure.and_then(|value| value.provider.map(|item| safe_reason(item, 100))))
+        .bind(failure.and_then(|value| value.operation.map(|item| safe_reason(item, 100))))
+        .bind(failure.map(|value| value.retryable))
+        .bind(failure.and_then(|value| value.http_status.map(i32::from)))
         .bind(current.id)
         .bind(&job.lease_owner)
         .execute(&mut *transaction)

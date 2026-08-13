@@ -87,6 +87,13 @@ export interface JobStatus {
   transcriptProgress?: JobProgress;
   commentProgress?: JobProgress;
   pauseReason?: string;
+  retryCount?: number;
+  lastErrorCode?: string;
+  lastErrorProvider?: string;
+  lastErrorOperation?: string;
+  lastErrorRetryable?: boolean;
+  lastErrorHttpStatus?: number;
+  lastErrorAt?: string;
   quotaBucket?: QuotaBucket;
   resumeAt?: string;
   resumeIsAutomatic: boolean;
