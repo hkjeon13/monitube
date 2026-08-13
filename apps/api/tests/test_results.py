@@ -203,7 +203,7 @@ def test_analysis_overview_combines_video_and_comment_metrics() -> None:
     assert insight_body["performanceVideos"][0]["id"] == "analysis001"
     assert insight_body["performanceVideos"][0]["commentRatePerThousand"] == 4
     assert insight_body["publishingHeatmap"][0]["weekday"] == 4
-    assert insight_body["publishingHeatmap"][0]["hourBucket"] == 6
+    assert insight_body["publishingHeatmap"][0]["hourBucket"] == 9
 
 
 def test_analysis_excluded_terms_are_normalized_and_managed_per_corpus() -> None:

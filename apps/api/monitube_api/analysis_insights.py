@@ -141,7 +141,7 @@ def build_video_insights(
 
         if published_at:
             local_published = published_at.astimezone(SEOUL)
-            hour_bucket = (local_published.hour // 6) * 6
+            hour_bucket = (local_published.hour // 3) * 3
             publishing_groups[
                 (local_published.isoweekday(), hour_bucket)
             ].append(views_per_day)

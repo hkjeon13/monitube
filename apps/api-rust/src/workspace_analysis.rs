@@ -296,8 +296,8 @@ pub async fn insights(
           'videoCount', count(*),
           'medianViewsPerDay', COALESCE(percentile_disc(0.5) WITHIN GROUP (ORDER BY views_per_day), 0))
         FROM (
-          SELECT EXTRACT(ISODOW FROM published_at)::integer AS weekday,
-                 (floor(EXTRACT(HOUR FROM published_at) / 6) * 6)::integer AS hour_bucket,
+          SELECT EXTRACT(ISODOW FROM published_at AT TIME ZONE 'Asia/Seoul')::integer AS weekday,
+                 (floor(EXTRACT(HOUR FROM published_at AT TIME ZONE 'Asia/Seoul') / 3) * 3)::integer AS hour_bucket,
                  views_per_day
           FROM performance WHERE published_at IS NOT NULL
         ) AS publishing

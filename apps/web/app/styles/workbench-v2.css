@@ -568,7 +568,8 @@ select:focus-visible,
   .analysis-panel { grid-column: span 6; }
   .analysis-panel-wide { grid-column: span 12; }
   .analysis-panel-comments { grid-column: span 8; }
-  .analysis-panel-words { grid-column: span 4; }
+  .analysis-panel-keywords { grid-column: span 4; }
+  .analysis-panel-keywords-wide { grid-column: span 12; }
   .analysis-panel-publishing { grid-column: span 7; }
   .analysis-panel-signals { grid-column: span 5; }
 }
@@ -595,7 +596,7 @@ select:focus-visible,
   .analysis-filters { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; }
   .analysis-filters label { align-items: stretch; flex-direction: column; }
   .analysis-filters select { width: 100%; max-width: none; }
-  .analysis-table-wrap, .analysis-heatmap { overflow-x: auto; }
+  .analysis-table-wrap, .analysis-heatmap-scroll, .analysis-keyword-table-wrap { overflow-x: auto; }
   .analysis-table { min-width: 37.5rem; }
   .video-table-wrap { display: none; }
   .mobile-video-list { display: grid; }

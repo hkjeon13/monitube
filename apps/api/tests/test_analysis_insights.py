@@ -40,6 +40,42 @@ def test_video_insights_build_growth_benchmarks_and_heatmap() -> None:
     assert any(item["kind"] == "breakout" for item in result["insights"])
 
 
+def test_video_insights_groups_publishing_heatmap_in_three_hour_kst_buckets() -> None:
+    generated_at = datetime(2026, 8, 13, 12, tzinfo=UTC)
+    published_times = (
+        datetime(2026, 8, 9, 15, 0, tzinfo=UTC),   # Mon 00:00 KST
+        datetime(2026, 8, 9, 17, 59, tzinfo=UTC),  # Mon 02:59 KST
+        datetime(2026, 8, 9, 18, 0, tzinfo=UTC),   # Mon 03:00 KST
+        datetime(2026, 8, 10, 12, 0, tzinfo=UTC),  # Mon 21:00 KST
+        datetime(2026, 8, 10, 14, 59, tzinfo=UTC), # Mon 23:59 KST
+        datetime(2026, 8, 10, 15, 0, tzinfo=UTC),  # Tue 00:00 KST
+    )
+    rows = [
+        {
+            "id": f"boundary-{index}",
+            "channel_id": "UCboundary",
+            "published_at": published_at,
+            "statistics_fetched_at": generated_at,
+            "view_count": 100 * index,
+            "like_count": 0,
+            "youtube_comment_count": 0,
+            "collected_comment_count": 0,
+        }
+        for index, published_at in enumerate(published_times, start=1)
+    ]
+
+    result = build_video_insights(rows, limit=10, generated_at=generated_at)
+
+    cells = {
+        (cell["weekday"], cell["hourBucket"]): cell
+        for cell in result["publishingHeatmap"]
+    }
+    assert cells[(1, 0)]["videoCount"] == 2
+    assert cells[(1, 3)]["videoCount"] == 1
+    assert cells[(1, 21)]["videoCount"] == 2
+    assert cells[(2, 0)]["videoCount"] == 1
+
+
 def test_question_signal_is_bounded_and_transparent() -> None:
     result = question_signals_from_texts(
         ["이 영상은 어떻게 만들었나요?", "좋아요", None, ""]

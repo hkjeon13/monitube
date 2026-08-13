@@ -196,44 +196,41 @@ function SortableTableHeader({
 }: {
   children: string;
   column: BreakdownSortKey;
-  sort: { key: BreakdownSortKey; direction: SortDirection } | null;
-  onSort: (key: BreakdownSortKey, direction: SortDirection) => void;
+  sort: { key: BreakdownSortKey; direction: SortDirection };
+  onSort: (key: BreakdownSortKey) => void;
 }) {
   const activeDirection = sort?.key === column ? sort.direction : null;
+  const nextDirection = activeDirection === "descending" ? "ascending" : "descending";
+  const DirectionIcon = activeDirection === "ascending" ? ChevronUpIcon : ChevronDownIcon;
   return (
     <th aria-sort={activeDirection ?? "none"}>
       <span className="analysis-sort-heading">
         <span>{children}</span>
-        <span className="analysis-sort-controls">
-          <button
-            type="button"
-            className={activeDirection === "ascending" ? "analysis-sort-active" : ""}
-            aria-label={`${children} 오름차순 정렬`}
-            aria-pressed={activeDirection === "ascending"}
-            onClick={() => onSort(column, "ascending")}
-          >
-            <ChevronUpIcon aria-hidden="true" />
-          </button>
-          <button
-            type="button"
-            className={activeDirection === "descending" ? "analysis-sort-active" : ""}
-            aria-label={`${children} 내림차순 정렬`}
-            aria-pressed={activeDirection === "descending"}
-            onClick={() => onSort(column, "descending")}
-          >
-            <ChevronDownIcon aria-hidden="true" />
-          </button>
-        </span>
+        <button
+          type="button"
+          className={`analysis-sort-control${activeDirection ? " analysis-sort-active" : ""}`}
+          aria-label={`${children} ${nextDirection === "ascending" ? "오름차순" : "내림차순"}으로 정렬`}
+          onClick={() => onSort(column)}
+        >
+          <DirectionIcon aria-hidden="true" />
+        </button>
       </span>
     </th>
   );
 }
 
 function BreakdownTable({ rows }: { rows: AnalysisBreakdownRow[] }) {
-  const [sort, setSort] = useState<{ key: BreakdownSortKey; direction: SortDirection } | null>(null);
-  const handleSort = (key: BreakdownSortKey, direction: SortDirection) => setSort({ key, direction });
+  const [sort, setSort] = useState<{ key: BreakdownSortKey; direction: SortDirection }>({
+    key: "videoCount",
+    direction: "descending",
+  });
+  const handleSort = (key: BreakdownSortKey) => {
+    setSort((current) => ({
+      key,
+      direction: current.key === key && current.direction === "descending" ? "ascending" : "descending",
+    }));
+  };
   const sortedRows = useMemo(() => {
-    if (!sort) return rows;
     return rows
       .map((row, index) => ({ row, index }))
       .sort((left, right) => {
@@ -405,23 +402,45 @@ function PerformanceRanking({
 
 function PublishingHeatmap({ cells }: { cells: AnalysisInsights["publishingHeatmap"] }) {
   const weekdays = ["월", "화", "수", "목", "금", "토", "일"];
-  const hours = [0, 6, 12, 18];
+  const hours = [0, 3, 6, 9, 12, 15, 18, 21];
   const lookup = new Map(cells.map((cell) => [`${cell.weekday}-${cell.hourBucket}`, cell]));
   const max = Math.max(1, ...cells.map((cell) => cell.medianViewsPerDay));
   return (
-    <div className="analysis-heatmap">
-      <span />
-      {hours.map((hour) => <strong key={hour}>{String(hour).padStart(2, "0")}–{String((hour + 6) % 24).padStart(2, "0")}</strong>)}
-      {weekdays.flatMap((weekday, index) => [
-        <strong key={`${weekday}-label`}>{weekday}</strong>,
-        ...hours.map((hour) => {
-          const cell = lookup.get(`${index + 1}-${hour}`);
-          const intensity = cell ? 0.12 + (cell.medianViewsPerDay / max) * 0.78 : 0.04;
-          return <div key={`${weekday}-${hour}`} style={{ backgroundColor: `rgba(226, 111, 55, ${intensity})` }} title={cell ? `${weekday}요일 ${hour}시 · 영상 ${cell.videoCount}개 · 중앙 ${formatCount(Math.round(cell.medianViewsPerDay))}회/일` : "영상 없음"}>
-            {cell && <><b>{formatCount(Math.round(cell.medianViewsPerDay))}</b><small>{cell.videoCount}개</small></>}
-          </div>;
-        }),
-      ])}
+    <div className="analysis-heatmap-block">
+      <div className="analysis-heatmap-legend" role="note" aria-label="색 농도 범례: 연할수록 중앙 조회수가 낮고 진할수록 높습니다">
+        <span>낮음</span>
+        <span className="analysis-heatmap-gradient" aria-hidden="true" />
+        <span>높음</span>
+        <small>색이 진할수록 해당 시간대의 중앙 조회/일이 높습니다.</small>
+      </div>
+      <div className="analysis-heatmap-scroll">
+        <div className="analysis-heatmap">
+          <span />
+          {hours.map((hour) => <strong key={hour}>{String(hour).padStart(2, "0")}–{String((hour + 3) % 24).padStart(2, "0")}</strong>)}
+          {weekdays.flatMap((weekday, index) => [
+            <strong key={`${weekday}-label`}>{weekday}</strong>,
+            ...hours.map((hour) => {
+              const cell = lookup.get(`${index + 1}-${hour}`);
+              const endHour = (hour + 3) % 24;
+              const rangeLabel = `${String(hour).padStart(2, "0")}–${String(endHour).padStart(2, "0")}`;
+              const intensity = cell ? 0.12 + (cell.medianViewsPerDay / max) * 0.78 : 0;
+              const description = cell
+                ? `${weekday}요일 ${rangeLabel} · 영상 ${cell.videoCount}개 · 중앙 ${formatCount(Math.round(cell.medianViewsPerDay))}회/일`
+                : `${weekday}요일 ${rangeLabel} · 영상 없음`;
+              return <div
+                key={`${weekday}-${hour}`}
+                className={cell ? "" : "analysis-heatmap-empty-cell"}
+                role="img"
+                aria-label={description}
+                style={cell ? { backgroundColor: `rgba(226, 111, 55, ${intensity})` } : undefined}
+                title={description}
+              >
+                {cell && <><b>{formatCount(Math.round(cell.medianViewsPerDay))}</b><small>{cell.videoCount}개</small></>}
+              </div>;
+            }),
+          ])}
+        </div>
+      </div>
     </div>
   );
 }
@@ -623,9 +642,16 @@ export function AnalysisDashboard({
 
           {view !== "videos" && <section className="analysis-panel analysis-panel-comments"><div className="analysis-panel-heading"><div><p className="section-kicker">TOP COMMENTS</p><h2>반응이 큰 댓글</h2></div><span>좋아요순</span></div>{data.topComments.length ? <ul className="analysis-comment-list">{data.topComments.map((comment) => <li key={comment.id}><button type="button" onClick={(event: MouseEvent<HTMLButtonElement>) => onOpenComment(comment.id, event.currentTarget)}><span className="analysis-comment-meta"><strong>{comment.authorName ?? "YouTube 사용자"}</strong><span>{comment.isReply ? "답글" : "댓글"} · 좋아요 {formatCount(comment.likeCount)}</span></span><p>{comment.text ?? "내용이 없는 댓글입니다."}</p><small>{comment.channelTitle ?? "채널"} · {comment.videoTitle ?? comment.videoId}</small></button></li>)}</ul> : <p className="analysis-empty">선택한 조건의 댓글이 없습니다.</p>}</section>}
 
-          {view !== "comments" && <KeywordFrequencyPanel corpus="video" keywords={data.videoKeywords} indexedDocumentCount={data.keywordCoverage.indexedVideoDocuments} onSaved={() => setRefreshKey((key) => key + 1)} />}
-
-          {view !== "videos" && <KeywordFrequencyPanel corpus="comment" keywords={data.commentKeywords} indexedDocumentCount={data.keywordCoverage.indexedCommentDocuments} onSaved={() => setRefreshKey((key) => key + 1)} />}
+          <KeywordFrequencyPanel
+            key={view}
+            videoKeywords={data.videoKeywords}
+            commentKeywords={data.commentKeywords}
+            indexedVideoDocuments={data.keywordCoverage.indexedVideoDocuments}
+            indexedCommentDocuments={data.keywordCoverage.indexedCommentDocuments}
+            preferredCorpus={view === "comments" ? "comment" : "video"}
+            fullWidth={view === "videos"}
+            onSaved={() => setRefreshKey((key) => key + 1)}
+          />
         </div>
 
         <footer className="analysis-coverage"><InformationCircleIcon /><p>조회수·좋아요는 가장 최근 저장된 영상 통계이며, 기간 필터는 영상은 게시일·댓글은 댓글 게시일에 각각 적용됩니다. {data.coverage.partialData ? "일부 수집 대상은 댓글 범위가 제한되어 있습니다." : "현재 선택 범위의 저장 데이터를 모두 반영했습니다."}</p></footer>
