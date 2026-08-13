@@ -49,3 +49,45 @@ def test_transcript_language_miss_returns_safe_language_options() -> None:
     )
 
     assert payload == {"available_languages": [{"lang": "en", "name": "English"}]}
+
+
+def test_channel_metadata_page_with_next_token_is_valid() -> None:
+    def transport(_url, _method, _headers, _body, _timeout):
+        return 200, {
+            "channel": {"id": "UCexample", "videos": 135},
+            "pagination": {"next_page_token": "page-2"},
+        }
+
+    payload = SearchApiClient("top-secret", transport=transport).channel_videos(
+        channel_id="UCexample"
+    )
+
+    assert payload["pagination"]["next_page_token"] == "page-2"
+
+
+def test_populated_channel_without_items_or_token_is_incomplete() -> None:
+    def transport(_url, _method, _headers, _body, _timeout):
+        return 200, {"channel": {"id": "UCexample", "videos": 765}}
+
+    client = SearchApiClient("top-secret", transport=transport)
+    try:
+        client.channel_videos(channel_id="UCexample")
+    except SearchApiError as exc:
+        assert exc.status_code == 502
+        assert exc.error_code == "provider_incomplete_payload"
+    else:
+        raise AssertionError("An incomplete provider page must not be treated as empty")
+
+
+def test_success_status_with_error_payload_is_rejected() -> None:
+    def transport(_url, _method, _headers, _body, _timeout):
+        return 200, {"error": "temporary parser failure"}
+
+    client = SearchApiClient("top-secret", transport=transport)
+    try:
+        client.youtube(query="example")
+    except SearchApiError as exc:
+        assert exc.status_code == 502
+        assert exc.error_code == "provider_error_payload"
+    else:
+        raise AssertionError("A provider error body must not be accepted as success")

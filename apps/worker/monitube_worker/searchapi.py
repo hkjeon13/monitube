@@ -75,6 +75,17 @@ def _error_code(payload: Mapping[str, Any]) -> str:
     return "upstream_error"
 
 
+def _numeric_count(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        digits = "".join(character for character in value if character.isdigit())
+        return int(digits) if digits else None
+    return None
+
+
 class SearchApiClient:
     def __init__(
         self,
@@ -132,6 +143,12 @@ class SearchApiClient:
                 error_code=_error_code(payload),
                 payload=payload,
             )
+        if payload.get("error") is not None:
+            raise SearchApiError(
+                operation=operation,
+                status_code=502,
+                error_code="provider_error_payload",
+            )
         return payload
 
     def channel(self, *, channel_id: str) -> Mapping[str, Any]:
@@ -153,7 +170,7 @@ class SearchApiClient:
             and len(next_page_token.encode("utf-8"))
             >= self.channel_token_post_threshold_bytes
         )
-        return self.request(
+        payload = self.request(
             "youtube_channel_videos",
             {
                 "engine": "youtube_channel_videos",
@@ -164,6 +181,30 @@ class SearchApiClient:
             },
             use_post=use_post,
         )
+        item_arrays = [
+            payload.get(key)
+            for key in ("videos", "sections")
+            if isinstance(payload.get(key), list)
+        ]
+        has_item_array = bool(item_arrays)
+        has_items = any(items for items in item_arrays)
+        channel = payload.get("channel") or {}
+        pagination = payload.get("pagination") or {}
+        channel_id_present = bool(str(channel.get("id") or "").strip())
+        has_next_page = bool(str(pagination.get("next_page_token") or "").strip())
+        reported_count = _numeric_count(channel.get("videos"))
+        if not (
+            has_items
+            or (has_next_page and (next_page_token is not None or channel_id_present))
+            or reported_count == 0
+            or (next_page_token is not None and has_item_array)
+        ):
+            raise SearchApiError(
+                operation="youtube_channel_videos",
+                status_code=502,
+                error_code="provider_incomplete_payload",
+            )
+        return payload
 
     def youtube(
         self, *, query: str, page_token: str | None = None

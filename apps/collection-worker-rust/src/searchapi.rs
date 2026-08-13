@@ -70,10 +70,7 @@ impl SearchApiClient {
                 post,
             )
             .await?;
-        require_payload("youtube_channel_videos", payload, |value| {
-            value.get("videos").and_then(Value::as_array).is_some()
-                || value.get("sections").and_then(Value::as_array).is_some()
-        })
+        validate_channel_videos_payload(payload, page_token.is_some())
     }
 
     pub async fn youtube(
@@ -181,8 +178,15 @@ impl SearchApiClient {
             bytes.extend_from_slice(&chunk);
         }
         if status.is_success() {
-            return serde_json::from_slice::<Value>(&bytes)
-                .map_err(|_| SearchApiError::InvalidJson { operation });
+            let payload = serde_json::from_slice::<Value>(&bytes)
+                .map_err(|_| SearchApiError::InvalidJson { operation })?;
+            if payload.get("error").is_some() {
+                return Err(SearchApiError::ErrorPayload {
+                    operation,
+                    error_code: safe_error_code(&payload),
+                });
+            }
+            return Ok(payload);
         }
         let payload = serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null);
         Err(SearchApiError::Upstream {
@@ -192,6 +196,55 @@ impl SearchApiClient {
             available_languages: language_options(&payload),
         })
     }
+}
+
+fn validate_channel_videos_payload(
+    payload: Value,
+    is_follow_up_page: bool,
+) -> Result<Value, SearchApiError> {
+    let item_arrays = ["videos", "sections"]
+        .iter()
+        .filter_map(|key| payload.get(key).and_then(Value::as_array))
+        .collect::<Vec<_>>();
+    let has_item_array = !item_arrays.is_empty();
+    let has_items = item_arrays.iter().any(|items| !items.is_empty());
+    let channel_id = payload
+        .pointer("/channel/id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let has_next_page = payload
+        .pointer("/pagination/next_page_token")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    let reported_empty = payload.pointer("/channel/videos").and_then(numeric_count) == Some(0);
+    if has_items
+        || (has_next_page && (is_follow_up_page || channel_id.is_some()))
+        || reported_empty
+        || (is_follow_up_page && has_item_array)
+    {
+        Ok(payload)
+    } else {
+        Err(SearchApiError::IncompletePayload {
+            operation: "youtube_channel_videos",
+        })
+    }
+}
+
+fn numeric_count(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|number| i64::try_from(number).ok()))
+        .or_else(|| {
+            value.as_str().and_then(|text| {
+                let digits = text
+                    .chars()
+                    .filter(char::is_ascii_digit)
+                    .collect::<String>();
+                (!digits.is_empty())
+                    .then(|| digits.parse::<i64>().ok())
+                    .flatten()
+            })
+        })
 }
 
 fn require_payload(
@@ -269,8 +322,21 @@ pub enum SearchApiError {
     ResponseTooLarge,
     #[error("SearchAPI returned invalid JSON for {operation}")]
     InvalidJson { operation: &'static str },
+    #[error("SearchAPI returned an error payload for {operation} ({error_code})")]
+    ErrorPayload {
+        operation: &'static str,
+        error_code: String,
+    },
     #[error("SearchAPI returned an invalid payload for {operation}")]
     InvalidPayload { operation: &'static str },
+    #[error("SearchAPI returned an incomplete payload for {operation}")]
+    IncompletePayload { operation: &'static str },
+    #[error("SearchAPI pagination repeated a token for {operation}")]
+    PaginationCycle { operation: &'static str },
+    #[error("SearchAPI returned too many empty pages for {operation}")]
+    EmptyPagination { operation: &'static str },
+    #[error("SearchAPI could not resolve one exact channel candidate")]
+    ChannelResolutionAmbiguous,
     #[error("SearchAPI {operation} failed with HTTP {status} ({error_code})")]
     Upstream {
         operation: &'static str,
@@ -289,7 +355,12 @@ impl SearchApiError {
             Self::Transport { .. } => "network_error",
             Self::ResponseTooLarge => "response_too_large",
             Self::InvalidJson { .. } => "provider_invalid_json",
+            Self::ErrorPayload { .. } => "provider_error_payload",
             Self::InvalidPayload { .. } => "provider_invalid_payload",
+            Self::IncompletePayload { .. } => "provider_incomplete_payload",
+            Self::PaginationCycle { .. } => "provider_pagination_cycle",
+            Self::EmptyPagination { .. } => "provider_empty_pagination",
+            Self::ChannelResolutionAmbiguous => "channel_resolution_ambiguous",
             Self::Upstream { error_code, .. } => error_code,
         }
     }
@@ -300,7 +371,14 @@ impl SearchApiError {
             Self::Upstream { status, .. } => status.as_u16(),
             Self::InvalidConfig | Self::ClientBuild(_) => 500,
             Self::Transport { .. } => 503,
-            Self::ResponseTooLarge | Self::InvalidJson { .. } | Self::InvalidPayload { .. } => 502,
+            Self::ChannelResolutionAmbiguous => 422,
+            Self::ResponseTooLarge
+            | Self::InvalidJson { .. }
+            | Self::ErrorPayload { .. }
+            | Self::InvalidPayload { .. }
+            | Self::IncompletePayload { .. }
+            | Self::PaginationCycle { .. }
+            | Self::EmptyPagination { .. } => 502,
         }
     }
 
@@ -310,9 +388,15 @@ impl SearchApiError {
             Self::Transport { .. }
             | Self::ResponseTooLarge
             | Self::InvalidJson { .. }
-            | Self::InvalidPayload { .. } => true,
+            | Self::ErrorPayload { .. }
+            | Self::InvalidPayload { .. }
+            | Self::IncompletePayload { .. } => true,
             Self::Upstream { status, .. } => status.as_u16() == 429 || status.is_server_error(),
-            Self::InvalidConfig | Self::ClientBuild(_) => false,
+            Self::InvalidConfig
+            | Self::ClientBuild(_)
+            | Self::PaginationCycle { .. }
+            | Self::EmptyPagination { .. }
+            | Self::ChannelResolutionAmbiguous => false,
         }
     }
 
@@ -321,7 +405,11 @@ impl SearchApiError {
         match self {
             Self::Transport { operation, .. }
             | Self::InvalidJson { operation }
+            | Self::ErrorPayload { operation, .. }
             | Self::InvalidPayload { operation }
+            | Self::IncompletePayload { operation }
+            | Self::PaginationCycle { operation }
+            | Self::EmptyPagination { operation }
             | Self::Upstream { operation, .. } => Some(*operation),
             _ => None,
         }
@@ -362,5 +450,47 @@ mod tests {
         assert_eq!(error.code(), "provider_invalid_payload");
         assert_eq!(error.operation(), Some("youtube_channel"));
         assert!(error.is_retryable());
+    }
+
+    #[test]
+    fn channel_metadata_page_with_next_token_is_valid() {
+        let payload = json!({
+            "channel": {"id": "UCexample", "videos": 135},
+            "pagination": {"next_page_token": "page-2"}
+        });
+        assert!(validate_channel_videos_payload(payload, false).is_ok());
+    }
+
+    #[test]
+    fn genuinely_empty_channel_page_is_valid() {
+        let payload = json!({"channel": {"id": "UCempty", "videos": 0}});
+        assert!(validate_channel_videos_payload(payload, false).is_ok());
+    }
+
+    #[test]
+    fn populated_channel_without_items_or_token_is_incomplete() {
+        assert!(matches!(
+            validate_channel_videos_payload(
+                json!({
+                    "channel": {"id": "UCmissing", "videos": 765}
+                }),
+                false,
+            ),
+            Err(error) if error.code() == "provider_incomplete_payload" && error.is_retryable()
+        ));
+    }
+
+    #[test]
+    fn pagination_safety_errors_are_not_retryable() {
+        let cycle = SearchApiError::PaginationCycle {
+            operation: "youtube_channel_videos",
+        };
+        let empty = SearchApiError::EmptyPagination {
+            operation: "youtube_channel_videos",
+        };
+        assert_eq!(cycle.code(), "provider_pagination_cycle");
+        assert_eq!(empty.code(), "provider_empty_pagination");
+        assert!(!cycle.is_retryable());
+        assert!(!empty.is_retryable());
     }
 }

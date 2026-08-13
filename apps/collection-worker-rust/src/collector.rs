@@ -7,6 +7,7 @@ use monitube_collection_store::{ClaimedJob, CollectionSource, CollectionStore, S
 use serde_json::{Value, json};
 use sha2::Digest;
 use sqlx::PgPool;
+use std::collections::HashSet;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -718,7 +719,7 @@ impl Collector {
                 Ok(payload) => {
                     self.log_provider_request(job.id, "youtube", 200, None, item_count(&payload))
                         .await?;
-                    channel_input = first_searchapi_channel_id(&payload)?;
+                    channel_input = resolve_searchapi_channel_id(&payload, input)?;
                 }
                 Err(error) => {
                     self.log_searchapi_error(job.id, "youtube", &error).await?;
@@ -799,7 +800,23 @@ impl Collector {
             .and_then(|value| i32::try_from(value).ok())
             .unwrap_or(0)
             .max(0);
+        let mut consecutive_empty_pages = job
+            .checkpoint
+            .get("channelConsecutiveEmptyPages")
+            .and_then(Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok())
+            .unwrap_or(0)
+            .max(0);
+        let mut seen_page_tokens = HashSet::new();
         while ids.len() < maximum {
+            if let Some(token) = page_token.as_deref() {
+                if !seen_page_tokens.insert(token.to_owned()) {
+                    return Err(SearchApiError::PaginationCycle {
+                        operation: "youtube_channel_videos",
+                    }
+                    .into());
+                }
+            }
             self.store.renew(job.id, &job.lease_owner, 180).await?;
             let response = self
                 .searchapi()?
@@ -823,13 +840,35 @@ impl Collector {
                     return Err(error.into());
                 }
             };
+            let page_item_count = searchapi_video_id_count(&payload);
             append_searchapi_video_ids(&mut ids, &payload, maximum);
             pages = pages.saturating_add(1);
-            page_token = payload
+            let next_page_token = payload
                 .pointer("/pagination/next_page_token")
                 .and_then(Value::as_str)
                 .filter(|value| !value.is_empty())
                 .map(str::to_owned);
+            if next_page_token
+                .as_ref()
+                .is_some_and(|token| seen_page_tokens.contains(token))
+            {
+                return Err(SearchApiError::PaginationCycle {
+                    operation: "youtube_channel_videos",
+                }
+                .into());
+            }
+            consecutive_empty_pages = if page_item_count == 0 {
+                consecutive_empty_pages.saturating_add(1)
+            } else {
+                0
+            };
+            if consecutive_empty_pages > 2 {
+                return Err(SearchApiError::EmptyPagination {
+                    operation: "youtube_channel_videos",
+                }
+                .into());
+            }
+            page_token = next_page_token;
             let checkpoint = json!({
                 "stage": "searchapi_channel_videos", "scopeKey": channel_id,
                 "pageToken": page_token, "batchCursor": pages,
@@ -837,6 +876,7 @@ impl Collector {
                 "channelReconciliationComplete": page_token.is_none(),
                 "channelReportedVideoCount": optional_count(channel, "videos"),
                 "channelStoredVideoCount": ids.len(),
+                "channelConsecutiveEmptyPages": consecutive_empty_pages,
                 "discoveredIds": ids,
             });
             self.store
@@ -1734,6 +1774,29 @@ fn append_searchapi_video_ids(ids: &mut Vec<String>, payload: &Value, maximum: u
     }
 }
 
+fn searchapi_video_id_count(payload: &Value) -> usize {
+    let video_count = payload
+        .get("videos")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let short_count = payload
+        .get("sections")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|section| {
+            optional_text(section, "section_name")
+                .or_else(|| optional_text(section, "section_title"))
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .contains("short")
+        })
+        .filter_map(|section| section.get("items").and_then(Value::as_array))
+        .map(Vec::len)
+        .sum::<usize>();
+    video_count.saturating_add(short_count)
+}
+
 fn normalized_channel_input(input: &str) -> String {
     let trimmed = input.trim().trim_end_matches('/');
     if let Ok(parsed) = url::Url::parse(trimmed) {
@@ -1767,33 +1830,68 @@ fn is_channel_identifier(value: &str) -> bool {
     value.starts_with('@') || (value.starts_with("UC") && value.len() == 24)
 }
 
-fn first_searchapi_channel_id(payload: &Value) -> Result<String, CollectorError> {
-    if let Some(id) = payload
+fn resolve_searchapi_channel_id(payload: &Value, query: &str) -> Result<String, SearchApiError> {
+    let mut candidates = payload
         .get("channels")
-        .and_then(Value::as_array)
-        .and_then(|items| items.first())
-        .and_then(|item| item.get("id"))
-        .and_then(Value::as_str)
-    {
-        return Ok(id.to_owned());
-    }
-    payload
-        .get("sections")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .flat_map(|section| {
-            section
-                .get("items")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-        })
-        .find(|item| item.get("length").is_none())
-        .and_then(|item| item.get("id"))
-        .and_then(Value::as_str)
+        .collect::<Vec<_>>();
+    candidates.extend(
+        payload
+            .get("sections")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .flat_map(|section| {
+                section
+                    .get("items")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+            })
+            .filter(|item| item.get("length").is_none()),
+    );
+    let query_key = query.trim().trim_start_matches('@').to_lowercase();
+    let mut exact_ids = candidates
+        .iter()
+        .filter(|candidate| channel_candidate_matches(candidate, &query_key))
+        .filter_map(|candidate| optional_text(candidate, "id"))
         .map(str::to_owned)
-        .ok_or(CollectorError::InvalidPayload)
+        .collect::<Vec<_>>();
+    exact_ids.sort_unstable();
+    exact_ids.dedup();
+    if exact_ids.len() == 1 {
+        return Ok(exact_ids.remove(0));
+    }
+    let mut all_ids = candidates
+        .iter()
+        .filter_map(|candidate| optional_text(candidate, "id"))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    all_ids.sort_unstable();
+    all_ids.dedup();
+    if all_ids.len() == 1 {
+        return Ok(all_ids.remove(0));
+    }
+    Err(SearchApiError::ChannelResolutionAmbiguous)
+}
+
+fn channel_candidate_matches(candidate: &Value, query_key: &str) -> bool {
+    optional_text(candidate, "title").is_some_and(|title| title.trim().to_lowercase() == query_key)
+        || optional_text(candidate, "handle")
+            .is_some_and(|handle| handle.trim().trim_start_matches('@').to_lowercase() == query_key)
+        || ["link", "url"]
+            .iter()
+            .filter_map(|key| optional_text(candidate, key))
+            .filter_map(handle_from_channel_link)
+            .any(|handle| handle.to_lowercase() == query_key)
+}
+
+fn handle_from_channel_link(link: &str) -> Option<&str> {
+    link.split('/')
+        .find(|segment| segment.starts_with('@'))
+        .map(|handle| handle.trim_start_matches('@'))
 }
 
 fn optional_count(value: &Value, key: &str) -> Option<i64> {
@@ -2008,6 +2106,39 @@ mod tests {
         assert_eq!(comments[1].parent_id.as_deref(), Some("top-1"));
         assert_eq!(comments[0].text.as_deref(), Some("top"));
         assert_eq!(comments[1].text.as_deref(), Some("reply"));
+        Ok(())
+    }
+
+    #[test]
+    fn resolves_exact_channel_handle_from_search_link() -> Result<(), SearchApiError> {
+        let payload = json!({"channels": [
+            {"id": "UCwrong", "title": "Another", "link": "https://youtube.com/@other"},
+            {"id": "UCright", "title": "Target", "link": "https://youtube.com/@seohee_xoxo"}
+        ]});
+        assert_eq!(
+            resolve_searchapi_channel_id(&payload, "seohee_xoxo")?,
+            "UCright"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn refuses_ambiguous_channel_search_results() {
+        let payload = json!({"channels": [
+            {"id": "UCfirst", "title": "First"},
+            {"id": "UCsecond", "title": "Second"}
+        ]});
+        assert!(matches!(
+            resolve_searchapi_channel_id(&payload, "unknown"),
+            Err(error)
+                if error.code() == "channel_resolution_ambiguous" && !error.is_retryable()
+        ));
+    }
+
+    #[test]
+    fn accepts_a_single_unambiguous_channel_candidate() -> Result<(), SearchApiError> {
+        let payload = json!({"channels": [{"id": "UConly", "title": "Only"}]});
+        assert_eq!(resolve_searchapi_channel_id(&payload, "query")?, "UConly");
         Ok(())
     }
 }

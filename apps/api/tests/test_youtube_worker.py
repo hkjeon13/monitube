@@ -3,7 +3,9 @@ from datetime import timedelta
 
 from monitube_api.domain import CommentRecord, JobState, QuotaBucket, SourceType, VideoRecord, new_id, utcnow
 from monitube_api.repositories import InMemoryRepository
+from monitube_worker.collection.discovery import _select_searchapi_channel_id
 from monitube_worker.collector import YouTubeCollector, quota_retry_delay_seconds
+from monitube_worker.searchapi import SearchApiError
 from monitube_worker.runner import JobRunner
 from monitube_worker.youtube_data import YouTubeApiError
 
@@ -1109,6 +1111,35 @@ class SearchDiscoveryClient:
         }
 
 
+class MetadataFirstSearchDiscoveryClient:
+    def __init__(self) -> None:
+        self.page_tokens: list[str | None] = []
+
+    def channel(self, *, channel_id: str):
+        assert channel_id == "@metadata"
+        return {
+            "channel": {
+                "id": "UCmetadataabcdefghijklmn",
+                "handle": "@metadata",
+                "title": "Metadata",
+                "videos": 1,
+            }
+        }
+
+    def channel_videos(
+        self, *, channel_id: str, next_page_token: str | None = None
+    ):
+        assert channel_id == "UCmetadataabcdefghijklmn"
+        self.page_tokens.append(next_page_token)
+        if next_page_token is None:
+            return {
+                "channel": {"id": channel_id, "videos": 1},
+                "pagination": {"next_page_token": "page-2"},
+            }
+        assert next_page_token == "page-2"
+        return {"videos": [{"id": "metadata-page-video"}]}
+
+
 class SearchDeficitDiscoveryClient:
     def __init__(self, *, reported_video_count: int) -> None:
         self.reported_video_count = reported_video_count
@@ -1242,6 +1273,59 @@ def test_searchapi_channel_without_count_deficit_checks_head_page_only() -> None
     assert backfill_required is False
     assert discovery_client.page_tokens == [None]
     assert video_ids == [f"known-{index}" for index in range(10)]
+
+
+def test_searchapi_channel_follows_metadata_only_head_to_video_page() -> None:
+    repository = InMemoryRepository()
+    source = repository.create_source(
+        source_type=SourceType.CHANNEL,
+        config={"input": "@metadata", "collectAllVideos": True},
+    )
+    job = repository.create_job(
+        source_id=source.id,
+        include_comments=False,
+        max_videos=None,
+        max_comments_per_video=None,
+    )
+    discovery_client = MetadataFirstSearchDiscoveryClient()
+    collector = YouTubeCollector(
+        repository,
+        DirectVideoClient(),
+        discovery_provider="searchapi",
+        discovery_client=discovery_client,
+    )
+
+    video_ids, _, backfill_required = collector._channel_video_ids(
+        job, source.config, incremental_refresh=False
+    )
+
+    assert backfill_required is True
+    assert discovery_client.page_tokens == [None, "page-2"]
+    assert video_ids == ["metadata-page-video"]
+
+
+def test_searchapi_channel_selector_matches_exact_handle_link() -> None:
+    candidates = [
+        {"id": "UCwrong", "title": "Another", "link": "https://youtube.com/@other"},
+        {"id": "UCright", "title": "Target", "link": "https://youtube.com/@seohee_xoxo"},
+    ]
+
+    assert _select_searchapi_channel_id(candidates, "seohee_xoxo") == "UCright"
+
+
+def test_searchapi_channel_selector_refuses_ambiguous_results() -> None:
+    candidates = [
+        {"id": "UCfirst", "title": "First"},
+        {"id": "UCsecond", "title": "Second"},
+    ]
+
+    try:
+        _select_searchapi_channel_id(candidates, "unknown")
+    except SearchApiError as exc:
+        assert exc.status_code == 422
+        assert exc.error_code == "channel_resolution_ambiguous"
+    else:
+        raise AssertionError("The first search result must not be selected implicitly")
 
 
 def test_searchapi_discovery_collects_channel_and_keyword_video_ids() -> None:

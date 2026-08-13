@@ -21,6 +21,42 @@ def _rfc3339(value: datetime) -> str:
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
+def _select_searchapi_channel_id(
+    candidates: Iterable[Mapping[str, Any]], query: str
+) -> str:
+    candidate_list = list(candidates)
+    query_key = query.strip().lstrip("@").casefold()
+
+    def matches(candidate: Mapping[str, Any]) -> bool:
+        title = str(candidate.get("title") or "").strip().casefold()
+        handle = str(candidate.get("handle") or "").strip().lstrip("@").casefold()
+        link_handles = {
+            segment.lstrip("@").casefold()
+            for key in ("link", "url")
+            for segment in str(candidate.get(key) or "").split("/")
+            if segment.startswith("@")
+        }
+        return query_key in {title, handle, *link_handles}
+
+    exact_ids = {
+        str(candidate["id"])
+        for candidate in candidate_list
+        if candidate.get("id") and matches(candidate)
+    }
+    if len(exact_ids) == 1:
+        return exact_ids.pop()
+    all_ids = {
+        str(candidate["id"]) for candidate in candidate_list if candidate.get("id")
+    }
+    if len(all_ids) == 1:
+        return all_ids.pop()
+    raise SearchApiError(
+        operation="youtube_channel_resolution",
+        status_code=422,
+        error_code="channel_resolution_ambiguous",
+    )
+
+
 class DiscoveryCollectionMixin:
     def _channel_discovery_pages(
         self,
@@ -64,6 +100,10 @@ class DiscoveryCollectionMixin:
             next_page_token = str(state.get("nextPageToken") or "") or None
             backfill_pages = as_int(state.get("backfillPages"))
             backfill_required = bool(state.get("backfillRequired"))
+            consecutive_empty_pages = as_int(state.get("consecutiveEmptyPages"))
+            consumed_page_tokens = {
+                str(value) for value in state.get("consumedPageTokens", []) if value
+            }
         else:
             head_payload = fetch_page(None)
             head_ids = list(dict.fromkeys(page_ids_from(head_payload)))
@@ -83,6 +123,10 @@ class DiscoveryCollectionMixin:
                 ) or None
                 next_page_token = saved_token or next_page_token
             backfill_pages = 0
+            consecutive_empty_pages = int(
+                provider == "searchapi" and not head_ids and bool(next_page_token)
+            )
+            consumed_page_tokens: set[str] = set()
             state = {
                 "version": _CHANNEL_DISCOVERY_VERSION,
                 "provider": provider,
@@ -97,6 +141,8 @@ class DiscoveryCollectionMixin:
                 "nextPageToken": next_page_token,
                 "headNextPageToken": head_next_page_token,
                 "backfillPages": backfill_pages,
+                "consecutiveEmptyPages": consecutive_empty_pages,
+                "consumedPageTokens": [],
                 "newVideoCount": len(set(head_ids) - head_known_ids),
                 "complete": False,
             }
@@ -110,11 +156,21 @@ class DiscoveryCollectionMixin:
             )
 
         while (
-            backfill_required
+            (
+                backfill_required
+                or (provider == "searchapi" and not collection_ids)
+            )
             and next_page_token
             and backfill_pages < _CHANNEL_BACKFILL_PAGES_PER_RUN
             and (limit is None or len(collection_ids) < limit)
         ):
+            if next_page_token in consumed_page_tokens:
+                raise SearchApiError(
+                    operation="youtube_channel_videos",
+                    status_code=422,
+                    error_code="provider_pagination_cycle",
+                )
+            consumed_page_tokens.add(next_page_token)
             try:
                 payload = fetch_page(next_page_token)
             except SearchApiError as exc:
@@ -143,9 +199,30 @@ class DiscoveryCollectionMixin:
                 )
                 continue
             page_ids = list(dict.fromkeys(page_ids_from(payload)))
+            candidate_next_page_token = next_token_from(payload)
+            if candidate_next_page_token in consumed_page_tokens:
+                raise SearchApiError(
+                    operation="youtube_channel_videos",
+                    status_code=422,
+                    error_code="provider_pagination_cycle",
+                )
             if not page_ids:
-                next_page_token = None
+                consecutive_empty_pages += 1
+                if (
+                    provider == "searchapi"
+                    and candidate_next_page_token
+                    and consecutive_empty_pages > 2
+                ):
+                    raise SearchApiError(
+                        operation="youtube_channel_videos",
+                        status_code=422,
+                        error_code="provider_empty_pagination",
+                    )
+                next_page_token = (
+                    candidate_next_page_token if provider == "searchapi" else None
+                )
             else:
+                consecutive_empty_pages = 0
                 known_ids = self.repository.source_video_ids(job.source_id, page_ids)
                 new_ids = [
                     video_id
@@ -159,7 +236,7 @@ class DiscoveryCollectionMixin:
                 state["newVideoCount"] = as_int(state.get("newVideoCount")) + len(
                     new_ids
                 )
-                next_page_token = next_token_from(payload)
+                next_page_token = candidate_next_page_token
             backfill_pages += 1
             state.update(
                 {
@@ -167,6 +244,8 @@ class DiscoveryCollectionMixin:
                     "seenIds": sorted(seen_ids),
                     "nextPageToken": next_page_token,
                     "backfillPages": backfill_pages,
+                    "consecutiveEmptyPages": consecutive_empty_pages,
+                    "consumedPageTokens": sorted(consumed_page_tokens),
                 }
             )
             self._active_checkpoint["channelDiscovery"] = state
@@ -185,6 +264,8 @@ class DiscoveryCollectionMixin:
                 "seenIds": sorted(seen_ids),
                 "nextPageToken": next_page_token,
                 "backfillPages": backfill_pages,
+                "consecutiveEmptyPages": consecutive_empty_pages,
+                "consumedPageTokens": sorted(consumed_page_tokens),
                 "complete": True,
                 "reconciliationComplete": reconciliation_complete,
             }
@@ -278,15 +359,15 @@ class DiscoveryCollectionMixin:
                 client.youtube,
                 query=resolution.normalized,
             )
-            candidates = search_payload.get("channels") or []
+            candidates = list(search_payload.get("channels") or [])
             if not candidates:
                 for section in search_payload.get("sections") or []:
                     for item in section.get("items") or []:
                         if item.get("id") and not item.get("length"):
                             candidates.append(item)
-            if not candidates or not candidates[0].get("id"):
-                raise RuntimeError("No YouTube channel matched this source input")
-            channel_input = str(candidates[0]["id"])
+            channel_input = _select_searchapi_channel_id(
+                candidates, resolution.normalized
+            )
         payload = self._searchapi_call(
             job,
             "youtube_channel",
