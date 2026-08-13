@@ -244,6 +244,18 @@ async fn run_collection_retry(
         FROM sync_jobs AS parent
         WHERE parent.id = ANY($1::uuid[])
           AND parent.state = 'failed'
+          AND (
+            parent.target_id IS NULL
+            OR NOT EXISTS (
+              SELECT 1
+              FROM sync_jobs AS active
+              WHERE active.target_id = parent.target_id
+                AND active.id <> parent.id
+                AND active.state IN (
+                  'queued', 'running', 'waiting_retry', 'waiting_quota'
+                )
+            )
+          )
           AND NOT EXISTS (
             SELECT 1
             FROM sync_jobs AS child
