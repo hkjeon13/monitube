@@ -220,8 +220,8 @@ async fn run_collection_retry(
     .bind(&parent_ids)
     .fetch_one(&mut *transaction)
     .await?;
-    let expected_parent_count = i64::try_from(parent_ids.len())
-        .map_err(|_| MaintenanceError::UnsafeRecoveryParents)?;
+    let expected_parent_count =
+        i64::try_from(parent_ids.len()).map_err(|_| MaintenanceError::UnsafeRecoveryParents)?;
     if parent_count != expected_parent_count || eligible_parent_count != expected_parent_count {
         return Err(MaintenanceError::UnsafeRecoveryParents);
     }
@@ -238,11 +238,26 @@ async fn run_collection_retry(
     .bind(&request.job_ids)
     .fetch_one(&mut *transaction)
     .await?;
-    if unselected_failure_count != 0 {
-        return Err(MaintenanceError::UnselectedFailedChildren(
-            unselected_failure_count,
-        ));
-    }
+    let restorable_parent_ids = sqlx::query_scalar::<_, Uuid>(
+        r"
+        SELECT parent.id
+        FROM sync_jobs AS parent
+        WHERE parent.id = ANY($1::uuid[])
+          AND parent.state = 'failed'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM sync_jobs AS child
+            WHERE child.parent_job_id = parent.id
+              AND child.state = 'failed'
+              AND NOT (child.id = ANY($2::uuid[]))
+          )
+        ORDER BY parent.id
+        ",
+    )
+    .bind(&parent_ids)
+    .bind(&request.job_ids)
+    .fetch_all(&mut *transaction)
+    .await?;
 
     for candidate in &candidates {
         tracing::info!(
@@ -253,6 +268,12 @@ async fn run_collection_retry(
             "validated collection recovery candidate"
         );
     }
+    tracing::info!(
+        selected_children = candidates.len(),
+        restorable_parents = restorable_parent_ids.len(),
+        unselected_failed_children = unselected_failure_count,
+        "validated collection recovery scope"
+    );
     if !request.apply {
         transaction.rollback().await?;
         tracing::info!(
@@ -288,7 +309,7 @@ async fn run_collection_retry(
         WHERE id = ANY($1::uuid[]) AND state = 'failed'
         ",
     )
-    .bind(&parent_ids)
+    .bind(&restorable_parent_ids)
     .execute(&mut *transaction)
     .await?;
     sqlx::query(
@@ -298,7 +319,7 @@ async fn run_collection_retry(
         WHERE job_id = ANY($1::uuid[]) AND status = 'failed'
         ",
     )
-    .bind(&parent_ids)
+    .bind(&restorable_parent_ids)
     .execute(&mut *transaction)
     .await?;
     transaction.commit().await?;
@@ -862,8 +883,6 @@ enum MaintenanceError {
     RecoverySetMismatch { requested: usize, found: usize },
     #[error("collection recovery candidate {0} is not a known failed child database job")]
     UnsafeRecoveryCandidate(Uuid),
-    #[error("collection recovery omitted {0} failed children for the selected parents")]
-    UnselectedFailedChildren(i64),
     #[error("collection recovery parent set is missing or already terminal")]
     UnsafeRecoveryParents,
     #[error("collection recovery state changed while applying")]
