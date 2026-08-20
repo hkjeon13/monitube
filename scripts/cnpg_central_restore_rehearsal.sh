@@ -24,18 +24,35 @@ production_table_count="$(kubectl -n "$target_namespace" exec "$target_primary" 
 exists="$(kubectl -n "$target_namespace" exec "$target_primary" -c postgres -- psql -X -U postgres -d postgres -Atc "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = '$rehearsal_database')")"
 [ "$exists" = "f" ] || { echo "rehearsal database already exists: $rehearsal_database" >&2; exit 1; }
 
-remote_dump="/tmp/${rehearsal_database}.pg_dump"
+# CNPG's container root filesystem is read-only. Its data volume is the only
+# writable location available in the managed postgres container; keep the
+# staged file hidden and remove it on every exit path. This is never a PG data
+# file and is copied only while the restore command is about to run.
+remote_dump="/var/lib/postgresql/data/.${rehearsal_database}.pg_dump"
+remote_toc="/var/lib/postgresql/data/.${rehearsal_database}.toc"
+remote_filtered_toc="/var/lib/postgresql/data/.${rehearsal_database}.filtered.toc"
 cleanup() {
-  kubectl -n "$target_namespace" exec "$target_primary" -c postgres -- rm -f "$remote_dump" >/dev/null 2>&1 || true
+  kubectl -n "$target_namespace" exec "$target_primary" -c postgres -- rm -f "$remote_dump" "$remote_toc" "$remote_filtered_toc" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT HUP INT TERM
 
 echo "creating isolated rehearsal database: $rehearsal_database"
 kubectl -n "$target_namespace" exec "$target_primary" -c postgres -- createdb -U postgres --owner=monitube "$rehearsal_database"
+echo "creating source-required extensions with central DBA authority"
+# Extension ownership differs across PostgreSQL majors: pg_stat_statements is
+# superuser-only and the trusted extensions can also be owned by an operator.
+# Central DBA owns all three, and their CREATE/COMMENT TOC entries are excluded
+# below. Application tables/functions still restore as the monitube role.
+kubectl -n "$target_namespace" exec "$target_primary" -c postgres -- \
+  psql -X -U postgres -d "$rehearsal_database" -v ON_ERROR_STOP=1 -c \
+  "CREATE EXTENSION IF NOT EXISTS pgcrypto; CREATE EXTENSION IF NOT EXISTS pg_trgm; CREATE EXTENSION IF NOT EXISTS pg_stat_statements;"
 echo "copying dump to current central primary"
 kubectl -n "$target_namespace" cp "$dump_path" "$target_primary:$remote_dump" -c postgres
+echo "filtering superuser-owned pg_stat_statements TOC entries"
+kubectl -n "$target_namespace" exec "$target_primary" -c postgres -- sh -ec \
+  "pg_restore --list '$remote_dump' > '$remote_toc'; grep -Ev 'EXTENSION (pg_stat_statements|pg_trgm|pgcrypto)' '$remote_toc' > '$remote_filtered_toc'"
 echo "restoring with no owner/ACL replay and role=monitube"
-kubectl -n "$target_namespace" exec "$target_primary" -c postgres -- pg_restore -U postgres --role=monitube --no-owner --no-privileges --exit-on-error --jobs="$parallel_jobs" --dbname="$rehearsal_database" "$remote_dump"
+kubectl -n "$target_namespace" exec "$target_primary" -c postgres -- pg_restore -U postgres --role=monitube --no-owner --no-privileges --exit-on-error --jobs="$parallel_jobs" --use-list="$remote_filtered_toc" --dbname="$rehearsal_database" "$remote_dump"
 echo "analyzing restored database"
 kubectl -n "$target_namespace" exec "$target_primary" -c postgres -- vacuumdb -U postgres --role=monitube --analyze-in-stages --jobs="$parallel_jobs" "$rehearsal_database"
 kubectl -n "$target_namespace" exec "$target_primary" -c postgres -- psql -X -U postgres -d "$rehearsal_database" -Atc "SELECT current_database(); SELECT count(*) FROM pg_tables WHERE schemaname = 'public'; SELECT count(*) FROM monitube_schema_migrations; SELECT pg_size_pretty(pg_database_size(current_database()));"
