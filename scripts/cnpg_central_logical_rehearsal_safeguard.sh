@@ -23,8 +23,8 @@ case "$min_free_bytes" in
 esac
 command -v kubectl >/dev/null 2>&1 || { echo "missing required command: kubectl" >&2; exit 2; }
 
-free_bytes="$(kubectl -n "$source_namespace" exec "$source_pod" -- sh -ec \
-  "df -PB1 /var/lib/postgresql/data | awk 'NR == 2 { print \\$4 }'")"
+free_bytes="$(kubectl -n "$source_namespace" exec "$source_pod" -- \
+  df -PB1 /var/lib/postgresql/data | awk 'NR == 2 { print $4 }')"
 case "$free_bytes" in
   ''|*[!0-9]*) echo "could not read source free bytes: $free_bytes" >&2; exit 1 ;;
 esac
