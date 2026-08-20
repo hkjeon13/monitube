@@ -97,6 +97,15 @@ RECOVERY_TARGET_TIME=YYYY-MM-DDTHH:MM:SSZ \
 rehearsal DB 이름이 안전 패턴에 맞지 않으면 실패한다. source writer/endpoint와 production
 target에는 application write를 하지 않는다.
 
+결과와 lag/slot 증적을 기록한 뒤에만 아래 cleanup을 실행한다. 정확히 timestamp 형식의 격리
+rehearsal 이름과 `--confirm` 없이는 동작하지 않으며, target subscription을 먼저 제거한 후
+source publication·잔여 slot·temporary role과 격리 database를 정리한다.
+
+```sh
+./scripts/cnpg_central_logical_rehearsal_cleanup.sh \
+  monitube_logical_rehearsal_YYYYMMDD_HHMMSS --confirm
+```
+
 ## 3. Chart 준비와 렌더링 검증
 
 central mode는 새 CNPG Cluster를 만들지 않는다. `cnpg.enabled`는 false로 유지한다.
