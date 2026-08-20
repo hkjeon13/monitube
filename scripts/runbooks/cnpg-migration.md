@@ -272,3 +272,23 @@ PostgreSQL 컨테이너의 `pg_restore --list`로 TOC를 검증하고 checksum/m
 ```sh
 ./scripts/cnpg_central_logical_backup.sh /data/psyche/backups/monitube
 ```
+
+### CNPG Backup CRD/controller compatibility
+
+physical backup을 요청하기 전에는 controller가 쓰는 Backup status field를 현재 CRD가 보존하는지
+확인한다. controller만 upgrade되고 CRD가 이전 schema에 머물면 `sessionID`가 API server에서
+제거되어 controller가 모든 backup을 `instance manager was restarted during backup`으로 즉시
+실패 처리할 수 있다.
+
+```sh
+kubectl get crd backups.postgresql.cnpg.io -o json | jq '{
+  controllerGen: .metadata.annotations["controller-gen.kubebuilder.io/version"],
+  hasSessionID: (.spec.versions[0].schema.openAPIV3Schema.properties.status.properties.instanceID.properties.sessionID != null),
+  hasMajorVersion: (.spec.versions[0].schema.openAPIV3Schema.properties.status.properties.majorVersion != null)
+}'
+```
+
+controller와 CRD가 불일치하면 backup을 반복 요청하지 않는다. 중앙 DB 운영자 승인 후 controller와
+정확히 같은 공식 release의 **`backups.postgresql.cnpg.io` CRD만** server-side diff로 먼저 검토하고,
+기존 field manager 충돌 여부도 확인한다. CRD 적용 뒤 새 Backup의 `status.instanceID.sessionID`와
+`status.majorVersion`이 기록되는 것을 확인한 뒤에만 physical backup 성공을 판정한다.

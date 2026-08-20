@@ -348,9 +348,8 @@ PK 구간별 bounded query로 실행한다.
 - post-cutover logical backup `monitube-central-20260820T094445Z.pg_dump`는
   3,560,228,285 bytes, SHA-256
   `5fff62e201498e2394db5a5b10d06d018d2642ab145d4fd401af531dc0097b56`이며 TOC/manifest를
-  검증했다. physical `central-pg-data-post-cutover-20260820093953`은 Barman plugin에서
-  진행 중이다. central node free가 약 85GiB여서 23GiB logical backup의 3-replica isolated
-  full restore는 지금 병행하지 않는다. live final restore 성공과 새 TOC verification을 보존하고,
+  검증했다. central node free가 약 85GiB여서 23GiB logical backup의 3-replica isolated full
+  restore는 지금 병행하지 않는다. live final restore 성공과 새 TOC verification을 보존하고,
   별도 capacity window에서 post-cutover isolated restore drill을 수행한다.
 - revision 19에서 legacy PostgreSQL의 migration-only logical replication opt-in을 해제했다.
   `wal_level=replica`, replication slot 0, source Pod Ready/restart 0을 재확인했다.
@@ -371,6 +370,13 @@ PK 구간별 bounded query로 실행한다.
   replica replay는 약 2시간 뒤처져 있어 이 시점의 강제 failover는 금지한다. Cluster가 3/3
   Healthy와 실제 DB readiness로 복귀한 뒤에만 `spec.target=primary` physical backup을 새로
   요청한다.
+- CRD/controller compatibility 원인을 수정했다. controller는 1.27.4였지만
+  `backups.postgresql.cnpg.io` CRD가 이전 schema라 `status.instanceID.sessionID`와
+  `status.majorVersion`을 버렸고, 모든 새 backup을 instance-manager restart로 오판했다. 공식
+  1.27.4 Backup CRD 단일 resource의 diff가 optional field 추가뿐임을 확인한 뒤 적용했다.
+  실패 CR 둘은 감사용으로 보존했고, 새 primary 요청
+  `central-pg-data-post-cutover-primary-v2-20260820t102000`은 session ID와 major version 17을
+  status에 기록한 `started` 상태다. 완료 backup ID/stop time이 다음 gate다.
 
 ## 11. Rollback 결정표
 
