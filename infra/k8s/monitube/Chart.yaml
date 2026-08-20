@@ -2,6 +2,6 @@ apiVersion: v2
 name: monitube
 description: Monitube application workloads for Kubernetes, deployable through Devtron.
 type: application
-version: 0.2.5
+version: 0.2.6
 # Tracks the application, not the chart. Bump alongside MONITUBE_IMAGE_TAG.
 appVersion: "0.2.0"
