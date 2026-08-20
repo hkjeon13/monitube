@@ -356,6 +356,12 @@ PK 구간별 bounded query로 실행한다.
   `wal_level=replica`, replication slot 0, source Pod Ready/restart 0을 재확인했다.
   `2026-08-20T09:59Z` soak 점검에서 API와 세 worker는 모두 1/1 Ready, `/ready` 200,
   legacy app connection 0, central ungranted lock 0 및 recent fatal DB error 0이었다.
+- `2026-08-20T10:04Z` 현재 physical backup CR은 `phase=started`이나 `startedAt`과
+  `backupId`가 아직 없다. 당시 primary는 Healthy이나 standby 2개가 archive recovery로
+  뒤처져 기본 `prefer-standby` 선택이 지연될 수 있다. 현 요청은 완료/실패 증적이 생길 때까지
+  유지한다. 과거 최장 성공 backup(3시간 23분)을 넘겨도 메타데이터가 비어 있을 때만 정확히 이
+  CR을 중지하고 `spec.target=primary` 재요청을 검토한다. 해당 primary manifest는 server-side
+  dry-run을 통과했다.
 
 ## 11. Rollback 결정표
 
