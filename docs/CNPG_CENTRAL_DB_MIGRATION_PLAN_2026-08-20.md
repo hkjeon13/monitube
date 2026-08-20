@@ -377,6 +377,10 @@ PK 구간별 bounded query로 실행한다.
   실패 CR 둘은 감사용으로 보존했고, 새 primary 요청
   `central-pg-data-post-cutover-primary-v2-20260820t102000`은 session ID와 major version 17을
   status에 기록한 `started` 상태다. 완료 backup ID/stop time이 다음 gate다.
+- `2026-08-20T10:22Z` central workload soak에서 collection job claim, NLP batch(10개 단위)
+  처리, analysis 완료 상태 2,251건을 재확인했다. `analysis_runs`의 queued 항목은 NLP indexing
+  대기, `sync_jobs`의 waiting quota/retry는 외부 수집 정책의 정상 backoff이며 ungranted DB lock은
+  0이다. API/worker DB reconnect 또는 fatal error는 관찰되지 않았다.
 
 ## 11. Rollback 결정표
 
