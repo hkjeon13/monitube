@@ -95,8 +95,9 @@ database inventory와 관측 RTO를 기록한다. 이 명령은 읽기 전용이
   chart release는 source PostgreSQL 재시작을 유발한다. 이는 rehearsal/cutover 변경창에서만
   적용하고, 평시 release에는 false를 유지한다.
 - source에는 publication 전용의 최소권한 replication login을, target rehearsal DB에는 별도
-  subscription을 사용한다. production `monitube` DB에 rehearsal publication/subscription을
-  만들지 않는다.
+  subscription을 사용한다. target이 source에 연결할 때는 legacy Service DNS
+  `postgres.monitube-prod.svc.cluster.local`을 사용하며, StatefulSet Pod 이름을 hostname으로
+  사용하지 않는다. production `monitube` DB에 rehearsal publication/subscription을 만들지 않는다.
 - schema/DDL, extension, sequence는 logical replication으로 자동 동기화되지 않는다. schema를
   먼저 준비하고, final writer fence 후 sequence를 재동기화한다.
 - initial copy와 lag 0, replication slot WAL retention, subscriber worker 여유를 기록한다.

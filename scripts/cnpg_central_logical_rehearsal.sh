@@ -8,7 +8,9 @@ set -eu
 
 source_namespace="${SOURCE_NAMESPACE:-monitube-prod}"
 source_pod="${SOURCE_POD:-monitube-postgres-0}"
-source_host="${SOURCE_HOST:-monitube-postgres.monitube-prod.svc.cluster.local}"
+# The StatefulSet pod name is not a Service DNS record. Replication from the
+# database namespace must use the legacy PostgreSQL Service's cluster DNS.
+source_host="${SOURCE_HOST:-postgres.monitube-prod.svc.cluster.local}"
 target_namespace="${TARGET_NAMESPACE:-database}"
 target_cluster="${TARGET_CLUSTER:-central-pg-data}"
 target_database="${TARGET_DATABASE:-monitube}"

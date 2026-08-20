@@ -47,6 +47,10 @@ source_sql "DROP PUBLICATION IF EXISTS $publication;
   SELECT pg_drop_replication_slot(slot_name)
     FROM pg_replication_slots
    WHERE slot_name = '$slot_name';
+  REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM $replication_role;
+  REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM $replication_role;
+  REVOKE ALL PRIVILEGES ON SCHEMA public FROM $replication_role;
+  REVOKE CONNECT ON DATABASE monitube FROM $replication_role;
   DROP ROLE IF EXISTS $replication_role;"
 
 echo "dropping isolated target database: $rehearsal_database"
