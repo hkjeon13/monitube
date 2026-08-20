@@ -387,6 +387,11 @@ PK 구간별 bounded query로 실행한다.
   canonical이며, former primary PVC/data와 실패 Backup CR은 보존한다. target primary의 promotion,
   WAL replay freshness/LSN, bounded parity, migration/index integrity와 data-owner 승인이 끝나기
   전에는 write 재개, 새 physical backup, slot/PVC 정리 또는 legacy endpoint 복귀를 하지 않는다.
+- former primary는 shutdown checkpoint `3E/A3000028`(2026-08-20 10:31:20Z)까지 clean shutdown을
+  완료했고, plugin log로 해당 시점의 WAL archive를 확인했다. failover target 7은 아직 archive
+  recovery를 적용 중이므로 이 checkpoint를 포함한 recovery 종료·promotion을 확인하기 전에는
+  failover 성공 또는 RPO 0을 주장하지 않는다. root filesystem 여유는 약 53 GiB로 관찰 중이며,
+  canonical PVC·WAL·slot·legacy와 shared Cluster resource에는 용량 확보 목적의 삭제를 하지 않는다.
 
 ## 11. Rollback 결정표
 
