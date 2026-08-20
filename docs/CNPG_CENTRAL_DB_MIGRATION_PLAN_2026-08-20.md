@@ -245,7 +245,9 @@ quiesce timeout을 넘으면 worker/API를 source에 재개하고 cutover를 중
 
 ### 8.3 Final dump/restore와 parity gate
 
-1. final logical dump를 생성하고 checksum을 기록한다.
+1. final logical dump를 생성하고 checksum을 기록한다. `cnpg_central_final_dump.sh`는
+   deployed fence와 안정 quiesce를 재검증하고, custom dump의 TOC 검증·SHA-256·quiesce
+   evidence·manifest를 함께 생성한다. 이미 존재하는 dump는 절대 덮어쓰지 않는다.
 2. 승인된 절차로 빈 central `monitube` DB에 restore한다.
 3. owner/grant/sequence/index/constraint/extension을 검증하고 `ANALYZE`를 실행한다.
 4. 아래 Phase 5 parity gate를 source와 target에 같은 snapshot 기준으로 실행한다.

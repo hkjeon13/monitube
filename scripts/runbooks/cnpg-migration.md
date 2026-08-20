@@ -193,7 +193,14 @@ timeout이면 source writer를 다시 열고 cutover를 중단한다.
 
 ### Final restore와 parity
 
-1. final logical dump와 checksum을 만든다.
+1. final logical dump와 checksum을 만든다. 아래 generator는 deployed writer
+   fence와 안정 quiesce를 다시 검증한 뒤 custom-format dump, TOC 검증, SHA-256,
+   quiesce 증거와 manifest를 같은 디렉터리에 남긴다. 기존 파일을 덮어쓰지 않는다.
+
+```sh
+QUIESCE_STABILITY_SECONDS=60 ./scripts/cnpg_central_final_dump.sh \
+  /data/psyche/backups/monitube --confirm-writer-fenced
+```
 2. API fence와 worker scale-down, source transaction/lock 0, 그리고 빈 target을 확인한 뒤에만
    승인된 target에 restore한다. `scripts/cnpg_central_final_restore.sh`는 이 조건과 명시적
    `--confirm-writer-fenced` 없이는 실행하지 않으며, target을 drop/clean하지 않는다.
