@@ -30,6 +30,7 @@ printf '%s\n' '--- workload and storage status ---'
 kubectl -n "$source_namespace" get pod "$source_pod"
 kubectl -n "$source_namespace" get pvc monitube-postgres
 kubectl get pv monitube-postgres-recovery
+kubectl -n "$source_namespace" get cronjob
 
 printf '%s\n' '--- source database baseline ---'
 kubectl -n "$source_namespace" exec "$source_pod" -- sh -ec '
@@ -43,6 +44,24 @@ kubectl -n "$source_namespace" exec "$source_pod" -- sh -ec '
            (SELECT count(*) FROM nlp_documents),
            (SELECT count(*) FROM sync_jobs),
            pg_size_pretty(pg_database_size(current_database()));
+  "
+'
+
+printf '%s\n' '--- source writer quiesce signals ---'
+kubectl -n "$source_namespace" exec "$source_pod" -- sh -ec '
+  psql -X -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "
+    SELECT state || chr(124) || count(*)
+      FROM sync_jobs
+     GROUP BY state
+     ORDER BY state;
+    SELECT chr(97)||chr(99)||chr(116)||chr(105)||chr(118)||chr(101)||chr(95)||chr(116)||chr(114)||chr(97)||chr(110)||chr(115)||chr(97)||chr(99)||chr(116)||chr(105)||chr(111)||chr(110)||chr(115)||chr(124) || count(*)
+      FROM pg_stat_activity
+     WHERE datname = current_database()
+       AND pid <> pg_backend_pid()
+       AND state <> chr(105)||chr(100)||chr(108)||chr(101);
+    SELECT chr(119)||chr(97)||chr(105)||chr(116)||chr(105)||chr(110)||chr(103)||chr(95)||chr(108)||chr(111)||chr(99)||chr(107)||chr(115)||chr(124) || count(*)
+      FROM pg_locks
+     WHERE NOT granted;
   "
 '
 
