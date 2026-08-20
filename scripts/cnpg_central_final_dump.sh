@@ -28,6 +28,8 @@ command -v pg_restore >/dev/null 2>&1 || { echo "missing required command: pg_re
 command -v sha256sum >/dev/null 2>&1 || { echo "missing required command: sha256sum" >&2; exit 2; }
 [ -d "$output_dir" ] || { echo "output directory does not exist: $output_dir" >&2; exit 2; }
 [ ! -e "$dump_path" ] || { echo "refusing to overwrite existing dump: $dump_path" >&2; exit 2; }
+[ ! -e "$quiesce_path" ] || { echo "refusing to overwrite existing quiesce evidence: $quiesce_path" >&2; exit 2; }
+[ ! -e "$manifest_path" ] || { echo "refusing to overwrite existing manifest: $manifest_path" >&2; exit 2; }
 
 umask 077
 cleanup_partial() {
