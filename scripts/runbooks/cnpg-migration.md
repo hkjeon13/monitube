@@ -198,6 +198,11 @@ helm template monitube infra/k8s/monitube --namespace monitube-prod \
 4. active lease, transaction, lock을 drain한다.
 5. source count와 WAL 위치가 승인된 안정 시간 동안 변하지 않음을 기록한다.
 
+Lease가 만료된 `running` job은 실행 중인 writer가 아니다. worker claim은 이를 재획득할 수
+있으므로 quiesce gate는 active/non-expired lease만 막고, 만료된 `running` job의 개수는
+`source_stale_running_jobs`으로 증적에 남긴다. 이 상태를 source에서 임의로 재queue하거나
+수정하지 않는다.
+
 아래 read-only verifier는 실제 deployed API fence, 세 worker replica 0, source의 active
 client/lock/lease 0 및 두 snapshot의 LSN·핵심 count 일치를 확인한다. final restore는 내부적으로
 같은 verifier를 다시 실행하므로, 이 결과 없이 target write를 시작할 수 없다.

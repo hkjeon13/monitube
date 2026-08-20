@@ -52,7 +52,8 @@ snapshot_sql="
      AND backend_type = 'client backend' AND state <> 'idle';
   SELECT count(*) FROM pg_locks WHERE NOT granted;
   SELECT count(*) FROM sync_jobs
-   WHERE state = 'running' OR lease_expires_at > now();"
+   WHERE (state = 'running' AND (lease_expires_at IS NULL OR lease_expires_at > now()))
+      OR (state <> 'running' AND lease_expires_at > now());"
 
 first="$(source_sql "$snapshot_sql")"
 quiesce_tail="$(printf '%s\n' "$first" | tail -3)"
@@ -76,3 +77,6 @@ second="$(source_sql "$snapshot_sql")"
 echo "writer_quiesce_verified=true"
 echo "stability_seconds=$stability_seconds"
 echo "source_snapshot=$first"
+stale_running_jobs="$(source_sql "SELECT count(*) FROM sync_jobs
+  WHERE state = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at <= now()")"
+echo "source_stale_running_jobs=$stale_running_jobs"

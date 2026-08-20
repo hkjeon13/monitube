@@ -241,6 +241,10 @@ rehearsal 전에 다음을 확정한다.
 5. source 주요 table count와 WAL 위치가 승인된 안정 시간 동안 변하지 않는지 확인한다.
 6. 이 시점의 source 기준값, 시각, WAL LSN을 cutover record에 남긴다.
 
+worker scale-down 뒤 lease가 만료된 `running` job은 worker claim이 재획득 가능한 stale record다.
+실제 active/non-expired lease와 구분해 quiesce를 막지 않으며, 개수를 cutover record에 남긴다.
+source의 job 상태를 수동으로 바꾸지 않는다.
+
 quiesce timeout을 넘으면 worker/API를 source에 재개하고 cutover를 중단한다.
 
 ### 8.3 Final dump/restore와 parity gate
