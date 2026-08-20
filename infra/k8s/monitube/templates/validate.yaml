@@ -22,7 +22,7 @@
 {{- if lt (int (default 10 (get $logicalReplication "maxWalSenders"))) 1 }}
 {{- fail "legacyPostgres.logicalReplication.maxWalSenders must be at least 1 when enabled" }}
 {{- end }}
-{{- if not (regexMatch "^[0-9]+(ms|s|min|h)$" (toString (default "2h" (get $logicalReplication "walSenderTimeout")))) }}
+{{- if not (regexMatch "^[0-9]+(ms|s|min|h)$" (toString (default "4h" (get $logicalReplication "walSenderTimeout")))) }}
 {{- fail "legacyPostgres.logicalReplication.walSenderTimeout must be an integer followed by ms, s, min, or h" }}
 {{- end }}
 {{- end }}

@@ -46,7 +46,7 @@ spec:
             - -c
             - max_wal_senders={{ default 10 (get $logicalReplication "maxWalSenders") }}
             - -c
-            - wal_sender_timeout={{ default "2h" (get $logicalReplication "walSenderTimeout") }}
+            - wal_sender_timeout={{ default "4h" (get $logicalReplication "walSenderTimeout") }}
             {{- end }}
           ports:
             - name: postgres
