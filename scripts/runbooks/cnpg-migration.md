@@ -73,6 +73,15 @@ RECOVERY_TARGET_TIME=YYYY-MM-DDTHH:MM:SS+00:00 \
   ./scripts/cnpg_central_physical_restore_drill.sh
 ```
 
+Cluster가 `Cluster in healthy state`가 된 뒤에는 아래 verifier로 target, promotion,
+database inventory와 관측 RTO를 기록한다. 이 명령은 읽기 전용이며 row/credential을 출력하지
+않는다.
+
+```sh
+./scripts/cnpg_central_physical_restore_verify.sh \
+  central-pg-data-restore-YYYYMMDD-HHMMSS
+```
+
 `--clean`, `DROP DATABASE`, `DROP SCHEMA`을 active source 또는 중앙 target에 임의로
 사용하지 않는다. 빈 target을 다시 준비하는 작업은 별도 승인이다.
 
