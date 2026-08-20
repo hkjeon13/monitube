@@ -12,11 +12,8 @@ expected_lsn="${EXPECTED_RECOVERY_LSN:-}"
 # treat their pre-existing state as data loss or a new migration failure.
 expected_unvalidated_constraints="${EXPECTED_UNVALIDATED_CONSTRAINTS:-2}"
 max_replica_lag_bytes="${MAX_REPLICA_LAG_BYTES:-268435456}"
-slot_cluster="$(printf '%s' "$cluster" | tr '-' '_')"
-expected_replica_1="${EXPECTED_STREAMING_REPLICA_1:-${cluster}-6}"
-expected_replica_2="${EXPECTED_STREAMING_REPLICA_2:-${cluster}-7}"
-expected_slot_1="${EXPECTED_ACTIVE_SLOT_1:-_cnpg_${slot_cluster}_6}"
-expected_slot_2="${EXPECTED_ACTIVE_SLOT_2:-_cnpg_${slot_cluster}_7}"
+expected_streaming_replicas="${EXPECTED_STREAMING_REPLICAS:-2}"
+expected_active_slots="${EXPECTED_ACTIVE_REPLICATION_SLOTS:-2}"
 
 [ -n "$expected_lsn" ] || {
   echo 'EXPECTED_RECOVERY_LSN is required (the former primary clean-shutdown checkpoint LSN).' >&2
@@ -27,6 +24,12 @@ case "$expected_unvalidated_constraints" in
 esac
 case "$max_replica_lag_bytes" in
   ''|*[!0-9]*) echo 'MAX_REPLICA_LAG_BYTES must be a non-negative integer' >&2; exit 2 ;;
+esac
+case "$expected_streaming_replicas" in
+  ''|*[!0-9]*) echo 'EXPECTED_STREAMING_REPLICAS must be a non-negative integer' >&2; exit 2 ;;
+esac
+case "$expected_active_slots" in
+  ''|*[!0-9]*) echo 'EXPECTED_ACTIVE_REPLICATION_SLOTS must be a non-negative integer' >&2; exit 2 ;;
 esac
 command -v kubectl >/dev/null 2>&1 || { echo 'missing required command: kubectl' >&2; exit 2; }
 
@@ -69,35 +72,35 @@ lsn_reached="$(sql "SELECT pg_current_wal_lsn() >= '${expected_lsn}'::pg_lsn")"
 }
 
 # A Ready CNPG pod can still be archive-replaying.  Do not accept a recovered
-# primary until the two expected replicas are actually streaming, their
+# primary until the expected replica count is actually streaming, their
 # physical slots are active, and the worst replay lag is within the approved
-# bound.  These are read-only catalog/statistics checks.
+# bound. Instance numbers are intentionally not fixed: CNPG can replace an
+# unhealthy replica with a new instance number during recovery. These are
+# read-only catalog/statistics checks.
 streaming_replicas="$(sql "
   SELECT count(*)
   FROM pg_stat_replication
-  WHERE application_name IN ('${expected_replica_1}', '${expected_replica_2}')
-    AND state = 'streaming'
+  WHERE state = 'streaming'
 ")"
-[ "$streaming_replicas" = '2' ] || {
-  echo "replica streaming gate failed: expected=${expected_replica_1},${expected_replica_2} streaming; observed=${streaming_replicas}" >&2
+[ "$streaming_replicas" = "$expected_streaming_replicas" ] || {
+  echo "replica streaming gate failed: expected=${expected_streaming_replicas}; observed=${streaming_replicas}" >&2
   exit 1
 }
 
 active_slots="$(sql "
   SELECT count(*)
   FROM pg_replication_slots
-  WHERE slot_name IN ('${expected_slot_1}', '${expected_slot_2}') AND active
+  WHERE slot_type = 'physical' AND active
 ")"
-[ "$active_slots" = '2' ] || {
-  echo "replication slot gate failed: expected=${expected_slot_1},${expected_slot_2} active; observed=${active_slots}" >&2
+[ "$active_slots" = "$expected_active_slots" ] || {
+  echo "replication slot gate failed: expected=${expected_active_slots} active physical slots; observed=${active_slots}" >&2
   exit 1
 }
 
 max_replica_lag="$(sql "
   SELECT COALESCE(max(pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)), 9223372036854775807)::bigint
   FROM pg_stat_replication
-  WHERE application_name IN ('${expected_replica_1}', '${expected_replica_2}')
-    AND state = 'streaming'
+  WHERE state = 'streaming'
 ")"
 [ "$max_replica_lag" -le "$max_replica_lag_bytes" ] || {
   echo "replica lag gate failed: max_lag_bytes=${max_replica_lag}, allowed=${max_replica_lag_bytes}" >&2
@@ -148,7 +151,9 @@ printf '%s\n' "primary=$primary"
 printf '%s\n' "rw_addresses=$rw_addresses"
 printf '%s\n' "former_primary_checkpoint_lsn=$expected_lsn"
 printf '%s\n' "streaming_replicas=$streaming_replicas"
+printf '%s\n' "expected_streaming_replicas=$expected_streaming_replicas"
 printf '%s\n' "active_replication_slots=$active_slots"
+printf '%s\n' "expected_active_replication_slots=$expected_active_slots"
 printf '%s\n' "max_replica_lag_bytes=$max_replica_lag"
 printf '%s\n' "recovered_metrics=$metrics"
 echo 'post_failover_gate=true'
