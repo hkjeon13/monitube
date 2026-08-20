@@ -60,7 +60,12 @@ database:
 legacyPostgres:
   enabled: true
   existingClaim: monitube-postgres
-  storageClass: local-path
+  # Recovery PV backed by the retained Compose volume after the old
+  # dynamically-provisioned PVC was deleted during the v0.2.0 upgrade.
+  # Keep this explicit static binding until CNPG has completed its import.
+  storageClass: monitube-recovery
+  volumeName: monitube-postgres-recovery
+  recoveryHostPath: /var/lib/docker/volumes/monitube_postgres_data/_data
   size: 100Gi
   # Verify against the live secret before trusting these for the CNPG import:
   #   kubectl -n monitube-prod get secret monitube-postgres-auth \

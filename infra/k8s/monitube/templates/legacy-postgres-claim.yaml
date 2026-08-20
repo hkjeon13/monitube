@@ -1,0 +1,44 @@
+{{- if .Values.legacyPostgres.enabled }}
+{{- if .Values.legacyPostgres.recoveryHostPath }}
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {{ .Values.legacyPostgres.volumeName }}
+  annotations:
+    # The source volume contains the pre-Kubernetes PostgreSQL data. Helm must
+    # never remove it while upgrading or uninstalling the application release.
+    helm.sh/resource-policy: keep
+spec:
+  capacity:
+    storage: {{ .Values.legacyPostgres.size }}
+  volumeMode: Filesystem
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: {{ .Values.legacyPostgres.storageClass | quote }}
+  hostPath:
+    path: {{ .Values.legacyPostgres.recoveryHostPath | quote }}
+    type: Directory
+{{- end }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.legacyPostgres.existingClaim }}
+  annotations:
+    # The release previously deleted this unprotected PVC on chart upgrade.
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- if .Values.legacyPostgres.storageClass }}
+  storageClassName: {{ .Values.legacyPostgres.storageClass | quote }}
+  {{- else }}
+  storageClassName: ""
+  {{- end }}
+  {{- if .Values.legacyPostgres.volumeName }}
+  volumeName: {{ .Values.legacyPostgres.volumeName }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.legacyPostgres.size }}
+{{- end }}

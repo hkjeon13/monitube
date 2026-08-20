@@ -34,6 +34,10 @@ spec:
       terminationGracePeriodSeconds: 180
       securityContext:
         runAsNonRoot: true
+        # The Rust images declare USER nobody by name. Kubernetes can enforce
+        # runAsNonRoot only when the effective UID is numeric.
+        runAsUser: 65534
+        runAsGroup: 65534
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -67,6 +71,12 @@ metadata:
     {{- include "monitube.labels" (dict "root" . "component" "api") | nindent 4 }}
 spec:
   replicas: {{ .Values.replicas.api }}
+  {{- if .Values.hostPorts.enabled }}
+  # A hostPort cannot be held by old and new replicas simultaneously on our
+  # single-node cluster, so the default RollingUpdate leaves upgrades Pending.
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       {{- include "monitube.selectorLabels" (dict "root" . "component" "api") | nindent 6 }}
@@ -78,6 +88,9 @@ spec:
       {{- include "monitube.imagePullSecrets" . | nindent 6 }}
       securityContext:
         runAsNonRoot: true
+        # See the worker context above; the API image also uses USER nobody.
+        runAsUser: 65534
+        runAsGroup: 65534
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -122,6 +135,11 @@ metadata:
     {{- include "monitube.labels" (dict "root" . "component" "web") | nindent 4 }}
 spec:
   replicas: {{ .Values.replicas.web }}
+  {{- if .Values.hostPorts.enabled }}
+  # Avoid a hostPort collision with the old web Pod during an image change.
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       {{- include "monitube.selectorLabels" (dict "root" . "component" "web") | nindent 6 }}
