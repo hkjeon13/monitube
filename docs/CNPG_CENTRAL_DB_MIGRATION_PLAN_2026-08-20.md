@@ -454,6 +454,20 @@ PK 구간별 bounded query로 실행한다.
   중 실제 `pgdata` 사용량이 58GiB 이상으로 증가했다. nodefs free는 약 388GiB에서 327GiB까지
   감소했으나 DiskPressure=False, production primary 5/streaming replica 8·9/lag 0/active slot
   2/API read-only/worker 0은 유지됐다. 새 drill PVC와 모든 기존 PVC는 Retain으로 보존한다.
+- data-owner가 known replay-LSN 차이(120 bytes)를 인지한 채 남은 절차 진행을 승인했다. 따라서
+  `2026-08-21 08:03 KST`에 final read-only gate를 다시 실행해 streaming replica 2개, active
+  slot 2개, lag 0, schema/index/orphan/count gate를 재확인한 뒤 API fence만 먼저 해제했다.
+  initial Helm revision 28은 보존 중인 legacy PostgreSQL StatefulSet의 hostPath mount 오류를
+  `--wait`가 기다려 timeout으로 failed가 됐지만, API revision은 적용돼 public `/api/ready`가
+  `database=ok`, `migrationCurrent=true`, `maintenance.readOnly=false`를 반환했다. legacy
+  PVC/data는 변경하거나 삭제하지 않았다. revision 29에서 wait 없이 Helm release를 정상화했다.
+- worker는 revision 30(collection), 31(NLP), 32(analysis)로 각각 1개씩 순차 재개했다. 모두
+  Ready 1/1, restart 0이며 collection job claim/dispatch, NLP 10-document batch 처리,
+  analysis의 NLP-indexing 대기 경로를 실제 로그로 확인했다. 재개 후 30초 이상 worker
+  `error`/`panic`/`fatal` 로그 0, primary 5와 streaming replica 8·9의 lag 0, active slot 2,
+  `pg_wal` 약 1.0GiB, nodefs free 약 325GiB, DiskPressure=False를 확인했다. API read-only는
+  해제됐고 collection/NLP/analysis 모두 1/1이다. 이는 freshness 승인에 따른 운영 재개이며,
+  historical checkpoint와 replay-LSN의 120-byte 차이 자체를 RPO 0으로 재해석하지는 않는다.
 
 ## 11. Rollback 결정표
 
