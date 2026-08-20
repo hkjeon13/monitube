@@ -438,6 +438,22 @@ PK 구간별 bounded query로 실행한다.
   `3F/F7298F70`으로 requested checkpoint `3F/F7298EF8`보다 120 bytes 낮았다. 따라서 schema와
   integrity evidence는 통과했지만 RPO 0 또는 exact final-write parity는 증명하지 않는다. API
   write fence와 worker 0을 유지하고 data-owner의 freshness 판단 전에는 write를 재개하지 않는다.
+- `central-pg-data-post-cutover-final-20260820t1420z` physical Backup CR은
+  `2026-08-20T15:57:29Z`에 terminal `completed`로 전환됐다. 시작 시각은 `14:10:23Z`, Barman
+  backup ID는 `20260820T141023`이며, 이 성공 CR을 제외하고 과거 failed/started CR은 감사용으로
+  보존했다.
+- completed backup ID `20260820T141023`로 별도 1-instance Cluster
+  `central-pg-data-restore-20260820-160100`을 `targetImmediate=true`로 생성했다. 생성
+  `16:02:06Z`부터 healthy/read 검증 `16:35:33Z`까지 관측 RTO는 **2,007초**였다. read-only
+  verifier는 Ready 1/1, 정확한 backup ID, `pg_is_in_recovery=false`, PostgreSQL 17.11 및
+  database inventory를 확인했다. central과 restore의 `monitube` database size
+  (`25,539,958,451` bytes), user table 116개, index 347개, PK/unique/FK constraint 240개도
+  일치했다. 이 검증은 backup 복구 가능성과 구조적 parity 증거이며, 앞선 120-byte replay-LSN
+  차이를 RPO 0으로 바꾸지는 않는다.
+- restore drill의 요청 PVC는 `40Gi`였지만 local-PV filesystem quota가 강제되지 않아 recovery
+  중 실제 `pgdata` 사용량이 58GiB 이상으로 증가했다. nodefs free는 약 388GiB에서 327GiB까지
+  감소했으나 DiskPressure=False, production primary 5/streaming replica 8·9/lag 0/active slot
+  2/API read-only/worker 0은 유지됐다. 새 drill PVC와 모든 기존 PVC는 Retain으로 보존한다.
 
 ## 11. Rollback 결정표
 
