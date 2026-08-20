@@ -424,6 +424,20 @@ PK 구간별 bounded query로 실행한다.
 - post-failover verifier는 commit `596f0e9`에서 fixed instance 번호 대신 `streaming replica 2개`,
   `active physical slot 2개`, max replay lag 256 MiB를 강제하도록 보정했다. controller의 replacement
   instance 번호(6/7 → 8/9)에 의존하지 않으며, 해당 조건 미충족 시 gate는 실패한다.
+- `2026-08-20T14:10Z~14:25Z` 동안 Primary 5와 replacement replica 8/9가 모두 streaming,
+  lag 0, active physical slot 2개, `pg_wal` 약 592 MiB, nodefs free 약 389 GiB,
+  DiskPressure=False, pod restart 0을 유지했다. API `/api/ready`는 database=ok,
+  migrationCurrent=true, maintenance.readOnly=true였고 모든 Monitube worker는 0이었다.
+  `EXPECTED_RECOVERY_LSN=3F/F7298EF8` read-only gate는 `post_failover_gate=true`로 통과했다.
+  수집 count는 collection_sources 38, channels 2,260, videos 29,228, comments 11,152,587,
+  migration 25, nlp_documents 11,161,982, nlp_document_terms 8,090,555,
+  nlp_daily_term_stats 22,255,563, sync_jobs 449,226, sync_checkpoints 966,174,
+  outbox_events 0이며 invalid index 0, 기존 NOT VALID constraint 2, source-video/comment orphan
+  0을 확인했다.
+- 같은 gate에서 current primary LSN은 `40/1CF40150`이었으나 `pg_last_wal_replay_lsn()`은
+  `3F/F7298F70`으로 requested checkpoint `3F/F7298EF8`보다 120 bytes 낮았다. 따라서 schema와
+  integrity evidence는 통과했지만 RPO 0 또는 exact final-write parity는 증명하지 않는다. API
+  write fence와 worker 0을 유지하고 data-owner의 freshness 판단 전에는 write를 재개하지 않는다.
 
 ## 11. Rollback 결정표
 
