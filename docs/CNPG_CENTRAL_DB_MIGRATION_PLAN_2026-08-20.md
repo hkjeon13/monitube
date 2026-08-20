@@ -362,6 +362,11 @@ PK 구간별 bounded query로 실행한다.
   유지한다. 과거 최장 성공 backup(3시간 23분)을 넘겨도 메타데이터가 비어 있을 때만 정확히 이
   CR을 중지하고 `spec.target=primary` 재요청을 검토한다. 해당 primary manifest는 server-side
   dry-run을 통과했다.
+- `2026-08-20T10:05Z`부터 `shared-postgres` Helm revision 11의 AI-assistant DB Secret 참조
+  변경으로 central Cluster의 6→7→5 순차 instance upgrade가 진행됐다. 이는 Monitube 변경이
+  아니며, upgrade 중에는 physical backup/soak 성공을 판정하지 않는다. 관찰 시 API `/ready`의
+  실제 database schema check는 200, pool request error 0이었고 worker에는 DB reconnect/fatal
+  error가 없었다. Cluster가 3/3 Healthy로 복귀한 뒤 다시 확인한다.
 
 ## 11. Rollback 결정표
 
