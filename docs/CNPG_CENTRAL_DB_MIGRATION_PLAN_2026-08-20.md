@@ -381,6 +381,12 @@ PK 구간별 bounded query로 실행한다.
   처리, analysis 완료 상태 2,251건을 재확인했다. `analysis_runs`의 queued 항목은 NLP indexing
   대기, `sync_jobs`의 waiting quota/retry는 외부 수집 정책의 정상 backoff이며 ungranted DB lock은
   0이다. API/worker DB reconnect 또는 fatal error는 관찰되지 않았다.
+- physical backup v2를 중단하려는 primary Pod termination 요청이 CNPG failover를 유발했다. 당시
+  standby는 archive recovery로 뒤처져 있었으므로 이 요청은 안전하지 않은 개입이었다. 즉시 API는
+  maintenance read-only revision 21로 전환하고 모든 worker를 0으로 내렸다. 현재 central은
+  canonical이며, former primary PVC/data와 실패 Backup CR은 보존한다. target primary의 promotion,
+  WAL replay freshness/LSN, bounded parity, migration/index integrity와 data-owner 승인이 끝나기
+  전에는 write 재개, 새 physical backup, slot/PVC 정리 또는 legacy endpoint 복귀를 하지 않는다.
 
 ## 11. Rollback 결정표
 

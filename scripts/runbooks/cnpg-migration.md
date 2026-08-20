@@ -292,3 +292,27 @@ controller와 CRD가 불일치하면 backup을 반복 요청하지 않는다. �
 정확히 같은 공식 release의 **`backups.postgresql.cnpg.io` CRD만** server-side diff로 먼저 검토하고,
 기존 field manager 충돌 여부도 확인한다. CRD 적용 뒤 새 Backup의 `status.instanceID.sessionID`와
 `status.majorVersion`이 기록되는 것을 확인한 뒤에만 physical backup 성공을 판정한다.
+
+### Central failover 안전 절차
+
+physical backup이 장시간 `started`에 머물거나 disk/WAL pressure가 생겼을 때는 새 Backup을
+반복 생성하지 않는다. 먼저 API를 maintenance read-only로 fence하고 모든 write worker를 0으로
+내린 뒤, Cluster phase/currentPrimary/targetPrimary, replica replay freshness, Pod termination
+상태, disk/WAL, Backup controller·instance-manager log를 증적으로 보존한다.
+
+replica replay가 뒤처진 동안에는 `kubectl delete pod`로 primary를 재시작하거나, switchover,
+failover, replication slot/PVC/WAL 정리를 실행하지 않는다. 이는 CNPG가 뒤처진 replica를
+promotion target으로 선택하게 해 canonical write를 잃을 위험이 있다. backup process 중지가
+필요하면 central DB 운영자 승인 아래 CNPG의 지원되는 취소·복구 절차를 사용한다.
+
+자동 failover가 이미 시작된 경우에는 다음을 모두 충족하기 전까지 API write와 worker를 재개하지
+않는다.
+
+1. `Cluster`가 Healthy, 3/3 Ready이며 새 `currentPrimary`가 확정되고 RW endpoint가 생긴다.
+2. 새 primary에서 `pg_is_in_recovery=false`, promotion 완료 log와 restart-free readiness를 확인한다.
+3. failover 직전 primary의 PVC/data를 그대로 보존하고, archive replay의 마지막 transaction time,
+   LSN, bounded table parity, migration/index integrity를 failover 전 기준선과 비교한다.
+4. data owner와 central DB 운영자가 데이터 최신성과 RPO를 승인한다.
+
+이 중 하나라도 불명확하면 central은 canonical로 유지하되 fenced 상태에서 forward recovery 또는
+승인된 backup restore를 결정한다. legacy를 임의 writer로 열거나 endpoint를 단순 복귀하지 않는다.
