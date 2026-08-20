@@ -186,7 +186,15 @@ timeout이면 source writer를 다시 열고 cutover를 중단한다.
 ### Final restore와 parity
 
 1. final logical dump와 checksum을 만든다.
-2. 승인된 빈 target에 restore한다.
+2. API fence와 worker scale-down, source transaction/lock 0, 그리고 빈 target을 확인한 뒤에만
+   승인된 target에 restore한다. `scripts/cnpg_central_final_restore.sh`는 이 조건과 명시적
+   `--confirm-writer-fenced` 없이는 실행하지 않으며, target을 drop/clean하지 않는다.
+
+```sh
+./scripts/cnpg_central_final_restore.sh \
+  /absolute/path/to/final.pg_dump --confirm-writer-fenced
+```
+
 3. source/target의 bounded baseline을 비교한다.
 
 ```sh
