@@ -124,7 +124,7 @@ source/target count가 즉시 동일하다고 가정하지 않고, lag와 동일
 
 결과와 lag/slot 증적을 기록한 뒤에만 아래 cleanup을 실행한다. 정확히 timestamp 형식의 격리
 rehearsal 이름과 `--confirm` 없이는 동작하지 않으며, target subscription을 먼저 제거한 후
-source publication·잔여 slot·temporary role과 격리 database를 정리한다.
+source publication·주/테이블동기화 잔여 slot·temporary role과 격리 database를 정리한다.
 
 ```sh
 ./scripts/cnpg_central_logical_rehearsal_cleanup.sh \
