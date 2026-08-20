@@ -65,6 +65,23 @@ deployment values에 명시한다.
 `--clean`, `DROP DATABASE`, `DROP SCHEMA`을 active source 또는 중앙 target에 임의로
 사용하지 않는다. 빈 target을 다시 준비하는 작업은 별도 승인이다.
 
+### 논리 복제 선택 시
+
+첫 full logical restore rehearsal은 약 33분이 걸렸다. 승인된 write freeze가 이를 넘지
+않으면 final dump/restore 대신 **별도 logical-replication rehearsal**을 통과해야 한다.
+
+- source의 `wal_level`은 현재 `replica`이므로, `legacyPostgres.logicalReplication.enabled=true`
+  chart release는 source PostgreSQL 재시작을 유발한다. 이는 rehearsal/cutover 변경창에서만
+  적용하고, 평시 release에는 false를 유지한다.
+- source에는 publication 전용의 최소권한 replication login을, target rehearsal DB에는 별도
+  subscription을 사용한다. production `monitube` DB에 rehearsal publication/subscription을
+  만들지 않는다.
+- schema/DDL, extension, sequence는 logical replication으로 자동 동기화되지 않는다. schema를
+  먼저 준비하고, final writer fence 후 sequence를 재동기화한다.
+- initial copy와 lag 0, replication slot WAL retention, subscriber worker 여유를 기록한다.
+  target에서 application writer를 열기 전 publication과 subscription을 제거하거나 전환
+  절차에 맞게 종료한다.
+
 ## 3. Chart 준비와 렌더링 검증
 
 central mode는 새 CNPG Cluster를 만들지 않는다. `cnpg.enabled`는 false로 유지한다.
@@ -79,6 +96,14 @@ helm template monitube infra/k8s/monitube --namespace monitube-prod \
 central rendering에서는 API와 worker가 `monitube-central-db/uri`를, migration Job은 같은
 Secret의 host/port/dbname/username/password key를 참조해야 한다. legacy rendering은 현재
 `monitube-runtime-env`의 DB URL을 그대로 사용해야 한다.
+
+논리 복제 rehearsal rendering은 다음처럼 opt-in으로만 생성한다. 이 rendering 검증 자체는
+production StatefulSet을 변경하지 않는다.
+
+```sh
+helm template monitube infra/k8s/monitube --namespace monitube-prod \
+  --set legacyPostgres.logicalReplication.enabled=true
+```
 
 새 chart version은 Devtron repository에 게시하고 Refetch Charts로 fetch 가능함을 확인한다.
 이 단계는 chart를 배포하거나 `database.mode`를 바꾸는 단계가 아니다.

@@ -12,3 +12,11 @@
 {{- if .Values.cnpg.enabled }}
 {{- fail "cnpg.enabled creates the retired dedicated-Cluster path; use database.mode=central with an approved central Secret" }}
 {{- end }}
+{{- if .Values.legacyPostgres.logicalReplication.enabled }}
+{{- if lt (int .Values.legacyPostgres.logicalReplication.maxReplicationSlots) 1 }}
+{{- fail "legacyPostgres.logicalReplication.maxReplicationSlots must be at least 1 when enabled" }}
+{{- end }}
+{{- if lt (int .Values.legacyPostgres.logicalReplication.maxWalSenders) 1 }}
+{{- fail "legacyPostgres.logicalReplication.maxWalSenders must be at least 1 when enabled" }}
+{{- end }}
+{{- end }}

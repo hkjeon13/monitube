@@ -87,6 +87,13 @@ legacyPostgres:
   resources:
     requests: {cpu: 500m, memory: 1Gi}
     limits: {cpu: "4", memory: 8Gi}
+  # Leave this false in normal legacy operation. Turning it on changes
+  # wal_level, which requires a PostgreSQL restart; use it only for the
+  # separately approved logical-replication rehearsal/cutover window.
+  logicalReplication:
+    enabled: false
+    maxReplicationSlots: 10
+    maxWalSenders: 10
 
 cnpg:
   # Kept only for the older dedicated-Cluster chart path. It is not the
