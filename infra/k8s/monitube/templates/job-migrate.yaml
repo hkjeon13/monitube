@@ -29,18 +29,18 @@ spec:
           image: "{{ .Values.images.migrate.repository }}:{{ .Values.images.migrate.tag }}"
           imagePullPolicy: {{ .Values.pullPolicy }}
           env:
-            {{- if .Values.database.useCnpg }}
-            {{- $appSecret := printf "%s-app" .Values.cnpg.name }}
+            {{- if eq .Values.database.mode "central" }}
+            {{- $appSecret := .Values.database.central.secretName }}
             - name: POSTGRES_HOST
-              valueFrom: {secretKeyRef: {name: {{ $appSecret }}, key: host}}
+              valueFrom: {secretKeyRef: {name: {{ $appSecret }}, key: {{ .Values.database.central.hostKey }}}}
             - name: POSTGRES_PORT
-              valueFrom: {secretKeyRef: {name: {{ $appSecret }}, key: port}}
+              valueFrom: {secretKeyRef: {name: {{ $appSecret }}, key: {{ .Values.database.central.portKey }}}}
             - name: POSTGRES_DB
-              valueFrom: {secretKeyRef: {name: {{ $appSecret }}, key: dbname}}
+              valueFrom: {secretKeyRef: {name: {{ $appSecret }}, key: {{ .Values.database.central.databaseKey }}}}
             - name: POSTGRES_USER
-              valueFrom: {secretKeyRef: {name: {{ $appSecret }}, key: username}}
+              valueFrom: {secretKeyRef: {name: {{ $appSecret }}, key: {{ .Values.database.central.usernameKey }}}}
             - name: POSTGRES_PASSWORD
-              valueFrom: {secretKeyRef: {name: {{ $appSecret }}, key: password}}
+              valueFrom: {secretKeyRef: {name: {{ $appSecret }}, key: {{ .Values.database.central.passwordKey }}}}
             {{- else }}
             - name: POSTGRES_HOST
               value: postgres

@@ -1,169 +1,145 @@
-# CloudNativePG migration runbook
+# Monitube 중앙 CNPG 이전 runbook
 
-Moves the `monitube` database from the `postgres:16-alpine` StatefulSet in
-`monitube-prod` to a CloudNativePG cluster, without losing the data already
-there. The chart is `infra/k8s/monitube`.
+이 runbook은 `monitube-prod/monitube-postgres`에서
+`database/central-pg-data`의 기존 `monitube` database로 이전하는 절차다.
+별도 `monitube-db` CNPG Cluster를 생성하는 이전 runbook은 폐기했다.
 
-## What is actually running
+## 범위와 안전 경계
 
-Read from the cluster on 2026-08-20. Confirm anything that looks stale before
-acting on it.
+- source: PostgreSQL 16 legacy StatefulSet `monitube-postgres`
+- target: PostgreSQL 17 CNPG `central-pg-data`, database `monitube`
+- 기본 chart mode: `database.mode=legacy`
+- target mode: `database.mode=central`
+- source와 target에 application writer를 동시에 실행하지 않는다.
+- target 첫 write 이후에는 단순히 legacy `DATABASE_URL`로 되돌리지 않는다.
+- legacy recovery PV, Docker volume, Service, StatefulSet은 soak와 restore drill이 끝날 때까지 삭제하지 않는다.
 
-| | |
-|---|---|
-| Cluster | `default_cluster`, one k3s node (`mobichat-k3s-1`) |
-| Namespace | `monitube-prod`, Devtron Helm release `monitube` |
-| Database | StatefulSet `monitube-postgres`, `postgres:16-alpine`, Service `postgres:5432` |
-| Storage | PVC `monitube-postgres`, 100Gi, StorageClass `local-path`, Bound |
-| Credentials | Secret `monitube-postgres-auth` (`POSTGRES_DB`/`USER`/`PASSWORD`) |
-| App config | Secret `monitube-runtime-env`, holds `DATABASE_URL` |
-| CNPG | Operator and CRDs already installed, including the Barman Cloud plugin |
+이 문서는 production cutover를 자동화하지 않는다. 각 write 단계에는 change owner와
+중앙 DB 운영자의 승인이 필요하다.
 
-Two things about the current state are worth knowing before you start.
+## 1. Preflight
 
-**The deployed chart cannot be re-fetched.** Devtron reports
-`monitube-0.1.6.tgz : 404 Not Found` from `codex-helm-repo.devtroncd`. The
-running release works, but Devtron cannot render or upgrade it. The chart in
-this repository replaces it and reproduces the live workloads exactly.
-
-**The `local-path` StorageClass no longer exists.** Only
-`database-local-retain` and `mobichat-local-retain` are defined. The legacy PVC
-is already Bound so it keeps working, but it cannot be recreated. Do not delete
-it until the migration is finished and verified.
-
-## Prerequisites
-
-Confirm the database name and user, which the CNPG import needs and which this
-runbook assumes are both `monitube`:
+실행 전에 production을 변경하지 않고 현재 상태를 수집한다.
 
 ```sh
-kubectl -n monitube-prod get secret monitube-postgres-auth -o jsonpath='{.data.POSTGRES_USER}' | base64 -d; echo
+./scripts/cnpg_central_preflight.sh
 ```
 
-If they differ, set `legacyPostgres.user` and `legacyPostgres.database` in
-values before deploying.
+다음이 모두 확인돼야 한다.
 
-## 1. Record the expected state
+- source DB, legacy PV/PVC, API/worker가 정상
+- `central-pg-data`가 Ready이고 backup/`ScheduledBackup`이 정상
+- target `monitube` DB/role의 생성 이력과 재사용 승인이 있음
+- target DB가 migration 대상 외 data를 포함하지 않음
+- central connection budget, PgBouncer session mode, target role limit이 승인됨
+- central application Secret의 key 이름만 확인됨. Secret 값은 출력·Git·values에 남기지 않음
 
-These are the acceptance criteria for step 4.
+`monitube-prod` workload는 `database` namespace의 Secret을 직접 읽을 수 없다. target용
+`monitube-central-db` Secret은 `monitube-prod`에 별도 provision해야 하며 다음 key를 가진다.
+
+```text
+uri
+host
+port
+dbname
+username
+password
+```
+
+`uri`는 API/worker가 쓰고 나머지 key는 migration Job이 쓴다. endpoint는
+`central-pg-data-pooler-rw.database.svc.cluster.local:5432`와 direct RW endpoint를
+rehearsal로 비교한 뒤 하나로 확정한다. TLS/CA/`sslmode`도 같은 Secret contract와
+deployment values에 명시한다.
+
+## 2. Backup 및 restore rehearsal
+
+1. off-node object storage에 custom-format logical dump를 만들고 SHA-256과
+   `pg_restore --list`를 기록한다.
+2. source와 분리된 임시 database 또는 격리 Cluster에 실제 restore한다.
+3. `--no-owner --no-privileges` 사용 여부, owner/grant 재설정, extension, sequence,
+   index validity, constraint, `ANALYZE`를 검증한다.
+4. central physical backup의 전체 Cluster restore와 Monitube logical dump의 단일 DB restore를
+   각각 rehearsal한다.
+5. restore 시간이 maintenance window 안인지 기록한다.
+
+`--clean`, `DROP DATABASE`, `DROP SCHEMA`을 active source 또는 중앙 target에 임의로
+사용하지 않는다. 빈 target을 다시 준비하는 작업은 별도 승인이다.
+
+## 3. Chart 준비와 렌더링 검증
+
+central mode는 새 CNPG Cluster를 만들지 않는다. `cnpg.enabled`는 false로 유지한다.
 
 ```sh
-kubectl -n monitube-prod exec monitube-postgres-0 -- psql -X -U monitube -d monitube -At -c "SELECT (SELECT count(*) FROM videos), (SELECT count(*) FROM comments), (SELECT count(*) FROM monitube_schema_migrations)"
+helm lint infra/k8s/monitube
+helm template monitube infra/k8s/monitube --namespace monitube-prod > /tmp/monitube-legacy.yaml
+helm template monitube infra/k8s/monitube --namespace monitube-prod \
+  --set database.mode=central > /tmp/monitube-central.yaml
 ```
 
-The ledger should hold one row per file in `database/migrations/` — 25 as of
-`025_whitespace_token_metrics.sql`.
+central rendering에서는 API와 worker가 `monitube-central-db/uri`를, migration Job은 같은
+Secret의 host/port/dbname/username/password key를 참조해야 한다. legacy rendering은 현재
+`monitube-runtime-env`의 DB URL을 그대로 사용해야 한다.
 
-Take an independent archive as well. The import does not modify the source, but
-this is the only restore point that survives a mistake on the PVC:
+새 chart version은 Devtron repository에 게시하고 Refetch Charts로 fetch 가능함을 확인한다.
+이 단계는 chart를 배포하거나 `database.mode`를 바꾸는 단계가 아니다.
+
+## 4. Cutover go/no-go
+
+다음 중 하나라도 실패하면 cutover하지 않는다.
+
+- independent logical backup 및 restore rehearsal 미완료
+- central backup/object store/cluster health 이상
+- source/target revision 또는 Secret key contract 불일치
+- central connection/pool/disk/WAL 여유 부족
+- rollback release values와 담당자 미준비
+- rehearsal 시간이 승인된 write freeze 시간을 초과
+
+## 5. Production cutover
+
+### Writer quiesce
+
+1. 예약 수집, CronJob, 외부 enqueue와 사용자 write를 중단한다.
+2. API write route가 실제로 거부되는지 확인한다.
+3. collection, NLP, analysis worker의 신규 claim을 중단한다.
+4. active lease, transaction, lock을 drain한다.
+5. source count와 WAL 위치가 승인된 안정 시간 동안 변하지 않음을 기록한다.
+
+timeout이면 source writer를 다시 열고 cutover를 중단한다.
+
+### Final restore와 parity
+
+1. final logical dump와 checksum을 만든다.
+2. 승인된 빈 target에 restore한다.
+3. source/target의 bounded baseline을 비교한다.
 
 ```sh
-kubectl -n monitube-prod exec monitube-postgres-0 -- pg_dump -U monitube -Fc monitube > monitube-pre-cnpg.dump
+./scripts/cnpg_central_parity.sh
 ```
 
-## 2. Publish the chart
+parity mismatch 또는 schema/ownership/index/sequence/constraint 불일치가 있으면 endpoint를
+바꾸지 않고 source를 재개한다.
 
-Devtron installs from the `local-services` repository, so the chart has to be
-packaged and uploaded before it can be deployed. See
-`infra/k8s/monitube/README.md` for the exact commands.
+### Application 전환
 
-## 3. Create the CNPG cluster and import
+1. API만 `database.mode=central`로 전환한다.
+2. `/health`, `/ready`, authenticated read 및 제한된 write smoke를 수행한다.
+3. 첫 target write의 시각과 marker를 기록한다.
+4. source를 read-only 또는 application connection 차단으로 fence한다.
+5. collection → NLP → analysis worker 순으로 하나씩 기동하고 claim→complete/retry를 확인한다.
+6. Web/public route, restart, pool wait/error, lock, central replica 상태를 확인한다.
 
-Deploy with CNPG enabled but the applications still pointing at the legacy
-database:
+## 6. Rollback
 
-```yaml
-cnpg: {enabled: true}
-database: {useCnpg: false}
-legacyPostgres: {enabled: true}
-```
+| 상태 | 대응 |
+| --- | --- |
+| final dump 전 | source writer를 재개 |
+| restore/parity 실패, endpoint 전환 전 | target을 사용하지 않고 source 재개 |
+| target endpoint 전환 후 첫 target write 전 | target Pod를 중지하고 legacy release values로 rollback |
+| 첫 target write 후 | source로 단순 복귀 금지. target을 canonical로 두고 forward fix, backup recovery, 승인된 reverse migration 중 하나를 선택 |
 
-Nothing changes for the running application at this step. CNPG creates
-`monitube-db`, runs `pg_dump`/`pg_restore` from the `postgres` Service, and
-generates the secret `monitube-db-app` holding a fresh password and a ready-made
-`uri` key.
+## 7. Soak 및 정리
 
-```sh
-kubectl -n monitube-prod get cluster monitube-db -w
-```
-
-The import runs before the instance reports ready, so expect it to take about as
-long as a manual dump and restore. If it stalls:
-
-```sh
-kubectl -n monitube-prod logs -l cnpg.io/jobRole=full-recovery --tail=200
-```
-
-Note that this crosses a major version: the source is PostgreSQL 16 and the
-house image is 17. `pg_dump`/`pg_restore` supports that direction, but it is a
-real upgrade — step 4 is not optional.
-
-## 4. Verify before cutting over
-
-```sh
-kubectl -n monitube-prod exec monitube-db-1 -- psql -X -U monitube -d monitube
-```
-
-Confirm every one of these.
-
-- Row counts and the ledger count match step 1 exactly.
-- `SELECT extname FROM pg_extension` returns `pgcrypto`, `pg_trgm`, and
-  `pg_stat_statements`.
-- `SHOW shared_preload_libraries` includes `pg_stat_statements`. Worth checking
-  explicitly — if it is missing the extension still exists but collects nothing,
-  and the performance runbooks quietly stop working.
-- `SHOW max_connections` returns 60, `SHOW log_parameter_max_length` returns 0.
-- Korean text in `videos.title` renders correctly. The legacy database was
-  initialised without an explicit locale; a mismatch shows up here first.
-
-Do not continue if any check fails. A partial import cannot be repaired in
-place — delete the `Cluster`, fix the cause, and repeat step 3.
-
-## 5. Cut over
-
-```yaml
-database: {useCnpg: true}
-```
-
-This adds an explicit `DATABASE_URL` to the api and the three workers, sourced
-from `monitube-db-app`. Kubernetes gives an explicit `env` entry precedence over
-the same key arriving through `envFrom`, so the stale value inside
-`monitube-runtime-env` is overridden without anyone editing that secret or
-handling the password.
-
-Workers hold row leases and deploy with the `Recreate` strategy, so each one
-stops before its replacement starts. Watch the rollout, then confirm the api is
-serving from the new database:
-
-```sh
-kubectl -n monitube-prod rollout status deploy/monitube-api deploy/monitube-collection-worker deploy/monitube-nlp-worker deploy/monitube-analysis-worker
-```
-
-Leave the legacy StatefulSet running but idle. It is the fastest rollback
-available, and it still holds every row as of step 1.
-
-## 6. Clean up, only after a full collection cycle
-
-```yaml
-legacyPostgres: {enabled: false}
-```
-
-Then tidy the parts the chart does not own:
-
-- Update `DATABASE_URL` inside `monitube-runtime-env` so the secret stops
-  carrying a value that no longer resolves.
-- Keep PVC `monitube-postgres` until you are certain. Its StorageClass no longer
-  exists, so deleting it is irreversible.
-- Consider a `ScheduledBackup` and an `ObjectStore` for `monitube-db`. The
-  `database` namespace already does this through `central-pg-tokyo-s3`;
-  `monitube-db` currently has no backup configured at all.
-
-## Rollback
-
-Before step 5, rollback is just redeploying with `cnpg.enabled: false` — nothing
-touched the legacy database.
-
-After step 5, the two databases diverge as soon as a worker writes. Rolling back
-then means setting `database.useCnpg: false` and accepting the loss of anything
-written to CNPG in the interim. Decide which way the data should flow before
-restarting the workers, not after.
+- full collection/NLP/analysis cycle과 승인된 soak 기간을 통과한다.
+- target의 physical backup과 Monitube logical backup을 새로 생성하고 restore 가능성을 확인한다.
+- source는 fenced/read-only로 보존한다.
+- data owner와 중앙 DB 운영자가 승인한 별도 change에서만 legacy resource를 정리한다.

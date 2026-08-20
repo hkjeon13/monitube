@@ -27,16 +27,16 @@ imagePullSecrets:
 
 {{/*
 DATABASE_URL as an explicit env entry. Kubernetes gives an explicit `env` key
-precedence over the same key arriving through `envFrom`, so switching
-database.useCnpg overrides the value baked into the runtime secret without
+precedence over the legacy value arriving through envFrom, so switching
+database.mode=central overrides the legacy value without
 anyone having to edit that secret by hand.
 */}}
 {{- define "monitube.databaseUrlEnv" -}}
-{{- if .Values.database.useCnpg }}
+{{- if eq .Values.database.mode "central" }}
 - name: DATABASE_URL
   valueFrom:
     secretKeyRef:
-      name: {{ .Values.cnpg.name }}-app
-      key: uri
+      name: {{ .Values.database.central.secretName }}
+      key: {{ .Values.database.central.uriKey }}
 {{- end }}
 {{- end -}}

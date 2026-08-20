@@ -20,8 +20,8 @@ pullSecrets:
   - name: devtron-local-registry-pull
 
 secrets:
-  # Carries DATABASE_URL and every other runtime variable. The chart overrides
-  # DATABASE_URL explicitly once CNPG is in use — see database.useCnpg.
+  # Carries the legacy DATABASE_URL and every other runtime variable. Central
+  # mode overrides only DATABASE_URL from database.central.secretName.
   runtime: monitube-runtime-env
   # POSTGRES_DB / POSTGRES_USER / POSTGRES_PASSWORD for the legacy StatefulSet.
   # CNPG also reads POSTGRES_PASSWORD from it to authenticate the import.
@@ -49,10 +49,22 @@ hostPorts:
   api: 18000
 
 database:
-  # false -> apps keep DATABASE_URL from the runtime secret (legacy postgres).
-  # true  -> apps read the URI from the CNPG-generated secret instead.
-  # This is the cutover switch. Flip it only after the import is verified.
-  useCnpg: false
+  # legacy keeps the current runtime Secret and is the production default.
+  # central makes API/workers/migration read a Monitube-specific Secret in the
+  # monitube-prod namespace. It never references a Secret across namespaces.
+  # This is the cutover switch; leave it at legacy through rehearsal/parity.
+  mode: legacy
+  central:
+    # Provisioned outside this chart from the central database credential
+    # workflow. It must include uri, host, port, dbname, username, password.
+    # Do not put credentials into this values file.
+    secretName: monitube-central-db
+    uriKey: uri
+    hostKey: host
+    portKey: port
+    databaseKey: dbname
+    usernameKey: username
+    passwordKey: password
 
 # The postgres:16-alpine StatefulSet that currently holds the data.
 # Keep it enabled through the migration. It is the rollback path, and CNPG
@@ -77,6 +89,8 @@ legacyPostgres:
     limits: {cpu: "4", memory: 8Gi}
 
 cnpg:
+  # Kept only for the older dedicated-Cluster chart path. It is not the
+  # central database migration target; central mode does not create a Cluster.
   enabled: false
   name: monitube-db
   # Single-node k3s cluster (mobichat-k3s-1). More than one instance buys no

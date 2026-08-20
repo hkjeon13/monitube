@@ -1,0 +1,14 @@
+{{- if and (ne .Values.database.mode "legacy") (ne .Values.database.mode "central") }}
+{{- fail "database.mode must be legacy or central" }}
+{{- end }}
+{{- if eq .Values.database.mode "central" }}
+{{- if not .Values.database.central.secretName }}
+{{- fail "database.central.secretName is required when database.mode=central" }}
+{{- end }}
+{{- if not .Values.database.central.uriKey }}
+{{- fail "database.central.uriKey is required when database.mode=central" }}
+{{- end }}
+{{- end }}
+{{- if .Values.cnpg.enabled }}
+{{- fail "cnpg.enabled creates the retired dedicated-Cluster path; use database.mode=central with an approved central Secret" }}
+{{- end }}
