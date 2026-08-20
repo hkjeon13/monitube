@@ -109,6 +109,16 @@ database inventory와 관측 RTO를 기록한다. 이 명령은 읽기 전용이
 rehearsal DB 이름이 안전 패턴에 맞지 않으면 실패한다. source writer/endpoint와 production
 target에는 application write를 하지 않는다.
 
+initial copy가 모두 Ready가 된 뒤에는 아래 verifier로 subscription 상태, source slot lag,
+핵심 table의 통계 count, invalid index를 기록한다. source writer가 계속 실행되는 rehearsal에서는
+source/target count가 즉시 동일하다고 가정하지 않고, lag와 동일 시점 bounded parity를 함께
+판정한다.
+
+```sh
+./scripts/cnpg_central_logical_rehearsal_verify.sh \
+  monitube_logical_rehearsal_YYYYMMDD_HHMMSS
+```
+
 결과와 lag/slot 증적을 기록한 뒤에만 아래 cleanup을 실행한다. 정확히 timestamp 형식의 격리
 rehearsal 이름과 `--confirm` 없이는 동작하지 않으며, target subscription을 먼저 제거한 후
 source publication·잔여 slot·temporary role과 격리 database를 정리한다.
