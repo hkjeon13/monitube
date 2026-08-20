@@ -7,11 +7,18 @@ namespace="${TARGET_NAMESPACE:-database}"
 cluster="${TARGET_CLUSTER:-central-pg-data}"
 database="${TARGET_DATABASE:-monitube}"
 expected_lsn="${EXPECTED_RECOVERY_LSN:-}"
+# The current Monitube schema has two historical NOT VALID constraints.  A
+# recovery gate must compare with that approved baseline, not incorrectly
+# treat their pre-existing state as data loss or a new migration failure.
+expected_unvalidated_constraints="${EXPECTED_UNVALIDATED_CONSTRAINTS:-2}"
 
 [ -n "$expected_lsn" ] || {
   echo 'EXPECTED_RECOVERY_LSN is required (the former primary clean-shutdown checkpoint LSN).' >&2
   exit 2
 }
+case "$expected_unvalidated_constraints" in
+  ''|*[!0-9]*) echo 'EXPECTED_UNVALIDATED_CONSTRAINTS must be a non-negative integer' >&2; exit 2 ;;
+esac
 command -v kubectl >/dev/null 2>&1 || { echo 'missing required command: kubectl' >&2; exit 2; }
 
 phase="$(kubectl -n "$namespace" get cluster "$cluster" -o jsonpath='{.status.phase}')"
@@ -66,7 +73,7 @@ integrity="$(sql '
   SELECT count(*) FROM comments c LEFT JOIN videos v ON v.id = c.video_id WHERE v.id IS NULL;
 ')"
 expected_integrity='0
-0
+'"$expected_unvalidated_constraints"'
 0
 0'
 [ "$integrity" = "$expected_integrity" ] || {

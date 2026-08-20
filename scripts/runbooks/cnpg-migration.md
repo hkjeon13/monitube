@@ -323,6 +323,6 @@ integrity를 증명할 뿐이며, data owner가 former primary snapshot과의 bo
 worker나 API write를 재개하지 않는다.
 
 ```sh
-EXPECTED_RECOVERY_LSN=3E/A3000028 \
+EXPECTED_RECOVERY_LSN=3E/A3000028 EXPECTED_UNVALIDATED_CONSTRAINTS=2 \
   ./scripts/cnpg_central_failover_verify.sh
 ```
