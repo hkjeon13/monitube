@@ -33,10 +33,16 @@ target_exists="$(kubectl -n "$target_namespace" exec "$target_primary" -c postgr
   psql -X -U postgres -d postgres -Atc "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = '$rehearsal_database')")"
 [ "$target_exists" = "t" ] || { echo "isolated rehearsal database is absent: $rehearsal_database" >&2; exit 1; }
 
+subscription_oid="$(kubectl -n "$target_namespace" exec "$target_primary" -c postgres -- \
+  psql -X -U postgres -d "$rehearsal_database" -Atc "SELECT oid FROM pg_subscription WHERE subname = '$subscription'")"
+[ -n "$subscription_oid" ] || { echo "target subscription is absent: $subscription" >&2; exit 1; }
+
 pending="$(kubectl -n "$target_namespace" exec "$target_primary" -c postgres -- \
-  psql -X -U postgres -d "$rehearsal_database" -Atc "SELECT count(*) FROM pg_subscription_rel WHERE srsubid = (SELECT oid FROM pg_subscription WHERE subname = '$subscription') AND srsubstate <> 'r'")"
+  psql -X -U postgres -d "$rehearsal_database" -Atc "SELECT count(*) FROM pg_subscription_rel WHERE srsubid = $subscription_oid AND srsubstate <> 'r'")"
 [ "$pending" = "0" ] || {
-  echo "initial copy is incomplete: pending_relations=$pending" >&2
+  relation_states="$(kubectl -n "$target_namespace" exec "$target_primary" -c postgres -- \
+    psql -X -U postgres -d "$rehearsal_database" -Atc "SELECT srsubstate || '|' || count(*) FROM pg_subscription_rel WHERE srsubid = $subscription_oid GROUP BY srsubstate ORDER BY srsubstate")"
+  echo "initial copy is incomplete: pending_relations=$pending states=${relation_states}" >&2
   exit 1
 }
 
@@ -50,11 +56,24 @@ slot_lag_bytes="${slot_state#*|}"
   exit 1
 }
 
+# PostgreSQL creates one temporary slot per table-sync worker.  Those slots
+# must disappear once every relation is ready; otherwise their retained WAL
+# can keep growing even though the main subscription slot is healthy.
+sync_slot_state="$(source_sql "SELECT count(*) || '|' || COALESCE(max(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)), 0) FROM pg_replication_slots WHERE slot_name LIKE 'pg_${subscription_oid}_sync_%'")"
+sync_slot_count="${sync_slot_state%%|*}"
+sync_slot_max_retained_bytes="${sync_slot_state#*|}"
+[ "$sync_slot_count" = "0" ] || {
+  echo "temporary table-sync slots remain after initial copy: count=${sync_slot_count} max_retained_bytes=${sync_slot_max_retained_bytes}" >&2
+  exit 1
+}
+
 echo "logical_rehearsal=$rehearsal_database"
 echo "subscription=$subscription"
 echo "initial_copy_pending_relations=$pending"
 echo "source_slot_lag_bytes=$slot_lag_bytes"
 echo "source_slot_active=$slot_active"
+echo "source_temporary_sync_slot_count=$sync_slot_count"
+echo "source_temporary_sync_slot_max_retained_bytes=$sync_slot_max_retained_bytes"
 
 kubectl -n "$target_namespace" exec "$target_primary" -c postgres -- \
   psql -X -v ON_ERROR_STOP=1 -U postgres -d "$rehearsal_database" -Atc \

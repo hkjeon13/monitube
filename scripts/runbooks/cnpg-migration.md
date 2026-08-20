@@ -109,8 +109,8 @@ database inventory와 관측 RTO를 기록한다. 이 명령은 읽기 전용이
 rehearsal DB 이름이 안전 패턴에 맞지 않으면 실패한다. source writer/endpoint와 production
 target에는 application write를 하지 않는다.
 
-initial copy가 모두 Ready가 된 뒤에는 아래 verifier로 subscription 상태, source slot lag,
-핵심 table의 통계 count, invalid index를 기록한다. source writer가 계속 실행되는 rehearsal에서는
+initial copy가 모두 Ready가 된 뒤에는 아래 verifier로 subscription 상태, source 주 슬롯 lag,
+초기 table-sync 임시 슬롯의 완전 정리, 핵심 table의 통계 count, invalid index를 기록한다. source writer가 계속 실행되는 rehearsal에서는
 source/target count가 즉시 동일하다고 가정하지 않고, lag와 동일 시점 bounded parity를 함께
 판정한다.
 
