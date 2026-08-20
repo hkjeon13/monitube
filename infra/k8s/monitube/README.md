@@ -51,6 +51,10 @@ API's `MONITUBE_MAINTENANCE_READ_ONLY=true`; every `POST`, `PUT`, `PATCH`, and
 when false, so the normal legacy release does not restart merely to carry a
 false environment variable.
 
+In that mode, authenticated `GET` requests also do not refresh session expiry
+or emit a new session cookie. This preserves read access without introducing a
+hidden source-database write during the stable quiesce window.
+
 Central mode adds an explicit `DATABASE_URL` sourced from a Monitube-specific
 Secret in the **same namespace** as the workloads. Kubernetes gives an explicit
 `env` entry precedence over the same key arriving through `envFrom`, so the

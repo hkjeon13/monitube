@@ -243,12 +243,19 @@ pub async fn require_session(
         .user_for_session(&token)
         .await?
         .ok_or(AuthError::LoginRequired)?;
-    state.auth.refresh_session(&token).await?;
+    // The central-DB cutover fence still serves authenticated reads. Refreshing
+    // the session here would make every GET a source-database write and prevent
+    // the required stable writer-quiesce window.
+    if !state.maintenance_read_only {
+        state.auth.refresh_session(&token).await?;
+    }
     request.extensions_mut().insert(user);
     let mut response = next.run(request).await;
-    response
-        .headers_mut()
-        .append(SET_COOKIE, session_cookie(&token, state.secure_cookies)?);
+    if !state.maintenance_read_only {
+        response
+            .headers_mut()
+            .append(SET_COOKIE, session_cookie(&token, state.secure_cookies)?);
+    }
     Ok(response)
 }
 

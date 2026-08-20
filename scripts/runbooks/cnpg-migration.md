@@ -131,7 +131,8 @@ helm template monitube infra/k8s/monitube --namespace monitube-prod \
 1. 예약 수집, CronJob, 외부 enqueue를 중단하고 `maintenance.apiReadOnly=true`인
    chart release로 API의 mutation을 fence한다.
 2. 실제 `POST`/`PUT`/`PATCH`/`DELETE`가 `503 maintenance_read_only`로 거부되고
-   `/health`, `/ready`, authenticated GET은 유지되는지 확인한다.
+   `/health`, `/ready`, authenticated GET은 유지되는지 확인한다. 이 상태의 GET은
+   session expiry/cookie를 갱신하지 않아 source DB write를 만들지 않는다.
 3. collection, NLP, analysis worker replica를 0으로 내려 신규 claim을 중단한다.
 4. active lease, transaction, lock을 drain한다.
 5. source count와 WAL 위치가 승인된 안정 시간 동안 변하지 않음을 기록한다.
