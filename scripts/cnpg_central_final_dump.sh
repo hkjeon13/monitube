@@ -8,6 +8,8 @@ output_dir="${1:?usage: $0 /absolute/path/to/output-directory --confirm-writer-f
 confirmation="${2:-}"
 source_namespace="${SOURCE_NAMESPACE:-monitube-prod}"
 source_pod="${SOURCE_POD:-monitube-postgres-0}"
+target_namespace="${TARGET_NAMESPACE:-database}"
+target_cluster="${TARGET_CLUSTER:-central-pg-data}"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 basename="monitube-final-${timestamp}"
 partial_dump="${output_dir}/.${basename}.pg_dump.partial"
@@ -24,7 +26,6 @@ case "$output_dir" in
   *) echo "output directory must be an absolute path" >&2; exit 2 ;;
 esac
 command -v kubectl >/dev/null 2>&1 || { echo "missing required command: kubectl" >&2; exit 2; }
-command -v pg_restore >/dev/null 2>&1 || { echo "missing required command: pg_restore" >&2; exit 2; }
 command -v sha256sum >/dev/null 2>&1 || { echo "missing required command: sha256sum" >&2; exit 2; }
 [ -d "$output_dir" ] || { echo "output directory does not exist: $output_dir" >&2; exit 2; }
 [ ! -e "$dump_path" ] || { echo "refusing to overwrite existing dump: $dump_path" >&2; exit 2; }
@@ -32,10 +33,15 @@ command -v sha256sum >/dev/null 2>&1 || { echo "missing required command: sha256
 [ ! -e "$manifest_path" ] || { echo "refusing to overwrite existing manifest: $manifest_path" >&2; exit 2; }
 
 umask 077
-cleanup_partial() {
+target_primary="$(kubectl -n "$target_namespace" get cluster "$target_cluster" -o jsonpath='{.status.currentPrimary}')"
+[ -n "$target_primary" ] || { echo "target cluster has no reported primary" >&2; exit 1; }
+remote_toc_probe="/var/lib/postgresql/data/.${basename}.toc-check.pg_dump"
+cleanup_staging() {
   rm -f "$partial_dump"
+  kubectl -n "$target_namespace" exec "$target_primary" -c postgres -- \
+    rm -f "$remote_toc_probe" >/dev/null 2>&1 || true
 }
-trap cleanup_partial EXIT HUP INT TERM
+trap cleanup_staging EXIT HUP INT TERM
 
 # This checks the deployed API fence, all worker replicas, drain state, and
 # two identical source snapshots.  Keep its evidence beside the final dump.
@@ -47,7 +53,11 @@ kubectl -n "$source_namespace" exec "$source_pod" -- sh -ec \
   'exec pg_dump -Fc --no-owner --no-acl -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
   > "$partial_dump"
 
-pg_restore --list "$partial_dump" >/dev/null
+kubectl -n "$target_namespace" cp "$partial_dump" "$target_primary:$remote_toc_probe" -c postgres
+kubectl -n "$target_namespace" exec "$target_primary" -c postgres -- \
+  pg_restore --list "$remote_toc_probe" >/dev/null
+kubectl -n "$target_namespace" exec "$target_primary" -c postgres -- \
+  rm -f "$remote_toc_probe" >/dev/null 2>&1 || true
 mv "$partial_dump" "$dump_path"
 trap - EXIT HUP INT TERM
 
