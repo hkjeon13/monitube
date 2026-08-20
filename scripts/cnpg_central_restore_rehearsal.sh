@@ -54,6 +54,6 @@ kubectl -n "$target_namespace" exec "$target_primary" -c postgres -- sh -ec \
 echo "restoring with no owner/ACL replay and role=monitube"
 kubectl -n "$target_namespace" exec "$target_primary" -c postgres -- pg_restore -U postgres --role=monitube --no-owner --no-privileges --exit-on-error --jobs="$parallel_jobs" --use-list="$remote_filtered_toc" --dbname="$rehearsal_database" "$remote_dump"
 echo "analyzing restored database"
-kubectl -n "$target_namespace" exec "$target_primary" -c postgres -- vacuumdb -U postgres --role=monitube --analyze-in-stages --jobs="$parallel_jobs" "$rehearsal_database"
+kubectl -n "$target_namespace" exec "$target_primary" -c postgres -- vacuumdb -U postgres --analyze-in-stages --jobs="$parallel_jobs" "$rehearsal_database"
 kubectl -n "$target_namespace" exec "$target_primary" -c postgres -- psql -X -U postgres -d "$rehearsal_database" -Atc "SELECT current_database(); SELECT count(*) FROM pg_tables WHERE schemaname = 'public'; SELECT count(*) FROM monitube_schema_migrations; SELECT pg_size_pretty(pg_database_size(current_database()));"
 echo "rehearsal restore completed: $rehearsal_database"

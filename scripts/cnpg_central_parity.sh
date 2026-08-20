@@ -43,6 +43,8 @@ metrics_sql='
   SELECT count(*) FROM pg_indexes
     WHERE schemaname = chr(112)||chr(117)||chr(98)||chr(108)||chr(105)||chr(99);
   SELECT count(*) FROM pg_index WHERE NOT indisvalid OR NOT indisready;
+  SELECT count(*) FROM pg_constraint
+    WHERE contype IN (chr(112), chr(102), chr(117), chr(99)) AND NOT convalidated;
   SELECT count(*) FROM source_videos sv
     LEFT JOIN collection_sources cs ON cs.id = sv.source_id
     LEFT JOIN videos v ON v.id = sv.video_id
