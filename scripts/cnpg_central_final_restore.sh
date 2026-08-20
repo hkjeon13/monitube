@@ -24,39 +24,8 @@ command -v kubectl >/dev/null 2>&1 || { echo "missing required command: kubectl"
 command -v sha256sum >/dev/null 2>&1 || { echo "missing required command: sha256sum" >&2; exit 2; }
 [ -f "$dump_path" ] || { echo "dump does not exist: $dump_path" >&2; exit 2; }
 
-source_sql() {
-  kubectl -n "$source_namespace" exec "$source_pod" -- sh -ec \
-    'psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "$1"' sh "$1"
-}
-
-# This checks the deployed Pods rather than merely trusting a requested Helm
-# value. API GETs can remain available, but its mutating routes must be fenced
-# before the final dump can become the cutover snapshot.
-api_fence="$(kubectl -n "$source_namespace" get deploy monitube-api \
-  -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="MONITUBE_MAINTENANCE_READ_ONLY")].value}')"
-[ "$api_fence" = "true" ] || {
-  echo "API write fence is not deployed; expected MONITUBE_MAINTENANCE_READ_ONLY=true" >&2
-  exit 1
-}
-for deployment in monitube-collection-worker monitube-nlp-worker monitube-analysis-worker; do
-  replicas="$(kubectl -n "$source_namespace" get deploy "$deployment" -o jsonpath='{.spec.replicas}')"
-  [ "$replicas" = "0" ] || {
-    echo "worker is not scaled down: ${deployment} replicas=${replicas}" >&2
-    exit 1
-  }
-done
-
-source_quiesce="$(source_sql "
-  SELECT count(*) FROM pg_stat_activity
-   WHERE datname = current_database() AND pid <> pg_backend_pid()
-     AND state <> 'idle';
-  SELECT count(*) FROM pg_locks WHERE NOT granted;")"
-expected_quiesce='0
-0'
-[ "$source_quiesce" = "$expected_quiesce" ] || {
-  echo "source is not quiescent: active_transactions_or_queries/waiting_locks=${source_quiesce}" >&2
-  exit 1
-}
+SOURCE_NAMESPACE="$source_namespace" SOURCE_POD="$source_pod" \
+  ./scripts/cnpg_central_quiesce_verify.sh
 
 target_primary="$(kubectl -n "$target_namespace" get cluster "$target_cluster" -o jsonpath='{.status.currentPrimary}')"
 [ -n "$target_primary" ] || { echo "target cluster has no reported primary" >&2; exit 1; }

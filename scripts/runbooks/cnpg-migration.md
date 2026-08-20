@@ -181,6 +181,14 @@ helm template monitube infra/k8s/monitube --namespace monitube-prod \
 4. active lease, transaction, lock을 drain한다.
 5. source count와 WAL 위치가 승인된 안정 시간 동안 변하지 않음을 기록한다.
 
+아래 read-only verifier는 실제 deployed API fence, 세 worker replica 0, source의 active
+client/lock/lease 0 및 두 snapshot의 LSN·핵심 count 일치를 확인한다. final restore는 내부적으로
+같은 verifier를 다시 실행하므로, 이 결과 없이 target write를 시작할 수 없다.
+
+```sh
+QUIESCE_STABILITY_SECONDS=60 ./scripts/cnpg_central_quiesce_verify.sh
+```
+
 timeout이면 source writer를 다시 열고 cutover를 중단한다.
 
 ### Final restore와 parity
