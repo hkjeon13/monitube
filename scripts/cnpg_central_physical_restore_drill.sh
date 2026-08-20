@@ -9,6 +9,7 @@ object_store="${OBJECT_STORE:-central-pg-tokyo-s3}"
 image="${CNPG_IMAGE:-192.168.219.103:30500/cnpg-pg17-pgvector:17.11-0.8.2}"
 storage_class="${CNPG_STORAGE_CLASS:-database-local-retain}"
 storage_size="${CNPG_STORAGE_SIZE:-40Gi}"
+recovery_target_time="${RECOVERY_TARGET_TIME:-}"
 drill_name="${1:-central-pg-data-restore-$(date -u +%Y%m%d-%H%M%S)}"
 
 case "$drill_name" in
@@ -16,6 +17,14 @@ case "$drill_name" in
   *) echo "drill name must use central-pg-data-restore-YYYYMMDD-HHMMSS" >&2; exit 2 ;;
 esac
 command -v kubectl >/dev/null 2>&1 || { echo "missing required command: kubectl" >&2; exit 2; }
+[ -n "$recovery_target_time" ] || {
+  echo "RECOVERY_TARGET_TIME is required (RFC3339 UTC, for example 2026-08-20T06:15:00Z)" >&2
+  exit 2
+}
+case "$recovery_target_time" in
+  [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;;
+  *) echo "RECOVERY_TARGET_TIME must use RFC3339 UTC YYYY-MM-DDTHH:MM:SSZ" >&2; exit 2 ;;
+esac
 
 source_phase="$(kubectl -n "$namespace" get cluster "$source_cluster" -o jsonpath='{.status.phase}')"
 [ "$source_phase" = "Cluster in healthy state" ] || {
@@ -46,6 +55,10 @@ spec:
   bootstrap:
     recovery:
       source: source
+      # An unbounded recovery follows the WAL archive indefinitely and never
+      # yields a promotable drill result while the source is active.
+      recoveryTarget:
+        targetTime: "$recovery_target_time"
   externalClusters:
     - name: source
       plugin:

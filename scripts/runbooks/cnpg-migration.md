@@ -62,6 +62,16 @@ deployment values에 명시한다.
    각각 rehearsal한다.
 5. restore 시간이 maintenance window 안인지 기록한다.
 
+physical restore drill에는 반드시 bounded `recoveryTarget.targetTime`을 지정한다. source가
+계속 WAL을 archive하는 동안 target 없이 복구하면 recovery가 끝나지 않아 RTO를 측정할 수
+없다. target은 latest completed base backup 이후이면서 drill 시작 시점 이전의 RFC3339 UTC
+시각으로 기록한다.
+
+```sh
+RECOVERY_TARGET_TIME=YYYY-MM-DDTHH:MM:SSZ \
+  ./scripts/cnpg_central_physical_restore_drill.sh
+```
+
 `--clean`, `DROP DATABASE`, `DROP SCHEMA`을 active source 또는 중앙 target에 임의로
 사용하지 않는다. 빈 target을 다시 준비하는 작업은 별도 승인이다.
 
