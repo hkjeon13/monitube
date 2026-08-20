@@ -16,6 +16,8 @@ phase="$(kubectl -n "$namespace" get cluster "$drill_name" -o jsonpath='{.status
 ready="$(kubectl -n "$namespace" get cluster "$drill_name" -o jsonpath='{.status.readyInstances}')"
 primary="$(kubectl -n "$namespace" get cluster "$drill_name" -o jsonpath='{.status.currentPrimary}')"
 target_time="$(kubectl -n "$namespace" get cluster "$drill_name" -o jsonpath='{.spec.bootstrap.recovery.recoveryTarget.targetTime}')"
+backup_id="$(kubectl -n "$namespace" get cluster "$drill_name" -o jsonpath='{.spec.bootstrap.recovery.recoveryTarget.backupID}')"
+target_immediate="$(kubectl -n "$namespace" get cluster "$drill_name" -o jsonpath='{.spec.bootstrap.recovery.recoveryTarget.targetImmediate}')"
 created_at="$(kubectl -n "$namespace" get cluster "$drill_name" -o jsonpath='{.metadata.creationTimestamp}')"
 
 [ "$phase" = "Cluster in healthy state" ] || {
@@ -24,14 +26,22 @@ created_at="$(kubectl -n "$namespace" get cluster "$drill_name" -o jsonpath='{.m
 }
 [ "$ready" = "1" ] || { echo "restore drill is not ready: ready=${ready:-0}" >&2; exit 1; }
 [ -n "$primary" ] || { echo "restore drill has no primary" >&2; exit 1; }
-[ -n "$target_time" ] || { echo "restore drill lacks recoveryTarget.targetTime" >&2; exit 1; }
+[ -n "$target_time" ] || [ "$target_immediate" = "true" ] || {
+  echo "restore drill lacks a bounded recovery target" >&2
+  exit 1
+}
 
 created_epoch="$(date -u -d "$created_at" +%s 2>/dev/null || date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$created_at" +%s)"
 observed_epoch="$(date -u +%s)"
 elapsed_seconds=$((observed_epoch - created_epoch))
 
 echo "physical_restore_drill=$namespace/$drill_name"
-echo "recovery_target_time=$target_time"
+if [ -n "$target_time" ]; then
+  echo "recovery_target_time=$target_time"
+else
+  echo "recovery_target_immediate=true"
+  echo "recovery_backup_id=$backup_id"
+fi
 echo "created_at=$created_at"
 echo "observed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "observed_rto_seconds=$elapsed_seconds"

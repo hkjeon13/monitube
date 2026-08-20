@@ -9,7 +9,7 @@ object_store="${OBJECT_STORE:-central-pg-tokyo-s3}"
 image="${CNPG_IMAGE:-192.168.219.103:30500/cnpg-pg17-pgvector:17.11-0.8.2}"
 storage_class="${CNPG_STORAGE_CLASS:-database-local-retain}"
 storage_size="${CNPG_STORAGE_SIZE:-40Gi}"
-recovery_target_time="${RECOVERY_TARGET_TIME:-}"
+backup_id="${RECOVERY_BACKUP_ID:-}"
 drill_name="${1:-central-pg-data-restore-$(date -u +%Y%m%d-%H%M%S)}"
 
 case "$drill_name" in
@@ -17,15 +17,13 @@ case "$drill_name" in
   *) echo "drill name must use central-pg-data-restore-YYYYMMDD-HHMMSS" >&2; exit 2 ;;
 esac
 command -v kubectl >/dev/null 2>&1 || { echo "missing required command: kubectl" >&2; exit 2; }
-[ -n "$recovery_target_time" ] || {
-  echo "RECOVERY_TARGET_TIME is required (RFC3339 UTC offset, for example 2026-08-20T06:15:00+00:00)" >&2
+[ -n "$backup_id" ] || {
+  echo "RECOVERY_BACKUP_ID is required (Barman backup ID, for example 20260819T180000)" >&2
   exit 2
 }
-case "$recovery_target_time" in
-  # CNPG writes this value verbatim to PostgreSQL's recovery_target_time.
-  # PostgreSQL 17 accepts an explicit UTC offset here, but not a trailing Z.
-  [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]+00:00) ;;
-  *) echo "RECOVERY_TARGET_TIME must use RFC3339 UTC YYYY-MM-DDTHH:MM:SS+00:00" >&2; exit 2 ;;
+case "$backup_id" in
+  [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+  *) echo "RECOVERY_BACKUP_ID must use Barman ID YYYYMMDDTHHMMSS" >&2; exit 2 ;;
 esac
 
 source_phase="$(kubectl -n "$namespace" get cluster "$source_cluster" -o jsonpath='{.status.phase}')"
@@ -57,10 +55,11 @@ spec:
   bootstrap:
     recovery:
       source: source
-      # An unbounded recovery follows the WAL archive indefinitely and never
-      # yields a promotable drill result while the source is active.
+      # Restore exactly the named completed base backup and promote as soon as
+      # it reaches a consistent state. This never follows the active WAL tail.
       recoveryTarget:
-        targetTime: "$recovery_target_time"
+        backupID: "$backup_id"
+        targetImmediate: true
   externalClusters:
     - name: source
       plugin:

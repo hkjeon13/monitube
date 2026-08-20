@@ -62,14 +62,15 @@ deployment values에 명시한다.
    각각 rehearsal한다.
 5. restore 시간이 maintenance window 안인지 기록한다.
 
-physical restore drill에는 반드시 bounded `recoveryTarget.targetTime`을 지정한다. source가
-계속 WAL을 archive하는 동안 target 없이 복구하면 recovery가 끝나지 않아 RTO를 측정할 수
-없다. target은 latest completed base backup 이후이면서 drill 시작 시점 이전의 RFC3339 UTC
-offset(`+00:00`) 시각으로 기록한다. CNPG가 값을 PostgreSQL 설정에 그대로 전달하므로 trailing
-`Z` 표기는 사용하지 않는다.
+physical restore drill에는 반드시 bounded recovery target을 지정한다. source가 계속 WAL을
+archive하는 동안 target 없이 복구하면 recovery가 끝나지 않아 RTO를 측정할 수 없다. 현재
+CNPG `1.27.0` + PostgreSQL 17 조합은 `targetTime`을 PostgreSQL 설정의 trailing `Z` 값으로
+정규화해 기동 전에 거부하므로, 이 drill은 확인한 completed base backup ID와 `targetImmediate`
+로 일관 시점에서 승격한다. 이는 physical backup/RTO 검증용이며, timestamp PITR은 CNPG
+업그레이드 후 별도 호환성 rehearsal을 통과하기 전에는 cutover 근거로 사용하지 않는다.
 
 ```sh
-RECOVERY_TARGET_TIME=YYYY-MM-DDTHH:MM:SS+00:00 \
+RECOVERY_BACKUP_ID=YYYYMMDDTHHMMSS \
   ./scripts/cnpg_central_physical_restore_drill.sh
 ```
 
