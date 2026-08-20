@@ -1,5 +1,6 @@
 {{- $root := . -}}
 {{- $img := .Values.images -}}
+{{- $maintenance := default (dict) .Values.maintenance -}}
 {{/*
 Worker components share everything but their image and replica count.
 */}}
@@ -117,6 +118,10 @@ spec:
             - name: REDIS_URL
               value: redis://redis:6379/0
             {{- include "monitube.databaseUrlEnv" . | nindent 12 }}
+            {{- if (default false (get $maintenance "apiReadOnly")) }}
+            - name: MONITUBE_MAINTENANCE_READ_ONLY
+              value: "true"
+            {{- end }}
           readinessProbe:
             httpGet: {path: /ready, port: http}
             periodSeconds: 10

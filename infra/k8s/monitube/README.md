@@ -35,6 +35,7 @@ The central migration uses one explicit application switch. See
 | `database.mode` | `legacy` | keep the legacy URL from `monitube-runtime-env` |
 | `database.mode` | `central` | use `database.central.secretName/uriKey` in `monitube-prod` |
 | `legacyPostgres.enabled` | `true` | retain the legacy DB through restore drill and soak |
+| `maintenance.apiReadOnly` | `false` | cutover-only API write fence; GET/health/ready stay available |
 
 The defaults describe what is running now, so a deploy with no value changes is
 a no-op against the live cluster.
@@ -43,6 +44,12 @@ The older release persisted `database.useCnpg` rather than `database.mode`.
 When Helm upgrades with `--reuse-values`, an absent `database.mode` is treated
 as `legacy` explicitly; it never selects central by accident. Set
 `database.mode=central` only in the approved cutover release.
+
+Set `maintenance.apiReadOnly=true` only during writer quiesce. It injects the
+API's `MONITUBE_MAINTENANCE_READ_ONLY=true`; every `POST`, `PUT`, `PATCH`, and
+`DELETE` then returns `503` before a handler can write. The value is omitted
+when false, so the normal legacy release does not restart merely to carry a
+false environment variable.
 
 Central mode adds an explicit `DATABASE_URL` sourced from a Monitube-specific
 Secret in the **same namespace** as the workloads. Kubernetes gives an explicit

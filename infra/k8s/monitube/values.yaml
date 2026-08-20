@@ -66,6 +66,13 @@ database:
     usernameKey: username
     passwordKey: password
 
+# Cutover-only API write fence. Keeping it false omits the environment
+# variable completely, so upgrading the normal legacy release does not restart
+# the API. When true, every POST/PUT/PATCH/DELETE returns 503 while GET health,
+# readiness and product reads remain available for the quiesce gate.
+maintenance:
+  apiReadOnly: false
+
 # The postgres:16-alpine StatefulSet that currently holds the data.
 # Keep it enabled through the migration. It is the rollback path, and CNPG
 # imports from it. Disable only once the CNPG cluster is verified and soaked.

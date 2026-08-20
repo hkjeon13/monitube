@@ -17,8 +17,8 @@ mod workspace_analysis;
 use auth::AuthService;
 use axum::extract::State;
 use axum::http::header::{ACCEPT, CONTENT_TYPE};
-use axum::http::{HeaderName, Method, StatusCode};
-use axum::middleware;
+use axum::http::{HeaderName, Method, Request, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -38,6 +38,7 @@ pub(crate) struct AppState {
     pool: PgPool,
     auth: AuthService,
     secure_cookies: bool,
+    maintenance_read_only: bool,
     youtube_api_key_encryption_key: Option<String>,
     youtube_key_registration_token: Option<String>,
     tokenizer_client: reqwest::Client,
@@ -60,6 +61,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             auth: AuthService::new(pool.clone()),
             pool,
             secure_cookies: config.secure_cookies,
+            maintenance_read_only: config.maintenance_read_only,
             youtube_api_key_encryption_key: config.youtube_api_key_encryption_key,
             youtube_key_registration_token: config.youtube_key_registration_token,
             tokenizer_client,
@@ -194,7 +196,36 @@ fn build_router(state: AppState, cors: CorsLayer, request_timeout: std::time::Du
         .layer(CatchPanicLayer::new())
         .layer(TraceLayer::new_for_http())
         .layer(cors)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            reject_mutating_requests,
+        ))
         .with_state(state)
+}
+
+async fn reject_mutating_requests(
+    State(state): State<AppState>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    if state.maintenance_read_only && is_mutating_method(request.method()) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": "maintenance_read_only",
+                "message": "Writes are temporarily disabled for database maintenance"
+            })),
+        )
+            .into_response();
+    }
+    next.run(request).await
+}
+
+const fn is_mutating_method(method: &Method) -> bool {
+    matches!(
+        *method,
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    )
 }
 
 async fn health() -> Json<HealthResponse> {
@@ -222,6 +253,7 @@ async fn ready(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
         "database": "ok",
         "migrationCurrent": true,
         "pool": "enabled",
+        "maintenance": {"readOnly": state.maintenance_read_only},
         "poolStats": {
             "pool_size": state.pool.size(),
             "pool_available": state.pool.num_idle(),
@@ -347,12 +379,23 @@ pub(crate) const fn is_false(value: &bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::health;
+    use super::{health, is_mutating_method};
+    use axum::http::Method;
 
     #[tokio::test]
     async fn health_contract_matches_python_api() {
         let response = health().await;
         assert_eq!(response.status, "ok");
         assert_eq!(response.service, "monitube-api");
+    }
+
+    #[test]
+    fn maintenance_fence_only_rejects_mutating_methods() {
+        for method in [Method::POST, Method::PUT, Method::PATCH, Method::DELETE] {
+            assert!(is_mutating_method(&method));
+        }
+        for method in [Method::GET, Method::HEAD, Method::OPTIONS] {
+            assert!(!is_mutating_method(&method));
+        }
     }
 }

@@ -11,6 +11,7 @@ pub struct AppConfig {
     pub listen_address: SocketAddr,
     pub pool: PoolConfig,
     pub secure_cookies: bool,
+    pub maintenance_read_only: bool,
     pub cors_origins: Vec<HeaderValue>,
     pub request_timeout: Duration,
     pub tokenizer_base_url: String,
@@ -55,6 +56,7 @@ impl AppConfig {
             database_url,
             listen_address: SocketAddr::new(ip, port),
             secure_cookies,
+            maintenance_read_only: parse_bool("MONITUBE_MAINTENANCE_READ_ONLY", false)?,
             cors_origins,
             request_timeout,
             tokenizer_base_url: optional("TOKENIZER_BASE_URL")
