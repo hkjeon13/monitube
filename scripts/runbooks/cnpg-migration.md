@@ -122,6 +122,12 @@ Initial copy 중 temporary table-sync slot이 source WAL을 보존하므로 sour
 subscription/publication, temporary role와 slot만** cleanup하고 production central `monitube`와
 application endpoint는 건드리지 않는다. 실행에는 명시적 opt-in이 필요하다.
 
+현재 Monitube source의 active-writer rehearsal은 52분에 19/48 relation만 Ready인 동안
+temporary slot WAL이 약 13.25GiB까지 증가해 안전 중단했다. 그러므로 이 환경의 production
+cutover는 active-writer logical replication으로 재시도하지 않고, writer quiesce 뒤 final
+logical dump/restore를 사용한다. logical rehearsal을 다시 시도하려면 quiet window 또는 별도
+source WAL capacity가 먼저 필요하다.
+
 ```sh
 SOURCE_MIN_FREE_BYTES=$((64 * 1024 * 1024 * 1024)) \
   ./scripts/cnpg_central_logical_rehearsal_safeguard.sh \
