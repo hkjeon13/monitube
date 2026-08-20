@@ -51,7 +51,8 @@ final sync 없이 cutover할 수 있으므로, 중앙 DB용 runbook으로 교체
 | connection budget | 완료 | API + 3 workers의 현재 max pool은 각각 2, 합계 8이다. migration 1, reconnect reserve 8을 더해도 role limit 100 및 central max_connections 300 안이다. |
 | Source baseline | 완료 | preflight 기준 `38 collection_sources`, `2,260 channels`, `29,228 videos`, `11,142,774 comments`, migration 25, 약 34 GB. Cutover 직전에는 반드시 다시 측정한다. |
 | Off-node logical backup | 완료 | source writer를 멈추지 않은 custom dump(3,552,948,934 bytes)를 생성했다. `pg_restore --list`와 SHA-256 `38a77de63e457446dbd7fdb320a8f582a432eeb8a29ca41247fc8a591a072e2b`를 검증했고, node 밖의 independent copy도 동일 checksum을 확인했다. |
-| Rehearsal restore | 진행 중 | source dump를 **별도 `monitube_rehearsal_20260820_045753` database**에 restore 중이다. 비어 있는 production target `monitube`는 final cutover 전까지 public table 0개로 보존한다. |
+| Rehearsal restore | 완료 (final parity 용도 아님) | source dump를 **별도 `monitube_rehearsal_20260820_045753` database**에 restore하고 `ANALYZE`까지 완료했다. 핵심 source snapshot count, migration 25, extension, index validity 및 orphan check가 일치했다. 다만 source writer를 멈추지 않은 snapshot이므로 이후의 NLP/queue 변화는 정상이며, final parity로 사용하면 안 된다. production target `monitube`는 public table 0개로 보존한다. |
+| Physical restore drill | 진행 중 | `central-pg-data` Barman backup을 독립 1-instance CNPG recovery Cluster로 복원했다. base backup 복원 후 WAL replay가 계속 진행 중이며, 완료/승격 후 읽기 검증과 실제 RTO를 기록한다. |
 
 공유 central Cluster에는 다른 service database가 있으므로, 모든 기존 소비자의 egress/ingress를
 열거하기 전에는 partial NetworkPolicy를 적용하지 않는다. 하나의 정책으로 기존 central DB traffic을
@@ -168,8 +169,10 @@ daily CNPG backup 성공만으로 Monitube DB 단독 복구가 증명됐다고 �
 
 ## 6. Phase 2 — Import/restore rehearsal
 
-기본 방식은 **계획된 write freeze + final logical dump/restore**로 한다. 허용 downtime을
-넘는다는 측정 결과가 있을 때만 논리 복제를 별도 설계한다.
+기본 방식은 **계획된 write freeze + final logical dump/restore**로 한다. 첫 logical
+restore rehearsal은 약 33분이 걸렸으므로, 승인된 write freeze가 이를 넘지 않는다면 논리
+복제 기반의 별도 rehearsal을 먼저 통과해야 한다. 이 경로도 dual-write를 허용하지 않으며,
+cutover 직전 writer fence와 final sequence sync는 필수다.
 
 ### 6.1 Logical restore 계약
 
