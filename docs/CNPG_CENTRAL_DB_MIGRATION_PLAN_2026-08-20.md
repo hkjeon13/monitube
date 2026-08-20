@@ -352,6 +352,10 @@ PK 구간별 bounded query로 실행한다.
   진행 중이다. central node free가 약 85GiB여서 23GiB logical backup의 3-replica isolated
   full restore는 지금 병행하지 않는다. live final restore 성공과 새 TOC verification을 보존하고,
   별도 capacity window에서 post-cutover isolated restore drill을 수행한다.
+- revision 19에서 legacy PostgreSQL의 migration-only logical replication opt-in을 해제했다.
+  `wal_level=replica`, replication slot 0, source Pod Ready/restart 0을 재확인했다.
+  `2026-08-20T09:59Z` soak 점검에서 API와 세 worker는 모두 1/1 Ready, `/ready` 200,
+  legacy app connection 0, central ungranted lock 0 및 recent fatal DB error 0이었다.
 
 ## 11. Rollback 결정표
 
