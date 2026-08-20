@@ -18,12 +18,14 @@ case "$drill_name" in
 esac
 command -v kubectl >/dev/null 2>&1 || { echo "missing required command: kubectl" >&2; exit 2; }
 [ -n "$recovery_target_time" ] || {
-  echo "RECOVERY_TARGET_TIME is required (RFC3339 UTC, for example 2026-08-20T06:15:00Z)" >&2
+  echo "RECOVERY_TARGET_TIME is required (RFC3339 UTC offset, for example 2026-08-20T06:15:00+00:00)" >&2
   exit 2
 }
 case "$recovery_target_time" in
-  [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;;
-  *) echo "RECOVERY_TARGET_TIME must use RFC3339 UTC YYYY-MM-DDTHH:MM:SSZ" >&2; exit 2 ;;
+  # CNPG writes this value verbatim to PostgreSQL's recovery_target_time.
+  # PostgreSQL 17 accepts an explicit UTC offset here, but not a trailing Z.
+  [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]+00:00) ;;
+  *) echo "RECOVERY_TARGET_TIME must use RFC3339 UTC YYYY-MM-DDTHH:MM:SS+00:00" >&2; exit 2 ;;
 esac
 
 source_phase="$(kubectl -n "$namespace" get cluster "$source_cluster" -o jsonpath='{.status.phase}')"
