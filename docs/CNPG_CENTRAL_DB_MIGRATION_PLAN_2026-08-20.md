@@ -2,7 +2,7 @@
 
 작성일: 2026-08-20  
 검토 반영일: 2026-08-20  
-상태: **계획만 작성 — 승인 전 코드, Helm 값, Devtron 배포, Secret 및 데이터 변경 금지**
+상태: **실행 중 — 2026-08-20에 Phase 0~2 사전 검증과 복구 리허설을 시작했으며, production cutover는 parity와 별도 go/no-go 이후에만 수행한다.**
 
 ## 1. 목적과 확정된 목표
 
@@ -41,6 +41,21 @@ final sync 없이 cutover할 수 있으므로, 중앙 DB용 runbook으로 교체
 
 `central-pg-data/monitube`가 비어 있더라도 임의로 drop/recreate하지 않는다. 누가 어떤 목적으로
 생성했는지, 현재 접속자가 없는지, 중앙 DB 운영자가 재사용을 승인했는지 먼저 확인한다.
+
+## 2.1 실행 기록 (2026-08-20 UTC)
+
+| 단계 | 결과 | 근거/다음 gate |
+| --- | --- | --- |
+| 중앙 target 재검증 | 완료 | `monitube` DB owner와 login role은 `monitube`, superuser/createdb/createrole/replication 모두 false, public table 0개였다. |
+| 중앙 접속 계약 | 완료 | `monitube-prod/monitube-central-db` namespace-local Secret을 생성했고, PgBouncer RW endpoint에 TLS로 접속 확인했다. Secret 값은 이 문서·Git·작업 로그에 기록하지 않는다. |
+| connection budget | 완료 | API + 3 workers의 현재 max pool은 각각 2, 합계 8이다. migration 1, reconnect reserve 8을 더해도 role limit 100 및 central max_connections 300 안이다. |
+| Source baseline | 완료 | preflight 기준 `38 collection_sources`, `2,260 channels`, `29,228 videos`, `11,142,774 comments`, migration 25, 약 34 GB. Cutover 직전에는 반드시 다시 측정한다. |
+| Off-node logical backup | 진행 중 | source writer를 멈추지 않은 rehearsal dump를 생성 중이다. 완료 후 local independent copy, SHA-256, `pg_restore --list`를 기록한다. |
+| Rehearsal restore | 대기 | source dump의 restore는 **별도 rehearsal database**에서 실행한다. 비어 있는 production target `monitube`는 final cutover 전까지 보존한다. |
+
+공유 central Cluster에는 다른 service database가 있으므로, 모든 기존 소비자의 egress/ingress를
+열거하기 전에는 partial NetworkPolicy를 적용하지 않는다. 하나의 정책으로 기존 central DB traffic을
+의도치 않게 차단하는 것보다, 별도 NetworkPolicy 변경으로 검토·배포하는 것이 안전하다.
 
 ## 3. 불변식과 금지 사항
 

@@ -36,9 +36,12 @@ kubectl -n "$source_namespace" exec "$source_pod" -- sh -ec '
   psql -X -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "
     SELECT current_setting(chr(115)||chr(101)||chr(114)||chr(118)||chr(101)||chr(114)||chr(95)||chr(118)||chr(101)||chr(114)||chr(115)||chr(105)||chr(111)||chr(110));
     SELECT (SELECT count(*) FROM collection_sources),
+           (SELECT count(*) FROM channels),
            (SELECT count(*) FROM videos),
            (SELECT count(*) FROM comments),
            (SELECT count(*) FROM monitube_schema_migrations),
+           (SELECT count(*) FROM nlp_documents),
+           (SELECT count(*) FROM sync_jobs),
            pg_size_pretty(pg_database_size(current_database()));
   "
 '

@@ -25,13 +25,30 @@ target_primary="$(kubectl -n "$target_namespace" get cluster "$target_cluster" \
   exit 1
 }
 
+# Keep the result compact and PII-free.  These are the large, product-critical
+# relations that make an accidental partial import immediately visible.  The
+# script is intentionally a gate, not an exhaustive checksum of 11M comments.
 metrics_sql='
   SELECT (SELECT count(*) FROM collection_sources),
+         (SELECT count(*) FROM channels),
          (SELECT count(*) FROM videos),
          (SELECT count(*) FROM comments),
          (SELECT count(*) FROM monitube_schema_migrations),
          (SELECT count(*) FROM nlp_documents),
-         (SELECT count(*) FROM sync_jobs);
+         (SELECT count(*) FROM nlp_document_terms),
+         (SELECT count(*) FROM nlp_daily_term_stats),
+         (SELECT count(*) FROM sync_jobs),
+         (SELECT count(*) FROM sync_checkpoints),
+         (SELECT count(*) FROM outbox_events);
+  SELECT count(*) FROM pg_indexes
+    WHERE schemaname = chr(112)||chr(117)||chr(98)||chr(108)||chr(105)||chr(99);
+  SELECT count(*) FROM pg_index WHERE NOT indisvalid OR NOT indisready;
+  SELECT count(*) FROM source_videos sv
+    LEFT JOIN collection_sources cs ON cs.id = sv.source_id
+    LEFT JOIN videos v ON v.id = sv.video_id
+    WHERE cs.id IS NULL OR v.id IS NULL;
+  SELECT count(*) FROM comments c LEFT JOIN videos v ON v.id = c.video_id
+    WHERE v.id IS NULL;
 '
 
 target_schema_present="$(kubectl -n "$target_namespace" exec "$target_primary" -c postgres -- \
@@ -55,4 +72,4 @@ if [ "$source_metrics" != "$target_metrics" ]; then
   exit 20
 fi
 
-echo 'Bounded parity baseline matches. This does not replace cutover-time fencing or full integrity checks.'
+echo 'Bounded parity baseline matches. Run it only after writer fencing for cutover parity.'
