@@ -316,3 +316,13 @@ promotion target으로 선택하게 해 canonical write를 잃을 위험이 있�
 
 이 중 하나라도 불명확하면 central은 canonical로 유지하되 fenced 상태에서 forward recovery 또는
 승인된 backup restore를 결정한다. legacy를 임의 writer로 열거나 endpoint를 단순 복귀하지 않는다.
+
+former primary의 clean-shutdown checkpoint LSN을 기록했다면, 새 primary가 3/3 Healthy로 승격한
+뒤 아래 read-only gate를 먼저 실행한다. `post_failover_gate=true`는 promotion/LSN/기본 referential
+integrity를 증명할 뿐이며, data owner가 former primary snapshot과의 bounded parity를 승인하기 전에는
+worker나 API write를 재개하지 않는다.
+
+```sh
+EXPECTED_RECOVERY_LSN=3E/A3000028 \
+  ./scripts/cnpg_central_failover_verify.sh
+```
