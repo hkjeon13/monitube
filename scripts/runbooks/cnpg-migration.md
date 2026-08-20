@@ -265,3 +265,10 @@ parity mismatch 또는 schema/ownership/index/sequence/constraint 불일치가 �
 - target의 physical backup과 Monitube logical backup을 새로 생성하고 restore 가능성을 확인한다.
 - source는 fenced/read-only로 보존한다.
 - data owner와 중앙 DB 운영자가 승인한 별도 change에서만 legacy resource를 정리한다.
+
+Canonical central database의 logical backup은 아래 도구로 생성한다. custom dump는 central
+PostgreSQL 컨테이너의 `pg_restore --list`로 TOC를 검증하고 checksum/manifest를 함께 기록한다.
+
+```sh
+./scripts/cnpg_central_logical_backup.sh /data/psyche/backups/monitube
+```
