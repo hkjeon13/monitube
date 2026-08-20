@@ -2,7 +2,7 @@
 
 작성일: 2026-08-20  
 검토 반영일: 2026-08-20  
-상태: **실행 중 — 2026-08-20에 Phase 0~2 사전 검증과 복구 리허설을 시작했으며, production cutover는 parity와 별도 go/no-go 이후에만 수행한다.**
+상태: **실행 중 — production cutover는 완료됐고 중앙 CNPG를 canonical writer로 유지한다. 2026-08-20 장애 뒤 Primary와 product path는 복구됐으나, 보조 인스턴스 WAL 추적 완료와 post-cutover physical backup 재검증·격리 restore는 아직 종료되지 않았다.**
 
 ## 1. 목적과 확정된 목표
 
@@ -392,6 +392,21 @@ PK 구간별 bounded query로 실행한다.
   recovery를 적용 중이므로 이 checkpoint를 포함한 recovery 종료·promotion을 확인하기 전에는
   failover 성공 또는 RPO 0을 주장하지 않는다. root filesystem 여유는 약 53 GiB로 관찰 중이며,
   canonical PVC·WAL·slot·legacy와 shared Cluster resource에는 용량 확보 목적의 삭제를 하지 않는다.
+- K3s DiskPressure가 해소된 뒤 former primary `central-pg-data-5`가 자체 PVC의 clean-shutdown
+  checkpoint `3E/A3000028`에서 직접 재기동되어 RW primary가 됐다. post-failover read-only gate는
+  current LSN `3E/A5145D40` 이상, migration/schema, invalid index 0, orphan source-video/comment
+  0, ungranted lock 0 및 bounded data metrics로 통과했다. 기존 unvalidated constraint 2개는
+  migration 이전부터의 기준선이며 새 오류로 취급하지 않는다.
+- revision 22에서 API read-only fence와 모든 worker 0을 복구했고, revision 23~25에서 collection,
+  NLP, analysis worker를 각각 1개씩 순차 재기동했다. collection job claim/lease, NLP 10건 batch
+  처리, analysis의 NLP-index 대기 경로를 확인했으며 worker는 모두 Ready 1/1, restart 0이다.
+  revision 26에서 API fence를 해제했고 public `/api/health`와 `/api/ready`는 200,
+  `database=ok`, `migrationCurrent=true`, `maintenance.readOnly=false`를 반환했다.
+- `central-pg-data`는 status상 3/3 Healthy이지만 6·7은 archive recovery 중이고 primary의
+  `pg_stat_replication`에는 아직 streaming session이 없다. 2026-08-20 11:54Z 관측 LSN은 primary
+  `3F/3E982000`, replica 6 `2F/2FE5400`, replica 7 `31/6BFE9818`이다. 따라서 service recovery는
+  완료됐어도 replica durability·RPO 0·physical backup/restore 재검증은 미완료로 유지하며, PVC/slot/
+  failed Backup CR/legacy data를 삭제하지 않는다.
 
 ## 11. Rollback 결정표
 
