@@ -53,6 +53,7 @@ final sync 없이 cutover할 수 있으므로, 중앙 DB용 runbook으로 교체
 | Off-node logical backup | 완료 | source writer를 멈추지 않은 custom dump(3,552,948,934 bytes)를 생성했다. `pg_restore --list`와 SHA-256 `38a77de63e457446dbd7fdb320a8f582a432eeb8a29ca41247fc8a591a072e2b`를 검증했고, node 밖의 independent copy도 동일 checksum을 확인했다. |
 | Rehearsal restore | 완료 (final parity 용도 아님) | source dump를 **별도 `monitube_rehearsal_20260820_045753` database**에 restore하고 `ANALYZE`까지 완료했다. 핵심 source snapshot count, migration 25, extension, index validity 및 orphan check가 일치했다. 다만 source writer를 멈추지 않은 snapshot이므로 이후의 NLP/queue 변화는 정상이며, final parity로 사용하면 안 된다. production target `monitube`는 public table 0개로 보존한다. |
 | Physical restore drill | 진행 중 | `central-pg-data` Barman backup을 독립 1-instance CNPG recovery Cluster로 복원했다. base backup 복원 후 WAL replay가 계속 진행 중이며, 완료/승격 후 읽기 검증과 실제 RTO를 기록한다. |
+| Legacy-safe chart path | 완료 | 기존 Helm release가 보존한 `database.useCnpg` values와 새 chart의 `database.mode`가 충돌하던 upgrade 문제를 수정했다. 동일 values의 `helm upgrade --dry-run` 및 `kubectl diff`는 object 변경 0건이었고, chart `0.2.4`를 release revision 9로 반영한 뒤 모든 Pod restart 0·Ready를 확인했다. logical replication opt-in은 여전히 false다. |
 
 공유 central Cluster에는 다른 service database가 있으므로, 모든 기존 소비자의 egress/ingress를
 열거하기 전에는 partial NetworkPolicy를 적용하지 않는다. 하나의 정책으로 기존 central DB traffic을
