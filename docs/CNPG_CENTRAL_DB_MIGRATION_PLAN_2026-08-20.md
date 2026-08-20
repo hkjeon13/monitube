@@ -366,7 +366,11 @@ PK 구간별 bounded query로 실행한다.
   변경으로 central Cluster의 6→7→5 순차 instance upgrade가 진행됐다. 이는 Monitube 변경이
   아니며, upgrade 중에는 physical backup/soak 성공을 판정하지 않는다. 관찰 시 API `/ready`의
   실제 database schema check는 200, pool request error 0이었고 worker에는 DB reconnect/fatal
-  error가 없었다. Cluster가 3/3 Healthy로 복귀한 뒤 다시 확인한다.
+  error가 없었다. 이후 backup CR은 대상 `central-pg-data-7`의 instance manager 재시작으로
+  terminal `failed`가 됐고, primary graceful restart 구간에는 `/ready`가 503으로 전이했다.
+  replica replay는 약 2시간 뒤처져 있어 이 시점의 강제 failover는 금지한다. Cluster가 3/3
+  Healthy와 실제 DB readiness로 복귀한 뒤에만 `spec.target=primary` physical backup을 새로
+  요청한다.
 
 ## 11. Rollback 결정표
 
