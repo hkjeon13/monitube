@@ -82,6 +82,11 @@ deployment values에 명시한다.
   target에서 application writer를 열기 전 publication과 subscription을 제거하거나 전환
   절차에 맞게 종료한다.
 
+`scripts/cnpg_central_logical_rehearsal.sh`는 이 격리 rehearsal만 자동화한다. 실행 전
+`wal_level=logical`을 read-only로 재확인하고, production target이 비어 있지 않거나 target
+rehearsal DB 이름이 안전 패턴에 맞지 않으면 실패한다. source writer/endpoint와 production
+target에는 application write를 하지 않는다.
+
 ## 3. Chart 준비와 렌더링 검증
 
 central mode는 새 CNPG Cluster를 만들지 않는다. `cnpg.enabled`는 false로 유지한다.
