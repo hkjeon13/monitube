@@ -1,0 +1,75 @@
+{{- if .Values.cnpg.enabled }}
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: {{ .Values.cnpg.name }}
+  labels:
+    {{- include "monitube.labels" (dict "root" . "component" "db") | nindent 4 }}
+spec:
+  instances: {{ .Values.cnpg.instances }}
+  imageName: {{ .Values.cnpg.image }}
+  {{- with .Values.pullSecrets }}
+  imagePullSecrets:
+    {{- range . }}
+    - name: {{ .name }}
+    {{- end }}
+  {{- end }}
+  primaryUpdateStrategy: unsupervised
+
+  # CNPG generates {{ .Values.cnpg.name }}-app with a random password and a
+  # ready-made `uri` key. Nothing here handles the credential directly.
+  enableSuperuserAccess: false
+
+  bootstrap:
+    initdb:
+      database: {{ .Values.legacyPostgres.database }}
+      owner: {{ .Values.legacyPostgres.user }}
+      encoding: UTF8
+      {{- if .Values.cnpg.importFromLegacy }}
+      import:
+        type: microservice
+        databases:
+          - {{ .Values.legacyPostgres.database }}
+        source:
+          externalCluster: monitube-legacy
+      {{- end }}
+
+  {{- if .Values.cnpg.importFromLegacy }}
+  externalClusters:
+    # The postgres:16-alpine Service in this namespace. Reachable only while
+    # legacyPostgres.enabled is true.
+    - name: monitube-legacy
+      connectionParameters:
+        host: postgres
+        port: "5432"
+        user: {{ .Values.legacyPostgres.user }}
+        dbname: {{ .Values.legacyPostgres.database }}
+        sslmode: disable
+      password:
+        name: {{ .Values.secrets.database }}
+        key: POSTGRES_PASSWORD
+  {{- end }}
+
+  postgresql:
+    shared_preload_libraries:
+      - pg_stat_statements
+    parameters:
+      {{- toYaml .Values.cnpg.parameters | nindent 6 }}
+
+  # Mirrors the Compose `shm_size: 1gb` setting.
+  ephemeralVolumesSizeLimit:
+    shm: 1Gi
+
+  resources:
+    {{- toYaml .Values.cnpg.resources | nindent 4 }}
+
+  storage:
+    storageClass: {{ .Values.cnpg.storageClass }}
+    size: {{ .Values.cnpg.size }}
+    resizeInUseVolumes: true
+  {{- if .Values.cnpg.walStorage.enabled }}
+  walStorage:
+    storageClass: {{ .Values.cnpg.walStorage.storageClass }}
+    size: {{ .Values.cnpg.walStorage.size }}
+  {{- end }}
+{{- end }}

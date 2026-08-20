@@ -1,0 +1,89 @@
+{{/*
+Service names are bare (api, postgres, redis, tokenizer) because DATABASE_URL,
+TOKENIZER_BASE_URL and REDIS_URL in the runtime secret resolve them by those
+names. Renaming any of these breaks the running release.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "monitube.selectorLabels" (dict "root" . "component" "api") | nindent 4 }}
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-rust
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "monitube.selectorLabels" (dict "root" . "component" "api") | nindent 4 }}
+  ports:
+    - name: http
+      port: 8001
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tokenizer
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "monitube.selectorLabels" (dict "root" . "component" "tokenizer") | nindent 4 }}
+  ports:
+    - name: http
+      port: 8010
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "monitube.selectorLabels" (dict "root" . "component" "web") | nindent 4 }}
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+      {{- if eq .Values.service.type "NodePort" }}
+      nodePort: {{ .Values.service.nodePort }}
+      {{- end }}
+{{- if .Values.redis.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "monitube.selectorLabels" (dict "root" . "component" "redis") | nindent 4 }}
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+{{- end }}
+{{- if .Values.legacyPostgres.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "monitube.selectorLabels" (dict "root" . "component" "postgres") | nindent 4 }}
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+{{- end }}

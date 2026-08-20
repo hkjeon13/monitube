@@ -1,0 +1,126 @@
+# Values reproduce what is running in monitube-prod today, read from the live
+# cluster on 2026-08-20. Change deliberately: this chart is the source of truth
+# for a release whose original tarball is no longer in the chart repository.
+
+nameOverride: monitube
+
+images:
+  web: {repository: 192.168.219.103:30500/monitube/web, tag: compose-e87fa8b43341}
+  api: {repository: 192.168.219.103:30500/monitube/api-rust, tag: compose-6c1b1e36b735}
+  tokenizer: {repository: 192.168.219.103:30500/monitube/tokenizer, tag: compose-ab1f738008a7}
+  collectionWorker: {repository: 192.168.219.103:30500/monitube/collection-worker-rust, tag: compose-8bee727e0691}
+  nlpWorker: {repository: 192.168.219.103:30500/monitube/nlp-worker-rust, tag: compose-87d06f6b43aa}
+  analysisWorker: {repository: 192.168.219.103:30500/monitube/analysis-worker-rust, tag: compose-6aaf42ec3e5a}
+  migrate: {repository: 192.168.219.103:30500/monitube/migrate, tag: latest}
+  postgres: {repository: postgres, tag: 16-alpine}
+  redis: {repository: redis, tag: 7-alpine}
+
+pullPolicy: IfNotPresent
+pullSecrets:
+  - name: devtron-local-registry-pull
+
+secrets:
+  # Carries DATABASE_URL and every other runtime variable. The chart overrides
+  # DATABASE_URL explicitly once CNPG is in use — see database.useCnpg.
+  runtime: monitube-runtime-env
+  # POSTGRES_DB / POSTGRES_USER / POSTGRES_PASSWORD for the legacy StatefulSet.
+  # CNPG also reads POSTGRES_PASSWORD from it to authenticate the import.
+  database: monitube-postgres-auth
+
+replicas:
+  web: 1
+  api: 1
+  tokenizer: 1
+  collectionWorker: 1
+  nlpWorker: 1
+  analysisWorker: 1
+
+service:
+  type: NodePort
+  nodePort: 30086
+
+# The running release binds these on the node loopback. Nothing in the chart
+# depends on them, but they are reproduced so an upgrade does not silently
+# remove a binding something on the node may still use.
+hostPorts:
+  enabled: true
+  hostIP: 127.0.0.1
+  web: 13000
+  api: 18000
+
+database:
+  # false -> apps keep DATABASE_URL from the runtime secret (legacy postgres).
+  # true  -> apps read the URI from the CNPG-generated secret instead.
+  # This is the cutover switch. Flip it only after the import is verified.
+  useCnpg: false
+
+# The postgres:16-alpine StatefulSet that currently holds the data.
+# Keep it enabled through the migration. It is the rollback path, and CNPG
+# imports from it. Disable only once the CNPG cluster is verified and soaked.
+legacyPostgres:
+  enabled: true
+  existingClaim: monitube-postgres
+  storageClass: local-path
+  size: 100Gi
+  # Verify against the live secret before trusting these for the CNPG import:
+  #   kubectl -n monitube-prod get secret monitube-postgres-auth \
+  #     -o jsonpath='{.data.POSTGRES_USER}' | base64 -d
+  user: monitube
+  database: monitube
+  resources:
+    requests: {cpu: 500m, memory: 1Gi}
+    limits: {cpu: "4", memory: 8Gi}
+
+cnpg:
+  enabled: false
+  name: monitube-db
+  # Single-node k3s cluster (mobichat-k3s-1). More than one instance buys no
+  # availability here and doubles local disk use.
+  instances: 1
+  # House image, matching central-pg-data and ai-assistant-logs. It is
+  # PostgreSQL 17 while the legacy StatefulSet is 16 — the import handles the
+  # major-version jump, but see the runbook before relying on it.
+  image: 192.168.219.103:30500/cnpg-pg17-pgvector:17.11-0.8.2
+  storageClass: database-local-retain
+  size: 100Gi
+  walStorage:
+    enabled: true
+    storageClass: database-local-retain
+    size: 32Gi
+  resources:
+    requests: {cpu: 500m, memory: 1Gi}
+    limits: {cpu: "4", memory: 8Gi}
+  # Runs pg_dump/pg_restore from the legacy service at first boot. Set to false
+  # only to provision an empty cluster.
+  importFromLegacy: true
+  parameters:
+    max_connections: "60"
+    shared_buffers: 2GB
+    effective_cache_size: 6GB
+    work_mem: 8MB
+    maintenance_work_mem: 512MB
+    autovacuum_work_mem: 256MB
+    random_page_cost: "1.1"
+    effective_io_concurrency: "200"
+    max_wal_size: 4GB
+    checkpoint_completion_target: "0.9"
+    wal_compression: "on"
+    track_io_timing: "on"
+    idle_in_transaction_session_timeout: 30s
+    log_min_duration_statement: 500ms
+    log_temp_files: 64MB
+    # Keep both at 0 so query parameters never reach the logs.
+    log_parameter_max_length: "0"
+    log_parameter_max_length_on_error: "0"
+
+redis:
+  enabled: true
+  maxmemory: 512mb
+  maxmemoryPolicy: allkeys-lru
+
+# Applies database/migrations through scripts/apply_migrations.sh as a Helm
+# hook. Disabled to match the running release; enable once the migrate image
+# is confirmed to carry migration 025.
+migration:
+  enabled: false
+  backoffLimit: 1

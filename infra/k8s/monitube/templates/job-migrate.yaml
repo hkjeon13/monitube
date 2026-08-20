@@ -1,0 +1,59 @@
+{{- if .Values.migration.enabled }}
+{{/*
+Applies database/migrations through scripts/apply_migrations.sh, both baked
+into the migrate image. Runs after the database is up, so it is a post hook
+rather than a pre hook: on a first install the CNPG cluster does not exist yet
+when pre-install hooks fire.
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "monitube.fullname" (dict "root" . "component" "migrate") }}
+  labels:
+    {{- include "monitube.labels" (dict "root" . "component" "migrate") | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: {{ .Values.migration.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "monitube.selectorLabels" (dict "root" . "component" "migrate") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      {{- include "monitube.imagePullSecrets" . | nindent 6 }}
+      containers:
+        - name: migrate
+          image: "{{ .Values.images.migrate.repository }}:{{ .Values.images.migrate.tag }}"
+          imagePullPolicy: {{ .Values.pullPolicy }}
+          env:
+            {{- if .Values.database.useCnpg }}
+            {{- $appSecret := printf "%s-app" .Values.cnpg.name }}
+            - name: POSTGRES_HOST
+              valueFrom: {secretKeyRef: {name: {{ $appSecret }}, key: host}}
+            - name: POSTGRES_PORT
+              valueFrom: {secretKeyRef: {name: {{ $appSecret }}, key: port}}
+            - name: POSTGRES_DB
+              valueFrom: {secretKeyRef: {name: {{ $appSecret }}, key: dbname}}
+            - name: POSTGRES_USER
+              valueFrom: {secretKeyRef: {name: {{ $appSecret }}, key: username}}
+            - name: POSTGRES_PASSWORD
+              valueFrom: {secretKeyRef: {name: {{ $appSecret }}, key: password}}
+            {{- else }}
+            - name: POSTGRES_HOST
+              value: postgres
+            - name: POSTGRES_PORT
+              value: "5432"
+            - name: POSTGRES_DB
+              valueFrom: {secretKeyRef: {name: {{ .Values.secrets.database }}, key: POSTGRES_DB}}
+            - name: POSTGRES_USER
+              valueFrom: {secretKeyRef: {name: {{ .Values.secrets.database }}, key: POSTGRES_USER}}
+            - name: POSTGRES_PASSWORD
+              valueFrom: {secretKeyRef: {name: {{ .Values.secrets.database }}, key: POSTGRES_PASSWORD}}
+            {{- end }}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+{{- end }}

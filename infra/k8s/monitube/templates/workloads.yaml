@@ -1,0 +1,235 @@
+{{- $root := . -}}
+{{- $img := .Values.images -}}
+{{/*
+Worker components share everything but their image and replica count.
+*/}}
+{{- $workers := list
+  (dict "component" "collection-worker" "image" $img.collectionWorker "replicas" .Values.replicas.collectionWorker)
+  (dict "component" "nlp-worker"        "image" $img.nlpWorker        "replicas" .Values.replicas.nlpWorker)
+  (dict "component" "analysis-worker"   "image" $img.analysisWorker   "replicas" .Values.replicas.analysisWorker)
+-}}
+{{- range $w := $workers }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "monitube.fullname" (dict "root" $root "component" $w.component) }}
+  labels:
+    {{- include "monitube.labels" (dict "root" $root "component" $w.component) | nindent 4 }}
+spec:
+  replicas: {{ $w.replicas }}
+  # Workers hold row leases. Never run two generations at once.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "monitube.selectorLabels" (dict "root" $root "component" $w.component) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "monitube.selectorLabels" (dict "root" $root "component" $w.component) | nindent 8 }}
+    spec:
+      {{- include "monitube.imagePullSecrets" $root | nindent 6 }}
+      # Long enough for an in-flight lease to be released cleanly.
+      terminationGracePeriodSeconds: 180
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: {{ $w.component }}
+          image: "{{ $w.image.repository }}:{{ $w.image.tag }}"
+          imagePullPolicy: {{ $root.Values.pullPolicy }}
+          envFrom:
+            - secretRef:
+                name: {{ $root.Values.secrets.runtime }}
+          env:
+            - name: TOKENIZER_BASE_URL
+              value: http://tokenizer:8010
+            - name: REDIS_URL
+              value: redis://redis:6379/0
+            {{- include "monitube.databaseUrlEnv" $root | nindent 12 }}
+          livenessProbe:
+            exec:
+              command: ["sh", "-ec", "kill -0 1"]
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "monitube.fullname" (dict "root" . "component" "api") }}
+  labels:
+    {{- include "monitube.labels" (dict "root" . "component" "api") | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas.api }}
+  selector:
+    matchLabels:
+      {{- include "monitube.selectorLabels" (dict "root" . "component" "api") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "monitube.selectorLabels" (dict "root" . "component" "api") | nindent 8 }}
+    spec:
+      {{- include "monitube.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: "{{ $img.api.repository }}:{{ $img.api.tag }}"
+          imagePullPolicy: {{ .Values.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8001
+              {{- if .Values.hostPorts.enabled }}
+              hostIP: {{ .Values.hostPorts.hostIP }}
+              hostPort: {{ .Values.hostPorts.api }}
+              {{- end }}
+          envFrom:
+            - secretRef:
+                name: {{ .Values.secrets.runtime }}
+          env:
+            - name: RUST_API_HOST
+              value: "0.0.0.0"
+            - name: RUST_API_PORT
+              value: "8001"
+            - name: TOKENIZER_BASE_URL
+              value: http://tokenizer:8010
+            - name: REDIS_URL
+              value: redis://redis:6379/0
+            {{- include "monitube.databaseUrlEnv" . | nindent 12 }}
+          readinessProbe:
+            httpGet: {path: /ready, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 30
+          resources:
+            requests: {cpu: 250m, memory: 256Mi}
+            limits: {cpu: "2", memory: 2Gi}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "monitube.fullname" (dict "root" . "component" "web") }}
+  labels:
+    {{- include "monitube.labels" (dict "root" . "component" "web") | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas.web }}
+  selector:
+    matchLabels:
+      {{- include "monitube.selectorLabels" (dict "root" . "component" "web") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "monitube.selectorLabels" (dict "root" . "component" "web") | nindent 8 }}
+    spec:
+      {{- include "monitube.imagePullSecrets" . | nindent 6 }}
+      containers:
+        - name: web
+          image: "{{ $img.web.repository }}:{{ $img.web.tag }}"
+          imagePullPolicy: {{ .Values.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 3000
+              {{- if .Values.hostPorts.enabled }}
+              hostIP: {{ .Values.hostPorts.hostIP }}
+              hostPort: {{ .Values.hostPorts.web }}
+              {{- end }}
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: NEXT_TELEMETRY_DISABLED
+              value: "1"
+            - name: NEXT_PUBLIC_API_BASE_URL
+              value: /api
+            - name: MONITUBE_WEB_API_PROXY_TARGET
+              value: http://api:8000
+          readinessProbe:
+            httpGet: {path: /, port: http}
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "1", memory: 1Gi}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "monitube.fullname" (dict "root" . "component" "tokenizer") }}
+  labels:
+    {{- include "monitube.labels" (dict "root" . "component" "tokenizer") | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas.tokenizer }}
+  selector:
+    matchLabels:
+      {{- include "monitube.selectorLabels" (dict "root" . "component" "tokenizer") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "monitube.selectorLabels" (dict "root" . "component" "tokenizer") | nindent 8 }}
+    spec:
+      {{- include "monitube.imagePullSecrets" . | nindent 6 }}
+      containers:
+        - name: tokenizer
+          image: "{{ $img.tokenizer.repository }}:{{ $img.tokenizer.tag }}"
+          imagePullPolicy: {{ .Values.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8010
+          envFrom:
+            - secretRef:
+                name: {{ .Values.secrets.runtime }}
+          readinessProbe:
+            httpGet: {path: /ready, port: http}
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+            limits: {cpu: "1", memory: 1Gi}
+{{- if .Values.redis.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "monitube.fullname" (dict "root" . "component" "redis") }}
+  labels:
+    {{- include "monitube.labels" (dict "root" . "component" "redis") | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "monitube.selectorLabels" (dict "root" . "component" "redis") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "monitube.selectorLabels" (dict "root" . "component" "redis") | nindent 8 }}
+    spec:
+      containers:
+        - name: redis
+          image: "{{ $img.redis.repository }}:{{ $img.redis.tag }}"
+          imagePullPolicy: {{ .Values.pullPolicy }}
+          # Cache only. No persistence, so no AOF competing with PostgreSQL.
+          args:
+            - redis-server
+            - --appendonly
+            - "no"
+            - --maxmemory
+            - {{ .Values.redis.maxmemory | quote }}
+            - --maxmemory-policy
+            - {{ .Values.redis.maxmemoryPolicy | quote }}
+          ports:
+            - name: redis
+              containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 25m, memory: 64Mi}
+            limits: {cpu: "1", memory: 512Mi}
+{{- end }}

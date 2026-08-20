@@ -1,0 +1,59 @@
+{{- if .Values.legacyPostgres.enabled }}
+{{/*
+The postgres:16-alpine StatefulSet that holds the data today.
+
+It stays in the chart through the CNPG migration for two reasons: CNPG imports
+from it, and it is the rollback path if the import or cutover goes wrong. Set
+legacyPostgres.enabled to false only after the CNPG cluster has soaked.
+
+Its PVC uses the `local-path` StorageClass, which no longer exists in this
+cluster. The claim is already Bound so it keeps working, but it cannot be
+recreated — do not delete it.
+*/}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "monitube.fullname" (dict "root" . "component" "postgres") }}
+  labels:
+    {{- include "monitube.labels" (dict "root" . "component" "postgres") | nindent 4 }}
+spec:
+  replicas: 1
+  serviceName: postgres
+  selector:
+    matchLabels:
+      {{- include "monitube.selectorLabels" (dict "root" . "component" "postgres") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "monitube.selectorLabels" (dict "root" . "component" "postgres") | nindent 8 }}
+    spec:
+      containers:
+        - name: postgres
+          image: "{{ .Values.images.postgres.repository }}:{{ .Values.images.postgres.tag }}"
+          imagePullPolicy: {{ .Values.pullPolicy }}
+          args:
+            - postgres
+            - -c
+            - shared_preload_libraries=pg_stat_statements
+            - -c
+            - max_connections=60
+          ports:
+            - name: postgres
+              containerPort: 5432
+          envFrom:
+            - secretRef:
+                name: {{ .Values.secrets.database }}
+          readinessProbe:
+            exec:
+              command: ["sh", "-ec", 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"']
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.legacyPostgres.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Values.legacyPostgres.existingClaim }}
+{{- end }}
