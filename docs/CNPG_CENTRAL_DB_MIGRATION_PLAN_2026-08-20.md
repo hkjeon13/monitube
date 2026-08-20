@@ -329,6 +329,30 @@ PK 구간별 bounded query로 실행한다.
 3. 합의된 보존 기간 후 PV/PVC와 Docker volume 삭제 승인 요청
 4. 삭제 직전 target backup restore 재확인
 
+### 10.1 Execution record — 2026-08-20
+
+- final fence는 Helm revision 14에서 API mutation `503 maintenance_read_only`, worker
+  replica 0, 60초 stable quiesce로 증명했다. final custom dump는
+  `monitube-final-20260820T090420Z.pg_dump` (3,559,561,174 bytes,
+  SHA-256 `b5a09936de174bde96d478b8b5c7ceb85ad8f383aa868e2c587855ae0e85d97c`)이며
+  TOC, checksum, manifest를 검증했다.
+- guarded central restore는 60초 quiesce를 재확인해 `monitube`에 복원·index build·ANALYZE를
+  완료했다. fenced source와 target bounded parity는
+  `38|2260|29228|11144335|25|11153732|8063709|22191296|449225|966174|0`으로 일치했고,
+  invalid index는 0이었다.
+- revision 15에서 fenced API endpoint를 central로 전환하고 `/health`/`/ready` 200을 확인했다.
+  revision 16에서 API fence를 해제하고 collection worker를 기동했으며, **first target write**는
+  `2026-08-20T09:36:23Z` central collection job claim으로 기록됐다. 이 시점부터 central은
+  canonical이고 legacy endpoint의 단순 rollback은 금지된다. revision 17/18에서 NLP/analysis
+  worker를 순차 기동했고 API·세 worker는 1/1 Ready, restart 0, legacy source active app client 0이다.
+- post-cutover logical backup `monitube-central-20260820T094445Z.pg_dump`는
+  3,560,228,285 bytes, SHA-256
+  `5fff62e201498e2394db5a5b10d06d018d2642ab145d4fd401af531dc0097b56`이며 TOC/manifest를
+  검증했다. physical `central-pg-data-post-cutover-20260820093953`은 Barman plugin에서
+  진행 중이다. central node free가 약 85GiB여서 23GiB logical backup의 3-replica isolated
+  full restore는 지금 병행하지 않는다. live final restore 성공과 새 TOC verification을 보존하고,
+  별도 capacity window에서 post-cutover isolated restore drill을 수행한다.
+
 ## 11. Rollback 결정표
 
 | 상태 | 허용되는 대응 |
