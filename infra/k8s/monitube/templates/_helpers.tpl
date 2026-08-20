@@ -26,17 +26,29 @@ imagePullSecrets:
 {{- end -}}
 
 {{/*
+Releases installed before chart 0.2.1 retain `database.useCnpg` but have no
+`database.mode` when Helm uses --reuse-values. Interpret that missing value as
+legacy, so a source-preserving upgrade cannot fail or silently select central.
+*/}}
+{{- define "monitube.databaseMode" -}}
+{{- $database := default (dict) .Values.database -}}
+{{- default "legacy" (get $database "mode") -}}
+{{- end -}}
+
+{{/*
 DATABASE_URL as an explicit env entry. Kubernetes gives an explicit `env` key
 precedence over the legacy value arriving through envFrom, so switching
 database.mode=central overrides the legacy value without
 anyone having to edit that secret by hand.
 */}}
 {{- define "monitube.databaseUrlEnv" -}}
-{{- if eq .Values.database.mode "central" }}
+{{- $mode := include "monitube.databaseMode" . | trim -}}
+{{- if eq $mode "central" }}
+{{- $central := default (dict) .Values.database.central -}}
 - name: DATABASE_URL
   valueFrom:
     secretKeyRef:
-      name: {{ .Values.database.central.secretName }}
-      key: {{ .Values.database.central.uriKey }}
+      name: {{ default "monitube-central-db" (get $central "secretName") }}
+      key: {{ default "uri" (get $central "uriKey") }}
 {{- end }}
 {{- end -}}

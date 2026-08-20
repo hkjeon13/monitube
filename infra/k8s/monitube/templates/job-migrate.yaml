@@ -29,18 +29,20 @@ spec:
           image: "{{ .Values.images.migrate.repository }}:{{ .Values.images.migrate.tag }}"
           imagePullPolicy: {{ .Values.pullPolicy }}
           env:
-            {{- if eq .Values.database.mode "central" }}
-            {{- $appSecret := .Values.database.central.secretName }}
+            {{- $mode := include "monitube.databaseMode" . | trim }}
+            {{- if eq $mode "central" }}
+            {{- $central := default (dict) .Values.database.central }}
+            {{- $appSecret := default "monitube-central-db" (get $central "secretName") }}
             - name: POSTGRES_HOST
-              valueFrom: {secretKeyRef: {name: {{ $appSecret }}, key: {{ .Values.database.central.hostKey }}}}
+              valueFrom: {secretKeyRef: {name: {{ $appSecret }}, key: {{ default "host" (get $central "hostKey") }}}}
             - name: POSTGRES_PORT
-              valueFrom: {secretKeyRef: {name: {{ $appSecret }}, key: {{ .Values.database.central.portKey }}}}
+              valueFrom: {secretKeyRef: {name: {{ $appSecret }}, key: {{ default "port" (get $central "portKey") }}}}
             - name: POSTGRES_DB
-              valueFrom: {secretKeyRef: {name: {{ $appSecret }}, key: {{ .Values.database.central.databaseKey }}}}
+              valueFrom: {secretKeyRef: {name: {{ $appSecret }}, key: {{ default "dbname" (get $central "databaseKey") }}}}
             - name: POSTGRES_USER
-              valueFrom: {secretKeyRef: {name: {{ $appSecret }}, key: {{ .Values.database.central.usernameKey }}}}
+              valueFrom: {secretKeyRef: {name: {{ $appSecret }}, key: {{ default "username" (get $central "usernameKey") }}}}
             - name: POSTGRES_PASSWORD
-              valueFrom: {secretKeyRef: {name: {{ $appSecret }}, key: {{ .Values.database.central.passwordKey }}}}
+              valueFrom: {secretKeyRef: {name: {{ $appSecret }}, key: {{ default "password" (get $central "passwordKey") }}}}
             {{- else }}
             - name: POSTGRES_HOST
               value: postgres

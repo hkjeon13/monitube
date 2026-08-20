@@ -1,22 +1,25 @@
-{{- if and (ne .Values.database.mode "legacy") (ne .Values.database.mode "central") }}
+{{- $mode := include "monitube.databaseMode" . | trim }}
+{{- $central := default (dict) .Values.database.central }}
+{{- $logicalReplication := default (dict) .Values.legacyPostgres.logicalReplication }}
+{{- if and (ne $mode "legacy") (ne $mode "central") }}
 {{- fail "database.mode must be legacy or central" }}
 {{- end }}
-{{- if eq .Values.database.mode "central" }}
-{{- if not .Values.database.central.secretName }}
+{{- if eq $mode "central" }}
+{{- if not (default "monitube-central-db" (get $central "secretName")) }}
 {{- fail "database.central.secretName is required when database.mode=central" }}
 {{- end }}
-{{- if not .Values.database.central.uriKey }}
+{{- if not (default "uri" (get $central "uriKey")) }}
 {{- fail "database.central.uriKey is required when database.mode=central" }}
 {{- end }}
 {{- end }}
 {{- if .Values.cnpg.enabled }}
 {{- fail "cnpg.enabled creates the retired dedicated-Cluster path; use database.mode=central with an approved central Secret" }}
 {{- end }}
-{{- if .Values.legacyPostgres.logicalReplication.enabled }}
-{{- if lt (int .Values.legacyPostgres.logicalReplication.maxReplicationSlots) 1 }}
+{{- if (default false (get $logicalReplication "enabled")) }}
+{{- if lt (int (default 10 (get $logicalReplication "maxReplicationSlots"))) 1 }}
 {{- fail "legacyPostgres.logicalReplication.maxReplicationSlots must be at least 1 when enabled" }}
 {{- end }}
-{{- if lt (int .Values.legacyPostgres.logicalReplication.maxWalSenders) 1 }}
+{{- if lt (int (default 10 (get $logicalReplication "maxWalSenders"))) 1 }}
 {{- fail "legacyPostgres.logicalReplication.maxWalSenders must be at least 1 when enabled" }}
 {{- end }}
 {{- end }}

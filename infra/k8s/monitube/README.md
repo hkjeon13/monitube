@@ -39,6 +39,11 @@ The central migration uses one explicit application switch. See
 The defaults describe what is running now, so a deploy with no value changes is
 a no-op against the live cluster.
 
+The older release persisted `database.useCnpg` rather than `database.mode`.
+When Helm upgrades with `--reuse-values`, an absent `database.mode` is treated
+as `legacy` explicitly; it never selects central by accident. Set
+`database.mode=central` only in the approved cutover release.
+
 Central mode adds an explicit `DATABASE_URL` sourced from a Monitube-specific
 Secret in the **same namespace** as the workloads. Kubernetes gives an explicit
 `env` entry precedence over the same key arriving through `envFrom`, so the
