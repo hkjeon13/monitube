@@ -101,6 +101,10 @@ legacyPostgres:
     enabled: false
     maxReplicationSlots: 10
     maxWalSenders: 10
+    # A full table copy can keep the subscriber busy reading/writing data for
+    # longer than PostgreSQL's 60s default. This applies only while logical
+    # replication is explicitly enabled for the rehearsal/cutover window.
+    walSenderTimeout: 10min
 
 cnpg:
   # Kept only for the older dedicated-Cluster chart path. It is not the

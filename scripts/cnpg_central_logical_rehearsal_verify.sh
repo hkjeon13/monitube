@@ -41,7 +41,7 @@ pending="$(kubectl -n "$target_namespace" exec "$target_primary" -c postgres -- 
   psql -X -U postgres -d "$rehearsal_database" -Atc "SELECT count(*) FROM pg_subscription_rel WHERE srsubid = $subscription_oid AND srsubstate <> 'r'")"
 [ "$pending" = "0" ] || {
   relation_states="$(kubectl -n "$target_namespace" exec "$target_primary" -c postgres -- \
-    psql -X -U postgres -d "$rehearsal_database" -Atc "SELECT srsubstate || '|' || count(*) FROM pg_subscription_rel WHERE srsubid = $subscription_oid GROUP BY srsubstate ORDER BY srsubstate")"
+    psql -X -U postgres -d "$rehearsal_database" -Atc "SELECT srsubstate::text || '|' || count(*) FROM pg_subscription_rel WHERE srsubid = $subscription_oid GROUP BY srsubstate ORDER BY srsubstate")"
   echo "initial copy is incomplete: pending_relations=$pending states=${relation_states}" >&2
   exit 1
 }

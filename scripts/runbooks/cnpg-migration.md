@@ -98,6 +98,9 @@ database inventory와 관측 RTO를 기록한다. 이 명령은 읽기 전용이
   subscription을 사용한다. target이 source에 연결할 때는 legacy Service DNS
   `postgres.monitube-prod.svc.cluster.local`을 사용하며, StatefulSet Pod 이름을 hostname으로
   사용하지 않는다. production `monitube` DB에 rehearsal publication/subscription을 만들지 않는다.
+- full table copy 중 target I/O 때문에 source feedback이 60초 이상 멈출 수 있으므로,
+  logical replication opt-in에는 `wal_sender_timeout=10min`을 함께 적용한다. 이 값은
+  rehearsal/cutover 창에만 유지하며 정상 legacy operation에는 적용하지 않는다.
 - schema/DDL, extension, sequence는 logical replication으로 자동 동기화되지 않는다. schema를
   먼저 준비하고, final writer fence 후 sequence를 재동기화한다.
 - initial copy와 lag 0, replication slot WAL retention, subscriber worker 여유를 기록한다.
