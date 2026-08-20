@@ -117,6 +117,17 @@ initial copy가 모두 Ready가 된 뒤에는 아래 verifier로 subscription �
 source/target count가 즉시 동일하다고 가정하지 않고, lag와 동일 시점 bounded parity를 함께
 판정한다.
 
+Initial copy 중 temporary table-sync slot이 source WAL을 보존하므로 source volume 여유를
+지속 감시한다. 64GiB 아래로 내려가면 아래 safeguard는 **이 timestamp의 rehearsal database,
+subscription/publication, temporary role와 slot만** cleanup하고 production central `monitube`와
+application endpoint는 건드리지 않는다. 실행에는 명시적 opt-in이 필요하다.
+
+```sh
+SOURCE_MIN_FREE_BYTES=$((64 * 1024 * 1024 * 1024)) \
+  ./scripts/cnpg_central_logical_rehearsal_safeguard.sh \
+  monitube_logical_rehearsal_YYYYMMDD_HHMMSS --confirm-cleanup-on-low-space
+```
+
 ```sh
 ./scripts/cnpg_central_logical_rehearsal_verify.sh \
   monitube_logical_rehearsal_YYYYMMDD_HHMMSS
