@@ -407,6 +407,23 @@ PK 구간별 bounded query로 실행한다.
   `3F/3E982000`, replica 6 `2F/2FE5400`, replica 7 `31/6BFE9818`이다. 따라서 service recovery는
   완료됐어도 replica durability·RPO 0·physical backup/restore 재검증은 미완료로 유지하며, PVC/slot/
   failed Backup CR/legacy data를 삭제하지 않는다.
+- `2026-08-20T13:39Z`에 CNPG controller가 archive recovery를 계속하던 replica 7을 자동 중단하고
+  `central-pg-data-8`을 새 `pg_basebackup` join instance로 생성했다. 이는 수동 deletion, failover,
+  slot/PVC 정리가 아니며 primary 5는 RW로 유지됐다. 8은 약 59.4 GiB의 base backup을 완료해
+  `2026-08-20T13:54:53Z` primary와 lag 0의 streaming replica가 됐다. nodefs free는 기존 stale
+  replica 종료 후 약 124 GiB에서 324 GiB로 회복했다.
+- `2026-08-20T13:55Z`에 controller가 같은 방식으로 archive-replay replica 6을 중단하고
+  `central-pg-data-9` join instance를 생성했다. active PVC 목록은 primary 5, 새 replica 8/9 및
+  restore rehearsal만 표시하며, 6·7은 controller replacement 이후 active claim에서 사라졌다.
+  former primary 5 PVC는 Bound 상태로 유지된다. 이 시점에는 `Primary 5 + streaming 8 + joining 9`만
+  존재하므로 3/3, two-replica durability, RPO 0을 주장하지 않는다.
+- `central-pg-data-post-cutover-recovery-20260820t1314z` Backup CR은 13:14Z부터 `started`이며
+  terminal status, `startedAt`, `stoppedAt`, `backupId`가 없다. incident 보호 구간에서는 retry,
+  cancel, delete를 하지 않고 관찰만 한다. 새 physical backup 성공은 two-replica streaming과
+  read-only integrity gate 이후에만 별도 증거로 판정한다.
+- post-failover verifier는 commit `596f0e9`에서 fixed instance 번호 대신 `streaming replica 2개`,
+  `active physical slot 2개`, max replay lag 256 MiB를 강제하도록 보정했다. controller의 replacement
+  instance 번호(6/7 → 8/9)에 의존하지 않으며, 해당 조건 미충족 시 gate는 실패한다.
 
 ## 11. Rollback 결정표
 
